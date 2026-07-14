@@ -78,7 +78,19 @@ pub fn parse(text: &str) -> Result<Vec<Event>> {
                 f.len()
             )));
         }
+        let event_time: i64 = f[2].parse().map_err(|_| {
+            PrismError::Invalid(format!(
+                "line {}: event_time `{}` is not an integer",
+                i + 1,
+                f[2]
+            ))
+        })?;
         out.push(Event {
+            observed_time: event_time,
+            trace_id: String::new(),
+            span_id: String::new(),
+            attributes: Default::default(),
+            idempotency_key: None,
             event_id: unescape(f[0]),
             tenant_id: unescape(f[1]),
             event_time: f[2].parse().map_err(|_| {
@@ -115,6 +127,11 @@ mod tests {
     #[test]
     fn round_trips_including_tabs_and_newlines_in_the_body() {
         let events = vec![Event {
+            observed_time: 123,
+            trace_id: String::new(),
+            span_id: String::new(),
+            attributes: Default::default(),
+            idempotency_key: None,
             event_id: "e1".into(),
             tenant_id: "t1".into(),
             event_time: 123,

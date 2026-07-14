@@ -72,9 +72,10 @@ impl Engine {
 
         // --- 1. admission ---
         for e in events {
-            if let Err(err) = e.validate() {
+            if let Err((reason, detail)) = e.validate() {
                 dead.push(DeadLetter {
-                    reason: err.to_string(),
+                    reason: reason.to_string(),
+                    detail,
                     stage: "admission".to_string(),
                     event: e,
                 });
@@ -197,6 +198,13 @@ impl Engine {
             .collect::<Result<Vec<_>>>()?;
 
         let admitted = rows.len();
+
+        // **The crash that matters most.** The batch is acked (it is in the WAL),
+        // the embedding has already cost GPU time, and these events exist nowhere
+        // durable but the log. Recovery must bring them back -- exactly once, with
+        // their semantic columns.
+        prism_part::faults::maybe_kill("ingest.after_embed_before_part");
+
         let manifest = PartWriter::write(
             &self.store.parts_dir(),
             snap.next_seq,
@@ -205,6 +213,7 @@ impl Engine {
             &generation.model_version,
             self.store.config.dim,
             self.store.config.pq_m,
+            self.store.config.block_size,
             rows,
             now_ms,
         )?;
@@ -230,7 +239,7 @@ impl Engine {
         })
     }
 
-    fn write_dead_letters(&self, dead: &[DeadLetter]) -> Result<()> {
+    pub fn write_dead_letters(&self, dead: &[DeadLetter]) -> Result<()> {
         if dead.is_empty() {
             return Ok(());
         }
@@ -260,7 +269,8 @@ fn embed_all(embedder: &dyn Embedder, events: Vec<Event>) -> (Embedded, Vec<Dead
                 kept_vecs.push(v);
             }
             Err(err) => dead.push(DeadLetter {
-                reason: err.to_string(),
+                reason: prism_types::RejectReason::EmbeddingFailed.to_string(),
+                detail: err.to_string(),
                 stage: "embedding".to_string(),
                 event: e,
             }),

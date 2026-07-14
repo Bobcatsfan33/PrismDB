@@ -379,6 +379,9 @@ impl Engine {
             _ => None,
         };
 
+        // What the disk actually moved, as opposed to what the plan asked for.
+        c.physical_bytes_read = eligible.iter().map(|r| r.io_bytes()).sum();
+
         Ok(SearchResult {
             hits,
             clusters,

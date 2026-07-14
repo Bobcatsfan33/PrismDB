@@ -24,6 +24,14 @@ const USAGE: &str = r#"prism — the semantic event store
 USAGE:
   prism init      --path <dir> [--dim 64] [--nlist 32] [--pq-m 8] [--seed 42]
   prism ingest    --path <dir> --file <events.tsv>
+  prism ingest-source --path <dir> --file <events.jsonl> --source <name> [--max N]
+                  poll a source, admit, ack, publish, THEN advance its offset
+  prism ingest-otlp   --path <dir> --file <otlp.json> [--tenant fallback]
+                  map OTel GenAI spans (semconv pinned) into events
+  prism recover   --path <dir>
+                  replay every acknowledged-but-unpublished batch from the WAL
+  prism evidence block-size --out <file.json> [--corpus <tsv>]
+                  derive the default block size from measurement (charter C-1)
   prism search    --path <dir> --query <text> [--tenant T] [--from MS] [--to MS]
                   [--k 10] [--nprobe 4] [--candidates 200] [--rerank 50]
                   [--group K] [--space model:version] [--exact]
@@ -83,6 +91,10 @@ fn run(argv: Vec<String>) -> Result<()> {
     match a.command.as_str() {
         "init" => cmd_init(&a),
         "ingest" => cmd_ingest(&a),
+        "ingest-source" => cmd_ingest_source(&a),
+        "ingest-otlp" => cmd_ingest_otlp(&a),
+        "recover" => cmd_recover(&a),
+        "evidence" => cmd_evidence(&a),
         "search" => cmd_search(&a),
         "inspect" => cmd_inspect(&a),
         "verify" => cmd_verify(&a),
@@ -116,6 +128,7 @@ fn cmd_init(a: &Args) -> Result<()> {
         nlist: a.parse_opt("nlist", 32usize)?,
         pq_m: a.parse_opt("pq-m", 8usize)?,
         seed: a.parse_opt("seed", 42u64)?,
+        block_size: a.parse_opt("block-size", prism_part::format::DEFAULT_BLOCK_SIZE)?,
     };
     let root = path_of(a)?;
     Engine::init(&root, config.clone())?;
@@ -158,6 +171,104 @@ fn cmd_search(a: &Args) -> Result<()> {
     }
 
     emit(&engine.search(&q)?)
+}
+
+fn cmd_ingest_source(a: &Args) -> Result<()> {
+    use prism_engine::source::{FileSource, Source};
+    use prism_engine::Ingestor;
+
+    let root = path_of(a)?;
+    let mut ing = Ingestor::open(Engine::open(&root)?)?;
+
+    let file = PathBuf::from(a.req("file")?);
+    let name = a.req("source")?;
+    let max: usize = a.parse_opt("max", 10_000usize)?;
+
+    let src = FileSource::new(name, &file, &root.join("sources"))?;
+    let before = src.committed_offset()?;
+    let report = ing.poll_and_ingest(&src, max, now_ms())?;
+
+    emit(&serde_json::json!({
+        "offered": report.offered,
+        "published": report.published,
+        "duplicates_suppressed": report.duplicates_suppressed,
+        "dead_lettered": report.dead_lettered,
+        "by_reason": report.by_reason,
+        "part_id": report.part_id,
+        "snapshot_id": report.snapshot_id,
+        "wal_record": report.wal_record,
+        "source": name,
+        "source_offset_before": before,
+        "source_offset_after": report.source_offset_after,
+    }))
+}
+
+fn cmd_ingest_otlp(a: &Args) -> Result<()> {
+    use prism_engine::otlp;
+    use prism_engine::Ingestor;
+
+    let root = path_of(a)?;
+    let mut ing = Ingestor::open(Engine::open(&root)?)?;
+
+    let json = std::fs::read_to_string(a.req("file")?)?;
+    let now = now_ms();
+    let events = otlp::parse(&json, a.opt("tenant").unwrap_or("default"), now)?;
+    let mapped = events.len();
+
+    let report = ing.ingest(events, None, None, now)?;
+    emit(&serde_json::json!({
+        "semconv_version": otlp::SEMCONV_VERSION,
+        "mapping_version": otlp::MAPPING_VERSION,
+        "spans_mapped": mapped,
+        "published": report.published,
+        "duplicates_suppressed": report.duplicates_suppressed,
+        "dead_lettered": report.dead_lettered,
+        "by_reason": report.by_reason,
+        "snapshot_id": report.snapshot_id,
+    }))
+}
+
+/// Replay every acknowledged-but-unpublished batch.
+///
+/// These events were **acked**: a producer has been told they are safe, and they are
+/// not queryable yet. That promise is the only thing standing between us and silent
+/// data loss.
+fn cmd_recover(a: &Args) -> Result<()> {
+    use prism_engine::Ingestor;
+
+    let root = path_of(a)?;
+    let mut ing = Ingestor::open(Engine::open(&root)?)?;
+    let reports = ing.recover(now_ms())?;
+
+    let events: usize = reports.iter().map(|r| r.published).sum();
+    emit(&serde_json::json!({
+        "recovered_batches": reports.len(),
+        "recovered_events": events,
+        "snapshot_id": ing.engine.snapshot()?.snapshot_id,
+    }))
+}
+
+/// Derive a tuned constant from measurement, and leave a receipt (charter C-1).
+fn cmd_evidence(a: &Args) -> Result<()> {
+    match a.sub.as_deref() {
+        Some("block-size") => {
+            let corpus = PathBuf::from(a.opt("corpus").unwrap_or("testing/golden/corpus.tsv"));
+            let work = std::env::temp_dir().join(format!("prism-evidence-{}", std::process::id()));
+            std::fs::create_dir_all(&work)?;
+
+            let ev = prism_engine::evidence::sweep_block_size(&work, &corpus)?;
+            std::fs::remove_dir_all(&work).ok();
+
+            if let Some(out) = a.opt("out") {
+                std::fs::write(out, serde_json::to_string_pretty(&ev)?)?;
+                eprintln!("prism: wrote {out}");
+            }
+            emit(&ev)
+        }
+        _ => Err(PrismError::Invalid(
+            "usage: prism evidence block-size --out <file.json>".into(),
+        )),
+    }
 }
 
 fn cmd_inspect(a: &Args) -> Result<()> {
@@ -278,6 +389,7 @@ fn cmd_gc(a: &Args) -> Result<()> {
 fn cmd_bench(a: &Args) -> Result<()> {
     let kind = a.opt("kind").unwrap_or("zipf");
     let opts = BenchOpts {
+        block_size: a.parse_opt("block-size", prism_part::format::DEFAULT_BLOCK_SIZE)?,
         rows: a.parse_opt("rows", 20_000usize)?,
         batch: a.parse_opt("batch", 5_000usize)?,
         seed: a.parse_opt("seed", 42u64)?,

@@ -6,6 +6,7 @@
 //! from a seed, so that a regression in skew handling shows up as a number and
 //! not as a surprise in production.
 
+use prism_types::attributes::{AttrValue, Attributes};
 use prism_types::event::Event;
 use prism_types::rng::Rng;
 
@@ -174,6 +175,20 @@ const BASE_TIME: i64 = 1_760_000_000_000; // a fixed epoch, so corpora are repro
 
 pub fn generate(kind: Kind, rows: usize, seed: u64) -> Vec<Event> {
     let mut rng = Rng::new(seed);
+
+    // A SEPARATE stream for everything S2 added.
+    //
+    // Not a stylistic choice. The committed golden corpus is a TSV of the S0 fields,
+    // and the drift check (`the_committed_golden_corpus_still_means_what_it_meant`) is
+    // only worth anything if that corpus has not quietly moved underneath it.
+    //
+    // Draw one extra number from `rng` and every subsequent event's tenant, cost and
+    // body changes -- the corpus regenerates, the golden answers regenerate to match,
+    // and the drift check goes on passing while testing precisely nothing. That is
+    // exactly what happened when attributes were first added here, which is why the S2
+    // fields draw from their own stream.
+    let mut s2 = Rng::new(seed ^ 0x5332_5332_5332_5332);
+
     let mut out = Vec::with_capacity(rows);
 
     // Zipf weights over topics: rank r gets mass proportional to 1/r.
@@ -231,14 +246,56 @@ pub fn generate(kind: Kind, rows: usize, seed: u64) -> Vec<Event> {
             _ => sentence(&mut rng, topic),
         };
 
+        // --- the S0 draws, in their original order ---
+        //
+        // cost and error are drawn HERE, before anything S2 added, because the
+        // committed golden corpus must stay byte-identical across sprints. The corpus
+        // is a TSV of exactly these fields, and the drift check
+        // (`the_committed_golden_corpus_still_means_what_it_meant`) is only worth
+        // anything if the corpus it checks has not quietly moved underneath it. Insert
+        // a single extra `rng` call above this line and every body in the corpus
+        // changes, the golden answers get regenerated to match, and the drift check
+        // passes by construction while testing nothing.
+        let cost = (rng.next_f32() * 0.05) as f64;
+        let error = rng.next_f32() < 0.12;
+
+        // --- the S2 additions, drawn afterwards, where they cannot disturb the above ---
+        //
+        // Synthetic telemetry now carries what real telemetry carries: an arrival time
+        // distinct from the event time, trace context, and GenAI-shaped attributes. A
+        // corpus without them would leave every S2 code path untested by the very
+        // generator that is supposed to exercise it.
+        let mut attributes = Attributes::new();
+        attributes.insert(
+            "gen_ai.system".into(),
+            AttrValue::Str(["anthropic", "openai", "local"][s2.below(3)].into()),
+        );
+        attributes.insert(
+            "gen_ai.usage.input_tokens".into(),
+            AttrValue::Int(50 + s2.below(4000) as i64),
+        );
+        attributes.insert(
+            "gen_ai.request.temperature".into(),
+            AttrValue::Double((s2.next_f32() as f64 * 100.0).round() / 100.0),
+        );
+        attributes.insert("stream".into(), AttrValue::Bool(s2.next_f32() < 0.5));
+
+        // Arrival lags the event, the way a flushed span does.
+        let observed_time = event_time + s2.below(30_000) as i64;
+
         out.push(Event {
             event_id,
             tenant_id: tenant,
             event_time,
+            observed_time,
             event_name: topic_name(topic).to_string(),
-            cost: (rng.next_f32() * 0.05) as f64,
-            error: rng.next_f32() < 0.12,
+            cost,
+            error,
             body,
+            trace_id: format!("{:032x}", 0x5eed_0000_0000_0000u64 ^ (i as u64)),
+            span_id: format!("{:016x}", 0xabc0_0000u64 ^ (i as u64)),
+            attributes,
+            idempotency_key: None,
         });
     }
 

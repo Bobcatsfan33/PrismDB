@@ -95,6 +95,7 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
 }
 
 pub struct BenchOpts {
+    pub block_size: u32,
     pub rows: usize,
     pub batch: usize,
     pub seed: u64,
@@ -110,6 +111,7 @@ pub struct BenchOpts {
 impl Default for BenchOpts {
     fn default() -> Self {
         BenchOpts {
+            block_size: prism_part::format::DEFAULT_BLOCK_SIZE,
             rows: 20_000,
             batch: 5_000,
             seed: 42,
@@ -138,6 +140,7 @@ pub fn run(root: &Path, opts: &BenchOpts) -> Result<Baselines> {
             nlist: opts.nlist,
             pq_m: opts.pq_m,
             seed: opts.seed,
+            block_size: opts.block_size,
         },
     )?;
 

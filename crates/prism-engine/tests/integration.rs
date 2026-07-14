@@ -47,6 +47,7 @@ fn config(dim: usize, nlist: usize, pq_m: usize) -> StoreConfig {
         nlist,
         pq_m,
         seed: 42,
+        block_size: prism_part::format::DEFAULT_BLOCK_SIZE,
     }
 }
 
@@ -300,6 +301,7 @@ fn the_committed_golden_corpus_still_means_what_it_meant() {
                 nlist: 32,
                 pq_m: 8,
                 seed: 1234,
+                block_size: prism_part::format::DEFAULT_BLOCK_SIZE,
             },
         )
         .unwrap_or(engine)
@@ -383,6 +385,11 @@ fn merge_preserves_results_and_reconciles_duplicates_by_the_documented_policy() 
         .unwrap();
 
     let dup = Event {
+        observed_time: 9_999_999_999_999,
+        trace_id: String::new(),
+        span_id: String::new(),
+        attributes: Default::default(),
+        idempotency_key: None,
         event_id: "a-e00000001".to_string(), // collides with the first batch
         tenant_id: "t0".to_string(),
         event_time: 9_999_999_999_999, // newer: this one must win
@@ -697,30 +704,65 @@ fn todays_build_opens_the_committed_v1_fixture() {
 }
 
 #[test]
-fn todays_build_opens_the_committed_v2_fixture() {
-    let fixture = repo_root().join("testing/compat/v2");
-    let engine = Engine::open(&fixture).expect("the v2 fixture must open");
+fn todays_build_opens_every_released_format() {
+    // The compatibility corpus, doing the only job it has. Three released formats,
+    // three sets of committed bytes, and today's build opens and answers from all of
+    // them. v1 and v2 are NEVER regenerated -- their whole value is that nothing
+    // since has touched them.
+    for (version, legacy) in [(1u32, true), (2, true), (3, false)] {
+        let fixture = repo_root().join(format!("testing/compat/v{version}"));
+        let engine = Engine::open(&fixture)
+            .unwrap_or_else(|e| panic!("the v{version} fixture must open: {e}"));
 
-    let report = engine
-        .catalog()
-        .verify()
-        .expect("every v2 byte still checksums");
-    assert_eq!(report.parts_verified, 1);
+        engine
+            .catalog()
+            .verify()
+            .unwrap_or_else(|e| panic!("every v{version} byte must still checksum: {e}"));
+
+        let snap = engine.snapshot().unwrap();
+        let parts = engine.open_parts(&snap).unwrap();
+        assert_eq!(parts[0].manifest.format_version, version);
+        assert_eq!(parts[0].is_legacy(), legacy);
+
+        // Every part, of every version, declares its rerank tier (D-003-resolved) --
+        // v1 and v2 by synthesis, because they had no choice but float32/exact.
+        assert_eq!(parts[0].manifest.rerank.describe(), "float32/exact");
+
+        // Only v3 carries attributes and trace context. A v1/v2 part not having them
+        // is history, not corruption, and a reader that cannot tell the difference
+        // will condemn perfectly good data.
+        assert_eq!(parts[0].manifest.has_attributes(), version >= 3);
+        assert_eq!(parts[0].manifest.has_trace_context(), version >= 3);
+
+        let mut query = q("tool call timed out retrying");
+        query.nprobe = 8;
+        let res = engine.search(&query).unwrap();
+        assert!(
+            !res.hits.is_empty(),
+            "the v{version} fixture must still answer"
+        );
+        assert_eq!(res.hits[0].event.event_name, "tool.retry");
+    }
+}
+
+#[test]
+fn the_v3_fixture_carries_bounded_attributes() {
+    let fixture = repo_root().join("testing/compat/v3");
+    let engine = Engine::open(&fixture).expect("the v3 fixture must open");
 
     let snap = engine.snapshot().unwrap();
     let parts = engine.open_parts(&snap).unwrap();
-    assert!(!parts[0].is_legacy(), "the v2 fixture must be v2");
-    assert_eq!(parts[0].manifest.format_version, prism_part::FORMAT_VERSION);
+    let m = &parts[0].manifest;
 
-    // Every v2 part declares what its rerank tier is, and what accuracy that
-    // encoding owes a caller (D-003-resolved).
-    assert_eq!(parts[0].manifest.rerank.describe(), "float32/exact");
+    // The key dictionary lives in the MANIFEST, not a column -- so "does this part
+    // hold any row with key X?" is answerable without opening a single column file.
+    // And it is bounded, which is the limit that protects the shape of the data.
+    assert!(m.attribute_keys.len() <= prism_types::limits::MAX_ATTRIBUTE_KEY_CARDINALITY);
 
-    let mut query = q("tool call timed out retrying");
-    query.nprobe = 8;
-    let res = engine.search(&query).unwrap();
-    assert!(!res.hits.is_empty());
-    assert_eq!(res.hits[0].event.event_name, "tool.retry");
+    // The TLV extension section ships before its first user, on purpose: the first
+    // user must not also be a format break.
+    assert!(m.extensions.is_empty());
+    assert_eq!(m.reserved, [0u64; 4]);
 }
 
 #[test]
@@ -729,26 +771,26 @@ fn every_corrupt_fixture_is_rejected_with_a_specific_error() {
     // refused with an error that says *which byte lied* — an operator woken at
     // 3am cannot act on the word "corrupt".
     let cases: [(&str, &str, &str); 17] = [
-        // --- v2: the manifest itself ---
-        ("corrupt-v2", "bad-magic", "not a part file"),
-        ("corrupt-v2", "bad-header-crc", "header failed checksum"),
-        ("corrupt-v2", "bad-body-crc", "body failed checksum"),
-        ("corrupt-v2", "future-format", "format version"),
-        ("corrupt-v2", "unknown-feature", "feature bits"),
-        // --- v2: things the manifest declares that we cannot honour ---
-        ("corrupt-v2", "unknown-codec", "codec id 99"),
+        // --- v3: the manifest itself ---
+        ("corrupt-v3", "bad-magic", "not a part file"),
+        ("corrupt-v3", "bad-header-crc", "header failed checksum"),
+        ("corrupt-v3", "bad-body-crc", "body failed checksum"),
+        ("corrupt-v3", "future-format", "format version"),
+        ("corrupt-v3", "unknown-feature", "feature bits"),
+        // --- v3: things the manifest declares that we cannot honour ---
+        ("corrupt-v3", "unknown-codec", "codec id 99"),
         (
-            "corrupt-v2",
+            "corrupt-v3",
             "unknown-rerank-encoding",
             "rerank encoding id 2",
         ),
-        // --- v2: a length no bytes could back (the S1 allocation gate) ---
-        ("corrupt-v2", "absurd-length", "refusing to allocate"),
-        // --- v2: the stored bytes ---
-        ("corrupt-v2", "block-checksum", "block 0 failed checksum"),
-        ("corrupt-v2", "truncated-column", "is truncated"),
-        ("corrupt-v2", "bad-offsets", "outside"),
-        ("corrupt-v2", "mutated-codebook", "hash to its own id"),
+        // --- v3: a length no bytes could back (the S1 allocation gate) ---
+        ("corrupt-v3", "absurd-length", "refusing to allocate"),
+        // --- v3: the stored bytes ---
+        ("corrupt-v3", "block-checksum", "block 0 failed checksum"),
+        ("corrupt-v3", "truncated-column", "is truncated"),
+        ("corrupt-v3", "bad-offsets", "outside"),
+        ("corrupt-v3", "mutated-codebook", "hash to its own id"),
         // --- v1: still readable, so still refusable ---
         ("corrupt", "flipped-byte", "checksum"),
         ("corrupt", "truncated-column", "bytes"),
@@ -956,6 +998,7 @@ fn cluster_boundary_queries_are_what_expose_the_recall_tail() {
             nlist: 32,
             pq_m: 8,
             seed: 1234,
+            block_size: prism_part::format::DEFAULT_BLOCK_SIZE,
         },
     )
     .unwrap();

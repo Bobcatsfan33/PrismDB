@@ -1,0 +1,167 @@
+//! The constant ledger (charter amendment C-1).
+//!
+//! > **Every tuned constant must be pinned to committed benchmark evidence, with a
+//! > test asserting the constant still matches that evidence.**
+//!
+//! This module enumerates every constant that steers behaviour, and classifies each
+//! one. `testing/evidence/registry.json` is the committed ledger, and
+//! `every_tuned_constant_matches_its_committed_evidence` asserts — **in both
+//! directions** — that the code and the ledger agree.
+//!
+//! Two kinds, and the distinction is load-bearing:
+//!
+//! * **`tuned`** — derived from measurement. A different measurement would have
+//!   produced a different value. It owes **evidence**: a committed file, a named key
+//!   inside it, and the rule by which that key was chosen.
+//! * **`policy`** — a deliberate decision about behaviour, not an empirical optimum.
+//!   A cap of 64 attribute keys is not "the measured best number of attribute keys";
+//!   it is a statement about what we are willing to accept. It owes a **rationale**,
+//!   pointed at prose, and the test enforces that the pointer resolves.
+//!
+//! The distinction exists to be abuse-proof. Without it, every inconvenient constant
+//! gets reclassified as policy to escape the evidence requirement — so `policy` still
+//! has to point at an argument, and an argument is reviewable.
+
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Kind {
+    Tuned,
+    Policy,
+}
+
+#[derive(Clone, Debug)]
+pub struct Constant {
+    pub name: &'static str,
+    pub value: i64,
+    pub kind: Kind,
+}
+
+/// Every constant that steers behaviour. A new one that is not here will fail
+/// `every_tuned_constant_matches_its_committed_evidence`, which is the point.
+pub fn constants() -> Vec<Constant> {
+    use prism_types::limits as L;
+    vec![
+        // --- tuned: derived from measurement, owes evidence ---
+        Constant {
+            name: "DEFAULT_NPROBE",
+            value: prism_types::query::DEFAULT_NPROBE as i64,
+            kind: Kind::Tuned,
+        },
+        Constant {
+            // The *default* for new parts. `format::BLOCK_SIZE` is a different thing
+            // -- the fixed size every v2 part was written at, which is history and
+            // cannot be tuned.
+            name: "BLOCK_SIZE",
+            value: prism_part::format::DEFAULT_BLOCK_SIZE as i64,
+            kind: Kind::Tuned,
+        },
+        // --- policy: a decision about behaviour, owes a rationale ---
+        Constant {
+            name: "DEFAULT_CANDIDATES",
+            value: prism_types::query::DEFAULT_CANDIDATES as i64,
+            kind: Kind::Policy,
+        },
+        Constant {
+            name: "DEFAULT_RERANK",
+            value: prism_types::query::DEFAULT_RERANK as i64,
+            kind: Kind::Policy,
+        },
+        Constant {
+            name: "MAX_ATTRIBUTE_KEYS",
+            value: L::MAX_ATTRIBUTE_KEYS as i64,
+            kind: Kind::Policy,
+        },
+        Constant {
+            name: "MAX_ATTRIBUTE_KEY_BYTES",
+            value: L::MAX_ATTRIBUTE_KEY_BYTES as i64,
+            kind: Kind::Policy,
+        },
+        Constant {
+            name: "MAX_ATTRIBUTE_VALUE_BYTES",
+            value: L::MAX_ATTRIBUTE_VALUE_BYTES as i64,
+            kind: Kind::Policy,
+        },
+        Constant {
+            name: "MAX_ATTRIBUTES_BYTES",
+            value: L::MAX_ATTRIBUTES_BYTES as i64,
+            kind: Kind::Policy,
+        },
+        Constant {
+            name: "MAX_ATTRIBUTE_KEY_CARDINALITY",
+            value: L::MAX_ATTRIBUTE_KEY_CARDINALITY as i64,
+            kind: Kind::Policy,
+        },
+        Constant {
+            name: "MAX_LATENESS_MS",
+            value: L::MAX_LATENESS_MS,
+            kind: Kind::Policy,
+        },
+        Constant {
+            name: "MAX_SKEW_AHEAD_MS",
+            value: L::MAX_SKEW_AHEAD_MS,
+            kind: Kind::Policy,
+        },
+        Constant {
+            name: "IDEMPOTENCY_WINDOW_MS",
+            value: L::IDEMPOTENCY_WINDOW_MS,
+            kind: Kind::Policy,
+        },
+        Constant {
+            name: "IDEMPOTENCY_MAX_ENTRIES",
+            value: L::IDEMPOTENCY_MAX_ENTRIES as i64,
+            kind: Kind::Policy,
+        },
+        Constant {
+            name: "MAX_BODY_BYTES",
+            value: prism_types::event::MAX_BODY_BYTES as i64,
+            kind: Kind::Policy,
+        },
+        Constant {
+            name: "MAX_EMBED_INPUT_BYTES",
+            value: prism_types::MAX_EMBED_INPUT_BYTES as i64,
+            kind: Kind::Policy,
+        },
+    ]
+}
+
+/// One row of `testing/evidence/registry.json`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RegistryEntry {
+    pub name: String,
+    pub value: i64,
+    pub kind: Kind,
+    /// `tuned` only: the committed file that justifies the value.
+    #[serde(default)]
+    pub evidence: Option<String>,
+    /// `tuned` only: the key inside that file which *is* the value.
+    #[serde(default)]
+    pub evidence_key: Option<String>,
+    /// `tuned` only: the rule by which the evidence chose this value.
+    #[serde(default)]
+    pub rule: Option<String>,
+    /// `policy` only: prose that argues for it.
+    #[serde(default)]
+    pub rationale: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Registry {
+    pub constants: Vec<RegistryEntry>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_constant_is_classified_and_no_name_repeats() {
+        let mut seen = std::collections::BTreeSet::new();
+        for c in constants() {
+            assert!(seen.insert(c.name), "duplicate constant {}", c.name);
+        }
+        assert!(constants().iter().any(|c| c.kind == Kind::Tuned));
+        assert!(constants().iter().any(|c| c.kind == Kind::Policy));
+    }
+}

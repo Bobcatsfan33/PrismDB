@@ -152,6 +152,7 @@ impl Engine {
                 &g.model_version,
                 dim,
                 self.store.config.pq_m,
+                self.store.config.block_size,
                 rows,
                 now_ms,
             )?;
@@ -305,6 +306,7 @@ impl Engine {
             &new_gen.model_version,
             dim,
             self.store.config.pq_m,
+            self.store.config.block_size,
             rows,
             now_ms,
         )?;
