@@ -1,0 +1,30 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/prism-types",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.75"
+license = "Apache-2.0"
+repository = "https://github.com/Bobcatsfan33/PrismDB"
+
+# Dependency policy (see docs/DECISIONS.md, D-002):
+# The engine is dependency-light by charter. serde/serde_json are the only
+# third-party crates: manifests, catalog snapshots, generation records and CLI
+# output are all JSON, and hand-rolling a JSON parser would be strictly worse
+# than a standard one. Hashing (SHA-256), checksums (CRC-32) and the
+# deterministic PRNG are implemented in prism-types so that content addressing,
+# durability and reproducibility have no external surface.
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+prism-types = { path = "crates/prism-types" }
+prism-quantizer = { path = "crates/prism-quantizer" }
+prism-part = { path = "crates/prism-part" }
+prism-engine = { path = "crates/prism-engine" }
+
+[profile.release]
+debug = 1
