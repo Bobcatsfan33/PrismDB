@@ -1,0 +1,147 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  lint:
+    name: fmt + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    name: tests (${{ matrix.profile }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [debug, release]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Debug catches the debug_assert!s; release is what the numbers are
+      # measured under. A bug that only shows up in one of them is still a bug.
+      - name: test
+        run: |
+          if [ "${{ matrix.profile }}" = "release" ]; then
+            cargo test --workspace --release
+          else
+            cargo test --workspace
+          fi
+
+  faults:
+    name: fault-injection matrix
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Kills a real prism process at every declared durability boundary and
+      # asserts the store opens to the old snapshot or the new one, never both.
+      - run: cargo test --release -p prism-cli --test faults -- --nocapture
+      # A short randomized campaign on every commit. S1 turns this up to 10,000
+      # and moves it to a nightly job.
+      - run: ./testing/faults/campaign.sh 100
+
+  recall:
+    name: recall contract vs the exact oracle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release
+      - name: rebuild the golden store and check for drift + recall
+        run: |
+          set -euxo pipefail
+          P=./target/release/prism
+          $P init --path /tmp/golden --dim 64 --nlist 32 --pq-m 8 --seed 1234
+          $P ingest --path /tmp/golden --file testing/golden/corpus.tsv
+          # Two separate checks, both of which must hold:
+          #   drift  — the exact answers must not have moved (checked inside `golden check`)
+          #   recall — the approximate path must find them, at a stated scan cost
+          $P golden check --path /tmp/golden --golden testing/golden/expected.json \
+             --nprobe 4 --candidates 200 --rerank 50 --min-recall 0.95
+
+  compat:
+    name: format compatibility fixtures
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release
+      - name: the committed v1 fixture must still open and still verify
+        run: |
+          set -euxo pipefail
+          ./target/release/prism verify --path testing/compat/v1
+          ./target/release/prism search --path testing/compat/v1 \
+            --query "tool call timed out retrying" --k 3 --nprobe 8
+      - name: every corrupt fixture must be rejected
+        run: |
+          set -uxo pipefail
+          fail=0
+          for d in testing/compat/corrupt/*/; do
+            if ./target/release/prism verify --path "$d" >/dev/null 2>&1; then
+              echo "FAIL: corrupt fixture $d was accepted"
+              fail=1
+            else
+              echo "ok: $d rejected — $(./target/release/prism verify --path "$d" 2>&1 | head -1)"
+            fi
+          done
+          exit $fail
+
+  quickstart:
+    name: the README quickstart actually works
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Extracts the shell block out of README.md and runs it. Not a copy of the
+      # quickstart -- the quickstart. If a command in the README does not work,
+      # this job is red.
+      - run: ./scripts/check-readme-quickstart.sh
+
+  baselines:
+    name: baselines are reproducible
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release
+      # The committed baselines.json is a machine-generated artifact. This proves
+      # `prism bench` still runs and still produces one; it does NOT assert on the
+      # timings, which are machine-dependent and would make CI flaky for no gain.
+      # What it does assert is the thing that must never regress silently: recall.
+      - name: regenerate and check the recall floor
+        run: |
+          set -euxo pipefail
+          ./target/release/prism bench --rows 20000 --kind zipf --out /tmp/baselines.json >/dev/null
+          python3 - <<'PY'
+          import json
+          b = json.load(open("/tmp/baselines.json"))
+          print(json.dumps(b, indent=2))
+          assert b["recall_at_10"] >= 0.95, f"recall regressed to {b['recall_at_10']}"
+          assert b["mean_scan_fraction"] < 0.5, \
+              f"recall was bought by scanning {b['mean_scan_fraction']:.1%} of the data"
+          assert b["rows_admitted"] + b["rows_dead_lettered"] == b["rows_offered"], \
+              "rows went missing between offered and stored"
+          print("recall floor holds, and no row vanished.")
+          PY
