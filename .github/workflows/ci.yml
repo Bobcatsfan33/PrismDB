@@ -122,7 +122,10 @@ jobs:
           done
       - name: every corrupt fixture must be rejected, with a specific error
         run: |
-          set -uo pipefail
+          # NOT -e: `prism verify` returning non-zero on a corrupt fixture is the
+          # whole point of this step, and errexit would treat the first success as
+          # a fatal error and abort.
+          set +e
           fail=0
           for d in testing/compat/corrupt/*/ testing/compat/corrupt-v2/*/; do
             msg=$(./target/release/prism verify --path "$d" 2>&1 | head -1)
