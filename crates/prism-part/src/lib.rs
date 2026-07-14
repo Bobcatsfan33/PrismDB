@@ -12,12 +12,16 @@
 
 pub mod catalog;
 pub mod faults;
+pub mod format;
+pub mod fsck;
 pub mod generation;
 pub mod io;
+pub mod legacy_v1;
 pub mod part;
 pub mod store;
 
 pub use catalog::{Catalog, Snapshot};
+pub use format::{RerankDescriptor, FORMAT_VERSION, LEGACY_FORMAT_VERSION};
 pub use generation::Generation;
 pub use part::{CentroidRange, ColumnMeta, PartManifest, PartReader, PartRows, PartWriter};
-pub use store::{Store, StoreConfig, FORMAT_VERSION};
+pub use store::{Store, StoreConfig};

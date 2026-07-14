@@ -15,9 +15,16 @@ use prism_types::error::{PrismError, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-/// Bump this and old parts stop opening — which is exactly why every released
-/// version keeps a fixture in `testing/compat/`.
-pub const FORMAT_VERSION: u32 = 1;
+/// The store-layout version recorded in `store.json`.
+///
+/// Distinct from the *part* format version, which every part carries in its own
+/// manifest — a store can hold parts of several formats at once, which is
+/// exactly what happens while a v1 store is being migrated forward by merges.
+/// New stores are written at [`STORE_VERSION`]; older ones are still opened.
+pub const STORE_VERSION: u32 = 2;
+
+/// Store layouts this build can open.
+pub const SUPPORTED_STORE_VERSIONS: &[u32] = &[1, 2];
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct StoreConfig {
@@ -92,9 +99,9 @@ impl Store {
             )));
         }
         let config: StoreConfig = serde_json::from_slice(&io::read_file(&path)?)?;
-        if config.format_version != FORMAT_VERSION {
+        if !SUPPORTED_STORE_VERSIONS.contains(&config.format_version) {
             return Err(PrismError::Corrupt(format!(
-                "store is format version {}, this build reads version {FORMAT_VERSION}",
+                "store is layout version {}, this build reads {SUPPORTED_STORE_VERSIONS:?}",
                 config.format_version
             )));
         }

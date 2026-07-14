@@ -153,10 +153,38 @@ pub fn encode_strings(vals: &[String]) -> (Vec<u8>, Vec<u8>) {
     (data, encode_i64(&offsets))
 }
 
-/// Decode a string column. Every offset is validated against the blob length
-/// before it is used to slice: an untrusted length must never index out of
-/// bounds and must never allocate on trust (S1 gate, brought forward).
-pub fn decode_strings(data: &[u8], offsets: &[u8], row_count: usize) -> Result<Vec<String>> {
+/// Borrow one row of a string column, validating its offsets first.
+///
+/// Every offset is validated against the blob length before it is used to slice:
+/// an untrusted length must never index out of bounds and must never allocate on
+/// trust (S1 gate). This borrows rather than allocating, so a caller that only
+/// wants `k` of a million rows pays for `k`.
+pub fn string_at<'a>(
+    data: &'a [u8],
+    offs: &[i64],
+    row: usize,
+    row_count: usize,
+) -> Result<&'a str> {
+    use prism_types::error::PrismError;
+
+    if row >= row_count || row + 1 >= offs.len() {
+        return Err(PrismError::Corrupt(format!(
+            "string column row {row} is out of range ({row_count} rows)"
+        )));
+    }
+    let (start, end) = (offs[row], offs[row + 1]);
+    if start < 0 || end < start || end as usize > data.len() {
+        return Err(PrismError::Corrupt(format!(
+            "string column offset pair ({start}, {end}) is outside a {}-byte blob",
+            data.len()
+        )));
+    }
+    std::str::from_utf8(&data[start as usize..end as usize])
+        .map_err(|e| PrismError::Corrupt(format!("string column row {row} is not utf-8: {e}")))
+}
+
+/// Decode and validate a string column's offset array.
+pub fn string_offsets(offsets: &[u8], row_count: usize) -> Result<Vec<i64>> {
     use prism_types::error::PrismError;
 
     let offs = decode_i64(offsets);
@@ -167,19 +195,15 @@ pub fn decode_strings(data: &[u8], offsets: &[u8], row_count: usize) -> Result<V
             row_count + 1
         )));
     }
+    Ok(offs)
+}
+
+/// Decode a whole string column.
+pub fn decode_strings(data: &[u8], offsets: &[u8], row_count: usize) -> Result<Vec<String>> {
+    let offs = string_offsets(offsets, row_count)?;
     let mut out = Vec::with_capacity(row_count);
     for i in 0..row_count {
-        let (start, end) = (offs[i], offs[i + 1]);
-        if start < 0 || end < start || end as usize > data.len() {
-            return Err(PrismError::Corrupt(format!(
-                "string column offset pair ({start}, {end}) is outside a {}-byte blob",
-                data.len()
-            )));
-        }
-        let slice = &data[start as usize..end as usize];
-        let s = std::str::from_utf8(slice)
-            .map_err(|e| PrismError::Corrupt(format!("string column row {i} is not utf-8: {e}")))?;
-        out.push(s.to_string());
+        out.push(string_at(data, &offs, i, row_count)?.to_string());
     }
     Ok(out)
 }
