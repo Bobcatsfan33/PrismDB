@@ -27,6 +27,9 @@ pub struct MergeReport {
     pub rows_out: usize,
     /// Rows dropped because a newer row carried the same `event_id`.
     pub duplicates_reconciled: usize,
+    /// Parts that were rewritten out of an older storage format. A merge is how
+    /// a store is migrated forward; nothing is ever rewritten in place.
+    pub parts_migrated: usize,
     pub bytes_read: usize,
     pub bytes_written: usize,
     /// bytes written / bytes read. The number that decides whether merge
@@ -60,13 +63,24 @@ fn supersedes(new: &Event, old: &Event) -> bool {
 impl Engine {
     pub fn merge(&self, now_ms: i64) -> Result<MergeReport> {
         let snap = self.snapshot()?;
-        if snap.parts.len() < 2 {
+        let readers = self.open_parts(&snap)?;
+
+        // A part written in an older format is always worth rewriting, even when
+        // there is nothing to compact: the merge is how a store is *migrated*
+        // forward, and a single-part v1 store must not be stranded on a format
+        // that only the compatibility path can read. Everything the newer format
+        // buys — block-local damage, an explicit feature bitset, a declared
+        // rerank encoding — is only real once the bytes are actually rewritten.
+        let has_legacy = readers.iter().any(|r| r.is_legacy());
+
+        if snap.parts.len() < 2 && !has_legacy {
             return Ok(MergeReport {
                 parts_in: snap.parts.len(),
                 parts_out: snap.parts.len(),
                 rows_in: 0,
                 rows_out: 0,
                 duplicates_reconciled: 0,
+                parts_migrated: 0,
                 bytes_read: 0,
                 bytes_written: 0,
                 write_amplification: 0.0,
@@ -74,7 +88,7 @@ impl Engine {
             });
         }
 
-        let readers = self.open_parts(&snap)?;
+        let migrated = readers.iter().filter(|r| r.is_legacy()).count();
         let dim = self.store.config.dim;
 
         let mut bytes_read = 0usize;
@@ -86,7 +100,12 @@ impl Engine {
         let mut duplicates = 0usize;
 
         for r in &readers {
-            bytes_read += r.manifest.columns.iter().map(|c| c.bytes).sum::<usize>();
+            bytes_read += r
+                .manifest
+                .columns
+                .iter()
+                .map(|c| c.storage.logical_bytes() as usize)
+                .sum::<usize>();
             let rows = r.read_all()?;
             rows_in += rows.events.len();
             let m = r.manifest.pq_m;
@@ -136,7 +155,11 @@ impl Engine {
                 rows,
                 now_ms,
             )?;
-            bytes_written += manifest.columns.iter().map(|c| c.bytes).sum::<usize>();
+            bytes_written += manifest
+                .columns
+                .iter()
+                .map(|c| c.storage.logical_bytes() as usize)
+                .sum::<usize>();
             new_parts.push(manifest.part_id);
             next_seq += 1;
         }
@@ -159,6 +182,7 @@ impl Engine {
             rows_in,
             rows_out,
             duplicates_reconciled: duplicates,
+            parts_migrated: migrated,
             bytes_read,
             bytes_written,
             write_amplification: if bytes_read == 0 {

@@ -190,7 +190,8 @@ impl Engine {
 
             // The scalar columns the mask needs. Text is never touched here —
             // only survivors pay for their body.
-            let (times, tenants) = r.read_scalars()?;
+            let scalars = r.read_scalars()?;
+            let times = &scalars.times;
 
             let by_centroid: BTreeMap<u32, &prism_part::part::CentroidRange> = r
                 .manifest
@@ -229,9 +230,11 @@ impl Engine {
                 for i in 0..range.row_count {
                     let row = range.first_row + i;
 
-                    // Fused scalar mask.
+                    // Fused scalar mask. Allocation-free: it runs once per
+                    // scanned row, so it must not be the expensive part of the
+                    // scan it exists to make cheaper.
                     if let Some(t) = &q.tenant {
-                        if &tenants[row] != t {
+                        if !scalars.tenant_is(row, t) {
                             continue;
                         }
                     }

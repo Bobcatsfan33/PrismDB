@@ -12,7 +12,7 @@ use prism_engine::corpus::{self, Kind};
 use prism_engine::engine::now_ms;
 use prism_engine::model::HashModelPlane;
 use prism_engine::{oracle, tsv, Engine};
-use prism_part::store::{Store, StoreConfig, FORMAT_VERSION};
+use prism_part::store::{Store, StoreConfig, STORE_VERSION};
 use prism_types::error::{PrismError, Result};
 use prism_types::Query;
 use serde::Serialize;
@@ -29,6 +29,7 @@ USAGE:
                   [--group K] [--space model:version] [--exact]
   prism inspect   --path <dir>
   prism verify    --path <dir>
+  prism fsck      --path <dir|part-dir>   offline format validator; needs no catalog
   prism merge     --path <dir>
   prism reembed   --path <dir> --version <v>
   prism rollback  --path <dir> --to <snapshot-id>
@@ -38,7 +39,10 @@ USAGE:
                    --rows <n> [--seed 42] --out <file.tsv>
   prism golden build --path <dir> --out <golden.json> [--k 10]
   prism golden check --path <dir> --golden <golden.json>
-                     [--nprobe 4] [--candidates 200] [--rerank 50] [--min-recall 0.9]
+                     [--nprobe N] [--candidates 200] [--rerank 50]
+                     [--min-recall 0.9] [--min-p1 0.8]
+  prism golden sweep --path <dir> --golden <golden.json> --out <provenance.json>
+                     [--p1-floor 0.8]      derive the default nprobe from the tail
   prism kill-points
 
 Four separate query controls, all reported in the counters:
@@ -82,6 +86,7 @@ fn run(argv: Vec<String>) -> Result<()> {
         "search" => cmd_search(&a),
         "inspect" => cmd_inspect(&a),
         "verify" => cmd_verify(&a),
+        "fsck" => cmd_fsck(&a),
         "merge" => cmd_merge(&a),
         "reembed" => cmd_reembed(&a),
         "rollback" => cmd_rollback(&a),
@@ -106,7 +111,7 @@ fn open(a: &Args) -> Result<Engine> {
 
 fn cmd_init(a: &Args) -> Result<()> {
     let config = StoreConfig {
-        format_version: FORMAT_VERSION,
+        format_version: STORE_VERSION,
         dim: a.parse_opt("dim", 64usize)?,
         nlist: a.parse_opt("nlist", 32usize)?,
         pq_m: a.parse_opt("pq-m", 8usize)?,
@@ -137,9 +142,9 @@ fn cmd_search(a: &Args) -> Result<()> {
         time_from: a.parse_some("from")?,
         time_to: a.parse_some("to")?,
         k: a.parse_opt("k", 10usize)?,
-        nprobe: a.parse_opt("nprobe", 4usize)?,
-        candidates: a.parse_opt("candidates", 200usize)?,
-        rerank: a.parse_opt("rerank", 50usize)?,
+        nprobe: a.parse_opt("nprobe", prism_types::query::DEFAULT_NPROBE)?,
+        candidates: a.parse_opt("candidates", prism_types::query::DEFAULT_CANDIDATES)?,
+        rerank: a.parse_opt("rerank", prism_types::query::DEFAULT_RERANK)?,
         group_k: a.parse_some("group")?,
         space: a.opt("space").map(String::from),
     };
@@ -164,18 +169,22 @@ fn cmd_inspect(a: &Args) -> Result<()> {
         .iter()
         .map(|r| {
             let m = &r.manifest;
-            let bytes: usize = m.columns.iter().map(|c| c.bytes).sum();
+            let bytes: usize = m
+                .columns
+                .iter()
+                .map(|c| c.storage.logical_bytes() as usize)
+                .sum();
             let pq: usize = m
                 .columns
                 .iter()
                 .filter(|c| c.name == "pq_codes")
-                .map(|c| c.bytes)
+                .map(|c| c.storage.logical_bytes() as usize)
                 .sum();
             let exact: usize = m
                 .columns
                 .iter()
-                .filter(|c| c.name == "vectors")
-                .map(|c| c.bytes)
+                .filter(|c| c.name == "rerank_vectors")
+                .map(|c| c.storage.logical_bytes() as usize)
                 .sum();
             serde_json::json!({
                 "part_id": m.part_id,
@@ -207,6 +216,34 @@ fn cmd_inspect(a: &Args) -> Result<()> {
 fn cmd_verify(a: &Args) -> Result<()> {
     let engine = open(a)?;
     emit(&engine.catalog().verify()?)
+}
+
+/// The offline format validator.
+///
+/// Deliberately does not open the engine, the catalog, or a generation: an
+/// operator holding a suspicious object out of a backup must be able to condemn
+/// it without standing a database up first. Exits non-zero if anything is wrong,
+/// so it composes into a shell pipeline.
+fn cmd_fsck(a: &Args) -> Result<()> {
+    let path = path_of(a)?;
+    let reports = prism_part::fsck::fsck(&path)?;
+    let bad = reports.iter().filter(|r| !r.ok).count();
+
+    emit(&serde_json::json!({
+        "path": path.display().to_string(),
+        "parts": reports.len(),
+        "healthy": reports.len() - bad,
+        "damaged": bad,
+        "reports": reports,
+    }))?;
+
+    if bad > 0 {
+        return Err(PrismError::Corrupt(format!(
+            "{bad} of {} parts failed validation",
+            reports.len()
+        )));
+    }
+    Ok(())
 }
 
 fn cmd_merge(a: &Args) -> Result<()> {
@@ -247,9 +284,9 @@ fn cmd_bench(a: &Args) -> Result<()> {
         dim: a.parse_opt("dim", 64usize)?,
         nlist: a.parse_opt("nlist", 32usize)?,
         pq_m: a.parse_opt("pq-m", 8usize)?,
-        nprobe: a.parse_opt("nprobe", 4usize)?,
-        candidates: a.parse_opt("candidates", 200usize)?,
-        rerank: a.parse_opt("rerank", 50usize)?,
+        nprobe: a.parse_opt("nprobe", prism_types::query::DEFAULT_NPROBE)?,
+        candidates: a.parse_opt("candidates", prism_types::query::DEFAULT_CANDIDATES)?,
+        rerank: a.parse_opt("rerank", prism_types::query::DEFAULT_RERANK)?,
         kind: Kind::parse(kind)
             .ok_or_else(|| PrismError::Invalid(format!("unknown corpus kind `{kind}`")))?,
     };
@@ -324,23 +361,54 @@ fn cmd_golden(a: &Args) -> Result<()> {
             let report = oracle::measure_recall(
                 &engine,
                 &golden,
-                a.parse_opt("nprobe", 4usize)?,
-                a.parse_opt("candidates", 200usize)?,
-                a.parse_opt("rerank", 50usize)?,
+                a.parse_opt("nprobe", prism_types::query::DEFAULT_NPROBE)?,
+                a.parse_opt("candidates", prism_types::query::DEFAULT_CANDIDATES)?,
+                a.parse_opt("rerank", prism_types::query::DEFAULT_RERANK)?,
             )?;
-
-            let min_recall: f32 = a.parse_opt("min-recall", 0.0f32)?;
             emit(&report)?;
+
+            // Two floors, and the tail one is the one that matters. A mean floor
+            // alone would have waved S0's `min recall = 0.000` straight through.
+            let min_recall: f32 = a.parse_opt("min-recall", 0.0f32)?;
             if report.mean_recall < min_recall {
                 return Err(PrismError::Invariant(format!(
                     "mean recall@{} is {:.3}, below the required {:.3}",
                     report.k, report.mean_recall, min_recall
                 )));
             }
+            let min_p1: f32 = a.parse_opt("min-p1", 0.0f32)?;
+            if report.p1_recall < min_p1 {
+                return Err(PrismError::Invariant(format!(
+                    "p1 recall@{} is {:.3}, below the required {:.3} (the mean is {:.3} — which \
+                     is exactly how a tail failure hides)",
+                    report.k, report.p1_recall, min_p1, report.mean_recall
+                )));
+            }
             Ok(())
         }
+
+        // Derive the default nprobe rather than picking one, and leave a receipt.
+        Some("sweep") => {
+            let engine = open(a)?;
+            let golden: oracle::Golden = serde_json::from_slice(&std::fs::read(a.req("golden")?)?)?;
+
+            let prov = oracle::sweep_nprobe(
+                &engine,
+                &golden,
+                a.parse_opt("candidates", prism_types::query::DEFAULT_CANDIDATES)?,
+                a.parse_opt("rerank", prism_types::query::DEFAULT_RERANK)?,
+                a.parse_opt("p1-floor", 0.8f32)?,
+            )?;
+
+            if let Some(out) = a.opt("out") {
+                std::fs::write(out, serde_json::to_string_pretty(&prov)?)?;
+                eprintln!("prism: wrote {out}");
+            }
+            emit(&prov)
+        }
+
         _ => Err(PrismError::Invalid(
-            "usage: prism golden <build|check> ...".into(),
+            "usage: prism golden <build|check|sweep> ...".into(),
         )),
     }
 }

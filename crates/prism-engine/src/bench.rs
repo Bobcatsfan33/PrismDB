@@ -59,7 +59,13 @@ pub struct Baselines {
     pub scan_rows_per_sec: f64,
 
     pub recall_at_10: f32,
+    /// The tail. A mean without a minimum is how S0 shipped a configuration that
+    /// returned *nothing* for five queries and called it 90% accurate.
     pub min_recall_at_10: f32,
+    pub p1_recall_at_10: f32,
+    pub p5_recall_at_10: f32,
+    pub zero_recall_queries: usize,
+    pub recall_queries: usize,
     pub nprobe: usize,
     pub candidates: usize,
     pub rerank: usize,
@@ -110,9 +116,9 @@ impl Default for BenchOpts {
             dim: 64,
             nlist: 32,
             pq_m: 8,
-            nprobe: 4,
-            candidates: 200,
-            rerank: 50,
+            nprobe: prism_types::query::DEFAULT_NPROBE,
+            candidates: prism_types::query::DEFAULT_CANDIDATES,
+            rerank: prism_types::query::DEFAULT_RERANK,
             kind: Kind::Zipf,
         }
     }
@@ -127,7 +133,7 @@ pub fn run(root: &Path, opts: &BenchOpts) -> Result<Baselines> {
     let engine = Engine::init(
         root,
         StoreConfig {
-            format_version: prism_part::store::FORMAT_VERSION,
+            format_version: prism_part::store::STORE_VERSION,
             dim: opts.dim,
             nlist: opts.nlist,
             pq_m: opts.pq_m,
@@ -164,9 +170,9 @@ pub fn run(root: &Path, opts: &BenchOpts) -> Result<Baselines> {
         rows_stored += r.manifest.row_count;
         for c in &r.manifest.columns {
             match c.name.as_str() {
-                "pq_codes" => pq_bytes += c.bytes,
-                "vectors" => vec_bytes += c.bytes,
-                _ => other_bytes += c.bytes,
+                "pq_codes" => pq_bytes += c.storage.logical_bytes() as usize,
+                "rerank_vectors" => vec_bytes += c.storage.logical_bytes() as usize,
+                _ => other_bytes += c.storage.logical_bytes() as usize,
             }
         }
     }
@@ -217,7 +223,7 @@ pub fn run(root: &Path, opts: &BenchOpts) -> Result<Baselines> {
 
     Ok(Baselines {
         prism_version: env!("CARGO_PKG_VERSION").to_string(),
-        format_version: prism_part::store::FORMAT_VERSION,
+        format_version: prism_part::store::STORE_VERSION,
         os: std::env::consts::OS.to_string(),
         arch: std::env::consts::ARCH.to_string(),
         profile: if cfg!(debug_assertions) {
@@ -248,6 +254,10 @@ pub fn run(root: &Path, opts: &BenchOpts) -> Result<Baselines> {
 
         recall_at_10: recall.mean_recall,
         min_recall_at_10: recall.min_recall,
+        p1_recall_at_10: recall.p1_recall,
+        p5_recall_at_10: recall.p5_recall,
+        zero_recall_queries: recall.zero_recall_queries,
+        recall_queries: recall.queries,
         nprobe: opts.nprobe,
         candidates: opts.candidates,
         rerank: opts.rerank,
