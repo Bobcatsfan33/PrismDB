@@ -104,19 +104,11 @@ impl Engine {
             return Err(PrismError::Invalid("query text is empty".into()));
         }
 
-        let readers = self.open_parts(snap)?;
         let dim = self.store.config.dim;
 
-        let mut c = Counters {
-            parts_total: readers.len(),
-            ..Default::default()
-        };
-
-        // --- 1. prune on metadata alone ---
-        //
-        // Time bounds come from the query AND, conservatively, from the predicate's
-        // top-level conjunction. `time_bounds` never narrows across an OR: pruning that can
-        // lose a row is not pruning, it is sampling.
+        // Time bounds from the query AND, conservatively, from the predicate's top-level
+        // conjunction. `time_bounds` never narrows across an OR: pruning that can lose a row is
+        // not pruning, it is sampling.
         let (pred_from, pred_to) = match &q.predicate {
             Some(p) => prism_types::predicate::time_bounds(p),
             None => (None, None),
@@ -130,10 +122,43 @@ impl Engine {
             (a, b) => a.or(b),
         };
 
-        let mut eligible: Vec<&PartReader> = readers
-            .iter()
-            .filter(|r| r.manifest.may_match(q.tenant.as_deref(), from, to))
-            .collect();
+        // --- 0. PARTITION PRUNING, IN THE CATALOG, BEFORE ANY PART IS OPENED (S4) ---
+        //
+        // This is the line that makes "cross-tenant reads are physically impossible" an I/O
+        // property rather than a slogan. A part outside this query's partitions is never
+        // opened, never checksummed, never read -- so another tenant's partitions could be
+        // filled with unreadable garbage and this query would still answer correctly, because
+        // it never looked.
+        let (readers, catalog_pruned) =
+            self.open_candidates(snap, q.tenant.as_deref(), from, to)?;
+
+        let mut c = Counters {
+            parts_total: snap.parts.len(),
+            parts_pruned: catalog_pruned,
+            ..Default::default()
+        };
+
+        // --- 1. per-tenant zone maps, inside the parts we did open ---
+        //
+        // A shared bucket's part-level zone map describes the BUCKET, not the tenant. Using it
+        // would both leak (tenant A learns tenant B's time range) and under-prune (A cannot skip
+        // a part whose range is wide only because of B). So a query consults its OWN tenant's
+        // section (directive 3).
+        let mut eligible: Vec<&PartReader> = Vec::new();
+        for r in readers.iter() {
+            let keep = match (
+                q.tenant.as_deref(),
+                r.manifest.s4()?.stats_for_owned(q.tenant.as_deref()),
+            ) {
+                (Some(_), Some(st)) => st.may_match(from, to),
+                _ => r.manifest.may_match(q.tenant.as_deref(), from, to),
+            };
+            if keep {
+                eligible.push(r);
+            } else {
+                c.parts_pruned += 1;
+            }
+        }
 
         // --- 2. embedding-space check (invariant 9) ---
         let mut spaces: BTreeSet<String> = BTreeSet::new();
@@ -153,9 +178,14 @@ impl Engine {
                             spaces
                         )));
                     }
+                    let before = eligible.len();
                     eligible.retain(|r| {
                         format!("{}:{}", r.manifest.model_id, r.manifest.model_version) == *want
                     });
+                    // Parts dropped by the space filter are PRUNED, and must be counted as such.
+                    // Naming a space narrows the query, and a narrowing a caller cannot see in
+                    // the counters is a narrowing they cannot audit.
+                    c.parts_pruned += before - eligible.len();
                 }
                 None => {
                     return Err(PrismError::Invariant(format!(
@@ -170,7 +200,6 @@ impl Engine {
             }
         }
 
-        c.parts_pruned = c.parts_total - eligible.len();
         c.rows_eligible = eligible.iter().map(|r| r.manifest.row_count).sum();
 
         if eligible.is_empty() {

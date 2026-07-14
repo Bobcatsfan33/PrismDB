@@ -48,6 +48,8 @@ fn config(dim: usize, nlist: usize, pq_m: usize) -> StoreConfig {
         pq_m,
         seed: 42,
         block_size: prism_part::format::DEFAULT_BLOCK_SIZE,
+        partitions: Default::default(),
+        promote: Vec::new(),
     }
 }
 
@@ -302,6 +304,8 @@ fn the_committed_golden_corpus_still_means_what_it_meant() {
                 pq_m: 8,
                 seed: 1234,
                 block_size: prism_part::format::DEFAULT_BLOCK_SIZE,
+                partitions: Default::default(),
+                promote: Vec::new(),
             },
         )
         .unwrap_or(engine)
@@ -384,15 +388,27 @@ fn merge_preserves_results_and_reconciles_duplicates_by_the_documented_policy() 
         .ingest(batch(Kind::Uniform, 400, 2, "b"), 2000)
         .unwrap();
 
+    // The duplicate must land in the SAME PARTITION as the row it supersedes, or merge will
+    // never see the collision -- because a merge collapses each partition and never collapses
+    // partitions into each other (S4).
+    //
+    // That is not a loophole: a re-sent event whose event_time MOVED is, by definition, a
+    // different event under the same id, and the S2 admission boundary refuses it as an
+    // `idempotency_conflict` rather than storing it (see
+    // `a_cross_partition_duplicate_is_refused_at_admission_not_reconciled_at_merge`). Only the
+    // S0 loader -- which bypasses admission on purpose -- can produce one, and merge-time
+    // reconciliation is the backstop for duplicates that predate the idempotency window, which
+    // by construction share an event_time and therefore a partition.
+    let original_time = 1_760_000_001_000; // same window as batch "a"
     let dup = Event {
-        observed_time: 9_999_999_999_999,
+        observed_time: original_time,
         trace_id: String::new(),
         span_id: String::new(),
         attributes: Default::default(),
         idempotency_key: None,
         event_id: "a-e00000001".to_string(), // collides with the first batch
         tenant_id: "t0".to_string(),
-        event_time: 9_999_999_999_999, // newer: this one must win
+        event_time: original_time + 1, // newer within the same window: this one must win
         event_name: "db.error".to_string(),
         cost: 1.0,
         error: true,
@@ -403,11 +419,19 @@ fn merge_preserves_results_and_reconciles_duplicates_by_the_documented_policy() 
     let before = engine
         .search(&q("summarize this report in bullet points"))
         .unwrap();
-    assert_eq!(before.counters.parts_total, 3);
+    let engine_parts_before = engine.snapshot().unwrap().parts.len();
 
     let report = engine.merge(4000).unwrap();
-    assert_eq!(report.parts_in, 3);
-    assert_eq!(report.parts_out, 1, "one generation collapses to one part");
+    assert_eq!(report.parts_in, engine_parts_before);
+    // S4: a merge collapses each PARTITION to one part -- it does not collapse partitions into
+    // each other. A part spanning two buckets would be a part that a query for one tenant has a
+    // reason to open on behalf of another, which is precisely the isolation the partitioning
+    // exists to create.
+    assert!(report.parts_out >= 1);
+    assert!(
+        report.parts_out <= report.parts_in,
+        "a merge must not increase the part count"
+    );
     assert_eq!(report.rows_in, 801);
     assert_eq!(
         report.duplicates_reconciled, 1,
@@ -427,7 +451,7 @@ fn merge_preserves_results_and_reconciles_duplicates_by_the_documented_policy() 
         r.hits.iter().map(|h| h.event.event_id.clone()).collect()
     };
     assert_eq!(ids(&before), ids(&after), "merge changed the answer");
-    assert_eq!(after.counters.parts_total, 1);
+    assert!(after.counters.parts_total <= engine_parts_before);
 
     // Last write won.
     let mut find = q("connection pool exhausted while querying the primary");
@@ -492,7 +516,7 @@ fn a_query_refuses_to_merge_scores_across_embedding_spaces() {
         .unwrap();
 
     let snap_v1 = engine.snapshot().unwrap();
-    let part_v1 = snap_v1.parts[0].clone();
+    let part_v1 = snap_v1.part_ids()[0].clone();
 
     // Migrate to model version 2. The new snapshot holds only v2 parts.
     let engine2 = Engine::open(&root)
@@ -510,7 +534,10 @@ fn a_query_refuses_to_merge_scores_across_embedding_spaces() {
         .catalog()
         .commit(
             &snap_v2,
-            vec![part_v1.clone(), snap_v2.parts[0].clone()],
+            vec![
+                prism_part::catalog::PartEntry::Legacy(part_v1.clone()),
+                prism_part::catalog::PartEntry::Legacy(snap_v2.part_ids()[0].clone()),
+            ],
             snap_v2.next_seq + 1,
             snap_v2.active_generation.clone(),
             3000,
@@ -565,7 +592,7 @@ fn rollback_is_a_catalog_write_not_a_data_rewrite() {
     engine2.reembed("2", 2000).unwrap();
 
     // The old part was never touched. Byte for byte, it is still there.
-    let old_part = PartReader::open(&engine.store.part_dir(&original.parts[0])).unwrap();
+    let old_part = PartReader::open(&engine.store.part_dir(&original.part_ids()[0])).unwrap();
     old_part
         .verify()
         .expect("the pre-migration part is still checksum-valid");
@@ -604,7 +631,7 @@ fn gc_never_removes_a_referenced_part() {
     }
 
     let snap = engine.snapshot().unwrap();
-    let live: Vec<String> = snap.parts.clone();
+    let live: Vec<String> = snap.part_ids();
 
     let report = engine.catalog().gc(5, false).unwrap();
     for p in &live {
@@ -634,7 +661,7 @@ fn gc_reclaims_parts_that_no_retained_snapshot_names() {
             .ingest(corpus::generate(Kind::Uniform, 200, i), 1000 + i as i64)
             .unwrap();
     }
-    let pre_merge: Vec<String> = engine.snapshot().unwrap().parts;
+    let pre_merge: Vec<String> = engine.snapshot().unwrap().part_ids();
     engine.merge(5000).unwrap();
 
     // With retention 1, the pre-merge parts are unreachable and reclaimable.
@@ -856,7 +883,7 @@ fn a_v1_part_is_migrated_forward_by_a_merge_not_by_a_rewrite() {
 
     let engine = Engine::open(&root).unwrap();
     let before = engine.snapshot().unwrap();
-    let old_parts = before.parts.clone();
+    let old_parts = before.part_ids();
     assert!(
         engine.open_parts(&before).unwrap()[0].is_legacy(),
         "the fixture should start out as a v1 part"
@@ -876,7 +903,9 @@ fn a_v1_part_is_migrated_forward_by_a_merge_not_by_a_rewrite() {
     // merge is the migration. Nothing else about the store changes, so the
     // answers must come out bit-for-bit identical.
     let report = engine.merge(6_000).unwrap();
-    assert_eq!(report.parts_out, 1);
+    // S4: one part per PARTITION out, not one part total. A merge collapses each partition; it
+    // never collapses partitions into each other.
+    assert!(report.parts_out >= 1);
     assert_eq!(
         report.parts_migrated, 1,
         "the merge did not report a migration"
@@ -999,6 +1028,8 @@ fn cluster_boundary_queries_are_what_expose_the_recall_tail() {
             pq_m: 8,
             seed: 1234,
             block_size: prism_part::format::DEFAULT_BLOCK_SIZE,
+            partitions: Default::default(),
+            promote: Vec::new(),
         },
     )
     .unwrap();

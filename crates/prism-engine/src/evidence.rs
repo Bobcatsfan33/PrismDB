@@ -112,6 +112,8 @@ pub fn sweep_block_size(workdir: &Path, corpus_tsv: &Path) -> Result<BlockSizeEv
                 pq_m: base.pq_m,
                 seed: 1234,
                 block_size: bs,
+                partitions: Default::default(),
+                promote: Vec::new(),
             },
         )?;
         engine.ingest(events.clone(), 1_760_000_000_000)?;

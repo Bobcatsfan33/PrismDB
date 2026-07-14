@@ -255,20 +255,27 @@ impl Engine {
         plan: &Plan,
         snap: &prism_part::catalog::Snapshot,
     ) -> Result<(Vec<(Event, f32)>, Counters)> {
-        let readers = self.open_parts(snap)?;
-        let mut c = Counters {
-            parts_total: readers.len(),
-            ..Default::default()
-        };
-
         let (from, to) = match &plan.filter {
             Some(p) => prism_types::predicate::time_bounds(p),
             None => (None, None),
         };
 
+        // Catalog pruning, before any part is opened (S4).
+        let (readers, catalog_pruned) = self.open_candidates(snap, Some(&plan.tenant), from, to)?;
+        let mut c = Counters {
+            parts_total: snap.parts.len(),
+            parts_pruned: catalog_pruned,
+            ..Default::default()
+        };
+
         let mut out = Vec::new();
         for r in &readers {
-            if !r.manifest.may_match(Some(&plan.tenant), from, to) {
+            // Per-tenant zone map: a shared bucket's part-level range describes the BUCKET.
+            let keep = match r.manifest.s4()?.stats_for(&plan.tenant) {
+                Some(st) => st.may_match(from, to),
+                None => r.manifest.may_match(Some(&plan.tenant), from, to),
+            };
+            if !keep {
                 c.parts_pruned += 1;
                 continue;
             }
@@ -301,8 +308,92 @@ impl Engine {
         Ok((out, c))
     }
 
+    /// Is this a pure `COUNT(*)` — a question about the *number* of rows, not their values?
+    ///
+    /// Then it must not materialize a single one. Decoding bodies, vectors and attribute maps
+    /// to answer "how many?" is work nobody asked for, and it is also what made a promoted
+    /// column read *more* bytes than the attribute map it replaced: the win promotion buys is on
+    /// the *predicate* path, and a scan that materializes everything anyway erases it.
+    fn is_pure_count(plan: &Plan) -> bool {
+        plan.group_by.is_empty()
+            && !plan.projections.is_empty()
+            && plan
+                .projections
+                .iter()
+                .all(|i| matches!(i, Item::Agg(Agg::CountStar)))
+    }
+
+    /// Count matching rows without materializing any of them.
+    fn scalar_count(
+        &self,
+        plan: &Plan,
+        snap: &prism_part::catalog::Snapshot,
+    ) -> Result<(usize, Counters)> {
+        let (from, to) = match &plan.filter {
+            Some(p) => prism_types::predicate::time_bounds(p),
+            None => (None, None),
+        };
+        let (readers, catalog_pruned) = self.open_candidates(snap, Some(&plan.tenant), from, to)?;
+        let mut c = Counters {
+            parts_total: snap.parts.len(),
+            parts_pruned: catalog_pruned,
+            ..Default::default()
+        };
+
+        let mut n = 0usize;
+        for r in &readers {
+            let keep = match r.manifest.s4()?.stats_for(&plan.tenant) {
+                Some(st) => st.may_match(from, to),
+                None => r.manifest.may_match(Some(&plan.tenant), from, to),
+            };
+            if !keep {
+                c.parts_pruned += 1;
+                continue;
+            }
+            c.parts_opened += 1;
+            c.rows_eligible += r.manifest.row_count;
+
+            // Only the columns the predicate names -- plus tenant_id, which the policy names.
+            let mut pred = crate::rowsource::PartRows::new(r, plan.filter.as_ref())?;
+            let tenants = r.read_scalars()?;
+            let _ = &mut pred;
+
+            for row in 0..r.manifest.row_count {
+                if !tenants.tenant_is(row, &plan.tenant) {
+                    continue;
+                }
+                if let Some(p) = &plan.filter {
+                    if !prism_types::predicate::eval(p, &pred, row)? {
+                        continue;
+                    }
+                }
+                c.rows_passing_filter += 1;
+                n += 1;
+            }
+            c.physical_bytes_read += r.io_bytes();
+        }
+        Ok((n, c))
+    }
+
     fn run_aggregate(&self, plan: &Plan) -> Result<SqlResult> {
         let snap = self.snapshot()?;
+
+        if plan.semantic.is_none() && Self::is_pure_count(plan) {
+            let (n, counters) = self.scalar_count(plan, &snap)?;
+            let row: Row = plan
+                .projections
+                .iter()
+                .map(|_| ("count(*)".to_string(), serde_json::json!(n)))
+                .collect();
+            return Ok(SqlResult {
+                columns: projection_names(plan),
+                rows: vec![row],
+                counters,
+                snapshot_id: snap.snapshot_id,
+                next_cursor: None,
+            });
+        }
+
         let (rows, counters) = self.result_set(plan, &snap)?;
 
         // Group. An empty GROUP BY is one group over everything.

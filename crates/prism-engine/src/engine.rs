@@ -43,13 +43,44 @@ impl Engine {
         self.catalog().current()
     }
 
-    /// Open the manifests of every part in a snapshot. Manifests only — no
-    /// column file is touched, which is what makes pruning free.
+    /// Open the manifests of every part in a snapshot.
+    ///
+    /// Used by merge, verify, and the exact oracle — the operations that legitimately need the
+    /// whole store. **The query path does not use this.** It uses [`Engine::open_candidates`],
+    /// which opens only the parts the catalog says a query could possibly need, and that
+    /// distinction is the S4 gate: a tenant-A query must never touch a byte of another tenant's
+    /// partition.
     pub fn open_parts(&self, snap: &Snapshot) -> Result<Vec<PartReader>> {
-        snap.parts
+        snap.part_ids()
             .iter()
             .map(|p| PartReader::open(&self.store.part_dir(p)))
             .collect()
+    }
+
+    /// Open only the parts a query could possibly need — **pruned in the catalog, before a
+    /// single part byte is read.**
+    ///
+    /// This is where "cross-tenant reads are physically impossible" stops being a slogan and
+    /// becomes an I/O property. A part outside the query's partitions is never opened, never
+    /// checksummed, never read. Fill another tenant's partitions with unreadable garbage and a
+    /// tenant-A query still answers correctly, because it never looked.
+    ///
+    /// Returns `(readers, parts_pruned)` — the count is a *measured* fact for the counters, not
+    /// an estimate.
+    pub fn open_candidates(
+        &self,
+        snap: &Snapshot,
+        tenant: Option<&str>,
+        from: Option<i64>,
+        to: Option<i64>,
+    ) -> Result<(Vec<PartReader>, usize)> {
+        let ids = snap.candidate_parts(tenant, from, to);
+        let pruned = snap.parts.len() - ids.len();
+        let readers = ids
+            .iter()
+            .map(|p| PartReader::open(&self.store.part_dir(p)))
+            .collect::<Result<Vec<_>>>()?;
+        Ok((readers, pruned))
     }
 }
 

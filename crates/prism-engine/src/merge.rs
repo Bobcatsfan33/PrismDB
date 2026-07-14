@@ -11,8 +11,10 @@
 //! the *shape* is right, so S10 changes the policy and not the invariants.
 
 use crate::engine::Engine;
+use prism_part::catalog::PartEntry;
 use prism_part::generation::Generation;
-use prism_part::part::{PartWriter, RowIn};
+use prism_part::part::{PartSpec, PartWriter, RowIn};
+use prism_part::partition::PartitionKey;
 use prism_quantizer::{CoarseCodebook, PqCodebook};
 use prism_types::error::{PrismError, Result};
 use prism_types::event::Event;
@@ -94,9 +96,13 @@ impl Engine {
         let mut bytes_read = 0usize;
         let mut rows_in = 0usize;
 
-        // Group by generation: rows encoded under different codebooks cannot
-        // share a part, because a part pins exactly one generation.
-        let mut by_gen: BTreeMap<String, BTreeMap<String, RowIn>> = BTreeMap::new();
+        // Group by **partition**, not merely by generation. A merge that combined two
+        // partitions would undo the isolation the partitioning exists to create: a part
+        // spanning two buckets is a part a query for one tenant has a reason to open on behalf
+        // of another. The generation is part of the partition key, so this subsumes the old
+        // grouping.
+        let scheme = self.store.config.partitions.clone();
+        let mut by_partition: BTreeMap<PartitionKey, BTreeMap<String, RowIn>> = BTreeMap::new();
         let mut duplicates = 0usize;
 
         for r in &readers {
@@ -109,10 +115,14 @@ impl Engine {
             let rows = r.read_all()?;
             rows_in += rows.events.len();
             let m = r.manifest.pq_m;
-            let bucket = by_gen.entry(r.manifest.generation_id.clone()).or_default();
-
             for i in 0..rows.events.len() {
                 let ev = rows.events[i].clone();
+                let key = PartitionKey {
+                    bucket: scheme.bucket_of(&ev.tenant_id),
+                    window: scheme.window_of(ev.event_time),
+                    generation: r.manifest.generation_id.clone(),
+                };
+                let bucket = by_partition.entry(key).or_default();
                 let row = RowIn {
                     centroid: rows.centroids[i],
                     code: rows.codes[i * m..(i + 1) * m].to_vec(),
@@ -139,11 +149,19 @@ impl Engine {
         let mut rows_out = 0usize;
         let mut bytes_written = 0usize;
 
-        for (gen_id, bucket) in by_gen {
-            let g = self.catalog().get_generation(&gen_id)?;
+        for (key, bucket) in by_partition {
+            let g = self.catalog().get_generation(&key.generation)?;
             let rows: Vec<RowIn> = bucket.into_values().collect();
             rows_out += rows.len();
 
+            // A merge is also how a part is migrated onto a NEW promotion scheme: it rewrites
+            // rows into a fresh part under the store's current `promote` list. Existing parts
+            // are never touched, so both representations coexist -- which is exactly what the
+            // dual-door equivalence test exercises.
+            let spec = PartSpec {
+                partition: Some(key.clone()),
+                promote: self.store.config.promote.clone(),
+            };
             let manifest = PartWriter::write(
                 &self.store.parts_dir(),
                 next_seq,
@@ -153,6 +171,7 @@ impl Engine {
                 dim,
                 self.store.config.pq_m,
                 self.store.config.block_size,
+                &spec,
                 rows,
                 now_ms,
             )?;
@@ -161,7 +180,9 @@ impl Engine {
                 .iter()
                 .map(|c| c.storage.logical_bytes() as usize)
                 .sum::<usize>();
-            new_parts.push(manifest.part_id);
+            new_parts.push(PartEntry::Located(crate::ingest::part_ref(
+                &manifest, &key,
+            )?));
             next_seq += 1;
         }
 
@@ -298,26 +319,55 @@ impl Engine {
             .collect::<Result<Vec<_>>>()?;
         let count = rows.len();
 
-        let manifest = PartWriter::write(
-            &self.store.parts_dir(),
-            snap.next_seq,
-            &new_gen.generation_id,
-            &new_gen.model_id,
-            &new_gen.model_version,
-            dim,
-            self.store.config.pq_m,
-            self.store.config.block_size,
-            rows,
-            now_ms,
-        )?;
+        // The generation is part of the partition key, so a re-embed necessarily writes into
+        // NEW partitions -- which is exactly right: a part is pinned to one generation, and a
+        // partition that spanned two would be a partition whose parts disagree about what their
+        // bytes mean.
+        let scheme = self.store.config.partitions.clone();
+        let mut by_partition: BTreeMap<PartitionKey, Vec<RowIn>> = BTreeMap::new();
+        for r in rows {
+            let key = PartitionKey {
+                bucket: scheme.bucket_of(&r.event.tenant_id),
+                window: scheme.window_of(r.event.event_time),
+                generation: new_gen.generation_id.clone(),
+            };
+            by_partition.entry(key).or_default().push(r);
+        }
+
+        let mut new_parts: Vec<PartEntry> = Vec::new();
+        let mut seq = snap.next_seq;
+        for (key, rows) in by_partition {
+            let spec = PartSpec {
+                partition: Some(key.clone()),
+                promote: self.store.config.promote.clone(),
+            };
+            let manifest = PartWriter::write(
+                &self.store.parts_dir(),
+                seq,
+                &new_gen.generation_id,
+                &new_gen.model_id,
+                &new_gen.model_version,
+                dim,
+                self.store.config.pq_m,
+                self.store.config.block_size,
+                &spec,
+                rows,
+                now_ms,
+            )?;
+            seq += 1;
+            new_parts.push(PartEntry::Located(crate::ingest::part_ref(
+                &manifest, &key,
+            )?));
+        }
+        let parts_written = new_parts.len();
 
         // 4. One atomic swap. Before it, every query sees the old generation;
         //    after it, every query sees the new one. Never a mixture of the two
         //    in a single answer.
         let new_snap = self.catalog().commit(
             &snap,
-            vec![manifest.part_id],
-            snap.next_seq + 1,
+            new_parts,
+            seq,
             Some(new_gen.generation_id.clone()),
             now_ms,
         )?;
@@ -328,7 +378,7 @@ impl Engine {
             old_model: format!("{}:{}", old_gen.model_id, old_gen.model_version),
             new_model: format!("{}:{}", embedder.model_id(), embedder.model_version()),
             rows: count,
-            parts_written: 1,
+            parts_written,
             snapshot_id: new_snap.snapshot_id,
             rollback_to: snap.snapshot_id,
         })

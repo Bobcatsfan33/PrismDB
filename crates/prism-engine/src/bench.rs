@@ -141,6 +141,8 @@ pub fn run(root: &Path, opts: &BenchOpts) -> Result<Baselines> {
             pq_m: opts.pq_m,
             seed: opts.seed,
             block_size: opts.block_size,
+            partitions: Default::default(),
+            promote: Vec::new(),
         },
     )?;
 

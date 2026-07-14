@@ -37,6 +37,26 @@ pub fn columns_used(p: &Predicate, out: &mut BTreeSet<String>, attrs: &mut bool)
 /// A string column's blob and its offset array.
 type StringCol = (Vec<u8>, Vec<i64>);
 
+/// Which attribute keys a predicate names.
+pub fn attribute_keys_used(p: &Predicate, out: &mut BTreeSet<String>) {
+    match p {
+        Predicate::Attribute(k) => {
+            out.insert(k.clone());
+        }
+        Predicate::Column(_) | Predicate::Literal(_) => {}
+        Predicate::Not(a) => attribute_keys_used(a, out),
+        Predicate::And(a, b) | Predicate::Or(a, b) => {
+            attribute_keys_used(a, out);
+            attribute_keys_used(b, out);
+        }
+        Predicate::Cmp(a, _, b) => {
+            attribute_keys_used(a, out);
+            attribute_keys_used(b, out);
+        }
+        Predicate::In(a, _) => attribute_keys_used(a, out),
+    }
+}
+
 /// A lazily-loaded view of one part's columns, for predicate evaluation.
 pub struct PartRows<'a> {
     reader: &'a PartReader,
@@ -47,6 +67,10 @@ pub struct PartRows<'a> {
     errors: Option<Vec<u8>>,
     strings: RefCell<std::collections::BTreeMap<String, StringCol>>,
     attrs: Option<StringCol>,
+    /// Attribute keys this part stores as typed columns rather than map entries — **loaded
+    /// once per part, not once per row.** The first version re-read all three column files on
+    /// every row, which made promotion read *more* bytes than the map it replaced.
+    promoted: Vec<(String, prism_part::part::PromotedCol)>,
     /// Filled in per query, since `score` is not a stored column.
     pub score: RefCell<f32>,
 }
@@ -57,6 +81,20 @@ impl<'a> PartRows<'a> {
         let mut wants_attrs = false;
         if let Some(p) = pred {
             columns_used(p, &mut cols, &mut wants_attrs);
+        }
+        // If every attribute the predicate touches is promoted in THIS part, the attribute map
+        // is never decoded at all. That is the win promotion is supposed to buy, and it is why
+        // physical_bytes_read is the one counter that legitimately differs between the two
+        // representations -- if it did not, promotion bought nothing.
+        let s4 = reader.manifest.s4()?;
+        if wants_attrs && !s4.promoted.is_empty() {
+            let mut keys = BTreeSet::new();
+            if let Some(p) = pred {
+                attribute_keys_used(p, &mut keys);
+            }
+            if keys.iter().all(|k| s4.promoted_for(k).is_some()) {
+                wants_attrs = false;
+            }
         }
         let n = reader.manifest.row_count;
 
@@ -87,6 +125,24 @@ impl<'a> PartRows<'a> {
                 Some((d, o))
             } else {
                 None
+            },
+            promoted: {
+                let s4 = reader.manifest.s4()?;
+                let mut v = Vec::new();
+                for p in &s4.promoted {
+                    // Only load a promoted column the predicate actually names.
+                    if pred
+                        .map(|pr| {
+                            let mut keys = BTreeSet::new();
+                            attribute_keys_used(pr, &mut keys);
+                            keys.contains(&p.key)
+                        })
+                        .unwrap_or(false)
+                    {
+                        v.push((p.key.clone(), reader.promoted_column(p)?));
+                    }
+                }
+                v
             },
             strings: RefCell::new(std::collections::BTreeMap::new()),
             score: RefCell::new(0.0),
@@ -149,6 +205,16 @@ impl RowSource for PartRows<'_> {
     }
 
     fn attribute(&self, key: &str, row: usize) -> Result<Value> {
+        // **The dispatch that makes promotion safe.** A part that promoted this key no longer
+        // has it in its attribute map; a part written before the promotion still does. The
+        // caller asks for a KEY and gets the same answer either way -- which is the whole
+        // point, and what the dual-door equivalence test hammers.
+        if let Some((_, col)) = self.promoted.iter().find(|(k, _)| k == key) {
+            return Ok(col
+                .value(row)?
+                .map(|v| Value::from_attr(&v))
+                .unwrap_or(Value::Null));
+        }
         let Some((d, o)) = &self.attrs else {
             return Ok(Value::Null);
         };

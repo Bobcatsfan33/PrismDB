@@ -12,14 +12,17 @@
 //! reconstruct later.
 
 use crate::engine::Engine;
+use prism_part::catalog::PartEntry;
 use prism_part::generation::Generation;
-use prism_part::part::{PartWriter, RowIn};
+use prism_part::part::{PartManifest, PartSpec, PartWriter, RowIn};
+use prism_part::partition::{PartRef, PartitionKey};
 use prism_quantizer::{CoarseCodebook, PqCodebook};
 use prism_types::error::Result;
 use prism_types::event::{DeadLetter, Event};
 use prism_types::rng::Rng;
 use prism_types::Embedder;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs::OpenOptions;
 use std::io::Write;
 
@@ -33,6 +36,19 @@ pub struct IngestReport {
     /// True when this ingest had to bootstrap the first generation by training
     /// codebooks. Worth knowing: those codebooks saw only this data.
     pub trained_generation: bool,
+}
+
+/// What the catalog records about a freshly written part — enough to prune it *without
+/// opening it*, which is the whole S4 isolation property.
+pub fn part_ref(m: &PartManifest, key: &PartitionKey) -> Result<PartRef> {
+    Ok(PartRef {
+        part_id: m.part_id.clone(),
+        partition: key.clone(),
+        rows: m.row_count,
+        tenants: m.tenants.clone(),
+        time_min: m.time_min,
+        time_max: m.time_max,
+    })
 }
 
 /// Cap on how many vectors are used to train a codebook. Reservoir-sampled, so
@@ -199,32 +215,60 @@ impl Engine {
 
         let admitted = rows.len();
 
+        // --- buffer by outer partition (S4) ---
+        //
+        // `tenant-bucket x event-time window x generation`. One part per partition, so a part
+        // never spans two buckets and a query for one tenant never has a reason to open a part
+        // belonging to another. Keyed on event_time -- always -- because agent telemetry is
+        // late by nature and keying on arrival would smear one trace across partitions.
+        let scheme = &self.store.config.partitions;
+        let mut by_partition: BTreeMap<PartitionKey, Vec<RowIn>> = BTreeMap::new();
+        for r in rows {
+            let key = PartitionKey {
+                bucket: scheme.bucket_of(&r.event.tenant_id),
+                window: scheme.window_of(r.event.event_time),
+                generation: generation.generation_id.clone(),
+            };
+            by_partition.entry(key).or_default().push(r);
+        }
+
         // **The crash that matters most.** The batch is acked (it is in the WAL),
         // the embedding has already cost GPU time, and these events exist nowhere
         // durable but the log. Recovery must bring them back -- exactly once, with
         // their semantic columns.
         prism_part::faults::maybe_kill("ingest.after_embed_before_part");
 
-        let manifest = PartWriter::write(
-            &self.store.parts_dir(),
-            snap.next_seq,
-            &generation.generation_id,
-            &generation.model_id,
-            &generation.model_version,
-            self.store.config.dim,
-            self.store.config.pq_m,
-            self.store.config.block_size,
-            rows,
-            now_ms,
-        )?;
-
         let mut parts = snap.parts.clone();
-        parts.push(manifest.part_id.clone());
+        let mut seq = snap.next_seq;
+        let mut first_part: Option<String> = None;
+
+        for (key, rows) in by_partition {
+            let spec = PartSpec {
+                partition: Some(key.clone()),
+                promote: self.store.config.promote.clone(),
+            };
+            let manifest = PartWriter::write(
+                &self.store.parts_dir(),
+                seq,
+                &generation.generation_id,
+                &generation.model_id,
+                &generation.model_version,
+                self.store.config.dim,
+                self.store.config.pq_m,
+                self.store.config.block_size,
+                &spec,
+                rows,
+                now_ms,
+            )?;
+            seq += 1;
+            first_part.get_or_insert(manifest.part_id.clone());
+            parts.push(PartEntry::Located(part_ref(&manifest, &key)?));
+        }
 
         let new_snap = self.catalog().commit(
             snap,
             parts,
-            snap.next_seq + 1,
+            seq,
             Some(generation.generation_id.clone()),
             now_ms,
         )?;
@@ -232,7 +276,7 @@ impl Engine {
         Ok(IngestReport {
             admitted,
             dead_lettered: dead.len(),
-            part_id: Some(manifest.part_id),
+            part_id: first_part,
             snapshot_id: new_snap.snapshot_id,
             generation_id: generation.generation_id.clone(),
             trained_generation: trained,
