@@ -29,7 +29,9 @@ Sprint gates from [PRISM.md](PRISM.md) Part IV. **A sprint is done when its gate
 
 **Gate:** *clean checkout passes CI; baselines checked in; every engineer can identify the commit point and explain why GC is separate.*
 
-**Proof:** the `ci` workflow on `main`. It runs `fmt`, `clippy -D warnings`, the full test suite in debug **and** release, the fault-injection matrix, the golden recall check, and — literally, by extracting the shell block out of `README.md` and executing it — the README quickstart.
+**Proof:** [CI run #29302009336](https://github.com/Bobcatsfan33/PrismDB/actions/runs/29302009336) — all eight jobs green on a clean checkout of `main`: `fmt`, `clippy -D warnings`, the full test suite in debug **and** release, the fault-injection matrix, the format-compatibility fixtures, the golden recall check, the baselines report, and — literally, by extracting the shell block out of `README.md` and executing it — the README quickstart.
+
+**The commit point** is `Catalog::commit` in `crates/prism-part/src/catalog.rs`. It writes the snapshot file durably, then swaps `CURRENT` with a single atomic rename. Before that rename the old snapshot is live; after it, the new one is. There is no third state, and every kill point in the fault matrix is an assertion of exactly that.
 
 ### What is proven, and by which test
 
