@@ -361,6 +361,8 @@ Also refused rather than ignored: a second statement (`SELECT 1; DROP TABLE even
 
 ## S4 — complete
 
+**Proof:** [CI run #29355868298](https://github.com/Bobcatsfan33/PrismDB/actions/runs/29355868298) — all fifteen jobs green on `main`, including the new S4 gate (isolation as an I/O property, and the promotion dual door), the charter-C-1 constant ledger, the charter-C-2 frozen-corpus byte check, and the baselines job whose **tail** recall floor is the thing that caught [D-033](DECISIONS.md). 238 tests.
+
 **Gate:** *selective benchmarks read only eligible partitions/blocks; recall within tolerance of S0; **cross-tenant reads impossible even with malformed metadata or a poisoned cache**.*
 
 ### 1. "Physically impossible" is now an I/O property
