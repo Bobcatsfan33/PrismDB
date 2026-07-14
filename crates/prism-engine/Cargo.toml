@@ -1,0 +1,15 @@
+[package]
+name = "prism-engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "PrismDB engine: ingest, prune, centroid-range scan, exact rerank, semantic grouping, merge, re-embed."
+
+[dependencies]
+prism-types = { workspace = true }
+prism-quantizer = { workspace = true }
+prism-part = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

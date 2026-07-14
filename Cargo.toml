@@ -4,6 +4,8 @@ members = [
     "crates/prism-types",
     "crates/prism-quantizer",
     "crates/prism-part",
+    "crates/prism-engine",
+    "crates/prism-cli",
 ]
 
 [workspace.package]
