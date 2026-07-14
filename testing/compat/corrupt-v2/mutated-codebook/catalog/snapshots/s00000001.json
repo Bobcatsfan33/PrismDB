@@ -1,0 +1,10 @@
+{
+  "snapshot_id": "s00000001",
+  "parent": "s00000000",
+  "parts": [
+    "p00000001-89d9e286fbe4cc35"
+  ],
+  "next_seq": 2,
+  "active_generation": "11bc6235d83235d2",
+  "created_at_ms": 1783999610016
+}

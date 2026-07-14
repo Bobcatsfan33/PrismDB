@@ -8,7 +8,7 @@ use prism_engine::corpus::{self, Kind};
 use prism_engine::model::HashModelPlane;
 use prism_engine::{oracle, tsv, Engine};
 use prism_part::part::PartReader;
-use prism_part::store::{StoreConfig, FORMAT_VERSION};
+use prism_part::store::{StoreConfig, STORE_VERSION};
 use prism_types::error::PrismError;
 use prism_types::{Event, Query};
 use std::path::{Path, PathBuf};
@@ -42,7 +42,7 @@ fn repo_root() -> PathBuf {
 
 fn config(dim: usize, nlist: usize, pq_m: usize) -> StoreConfig {
     StoreConfig {
-        format_version: FORMAT_VERSION,
+        format_version: STORE_VERSION,
         dim,
         nlist,
         pq_m,
@@ -295,7 +295,7 @@ fn the_committed_golden_corpus_still_means_what_it_meant() {
         Engine::init(
             &root,
             StoreConfig {
-                format_version: FORMAT_VERSION,
+                format_version: STORE_VERSION,
                 dim: 64,
                 nlist: 32,
                 pq_m: 8,
@@ -697,37 +697,332 @@ fn todays_build_opens_the_committed_v1_fixture() {
 }
 
 #[test]
-fn every_corrupt_fixture_is_rejected_with_a_specific_error() {
-    let corrupt = repo_root().join("testing/compat/corrupt");
+fn todays_build_opens_the_committed_v2_fixture() {
+    let fixture = repo_root().join("testing/compat/v2");
+    let engine = Engine::open(&fixture).expect("the v2 fixture must open");
 
-    let cases = [
-        ("flipped-byte", "checksum"),
-        ("truncated-column", "bytes"),
-        ("future-format", "format version"),
-        ("mutated-codebook", "hash to its own id"),
-        ("bad-offsets", "outside"),
+    let report = engine
+        .catalog()
+        .verify()
+        .expect("every v2 byte still checksums");
+    assert_eq!(report.parts_verified, 1);
+
+    let snap = engine.snapshot().unwrap();
+    let parts = engine.open_parts(&snap).unwrap();
+    assert!(!parts[0].is_legacy(), "the v2 fixture must be v2");
+    assert_eq!(parts[0].manifest.format_version, prism_part::FORMAT_VERSION);
+
+    // Every v2 part declares what its rerank tier is, and what accuracy that
+    // encoding owes a caller (D-003-resolved).
+    assert_eq!(parts[0].manifest.rerank.describe(), "float32/exact");
+
+    let mut query = q("tool call timed out retrying");
+    query.nprobe = 8;
+    let res = engine.search(&query).unwrap();
+    assert!(!res.hits.is_empty());
+    assert_eq!(res.hits[0].event.event_name, "tool.retry");
+}
+
+#[test]
+fn every_corrupt_fixture_is_rejected_with_a_specific_error() {
+    // Twelve ways a v2 part can lie, and five ways a v1 part can. Each must be
+    // refused with an error that says *which byte lied* — an operator woken at
+    // 3am cannot act on the word "corrupt".
+    let cases: [(&str, &str, &str); 17] = [
+        // --- v2: the manifest itself ---
+        ("corrupt-v2", "bad-magic", "not a part file"),
+        ("corrupt-v2", "bad-header-crc", "header failed checksum"),
+        ("corrupt-v2", "bad-body-crc", "body failed checksum"),
+        ("corrupt-v2", "future-format", "format version"),
+        ("corrupt-v2", "unknown-feature", "feature bits"),
+        // --- v2: things the manifest declares that we cannot honour ---
+        ("corrupt-v2", "unknown-codec", "codec id 99"),
+        (
+            "corrupt-v2",
+            "unknown-rerank-encoding",
+            "rerank encoding id 2",
+        ),
+        // --- v2: a length no bytes could back (the S1 allocation gate) ---
+        ("corrupt-v2", "absurd-length", "refusing to allocate"),
+        // --- v2: the stored bytes ---
+        ("corrupt-v2", "block-checksum", "block 0 failed checksum"),
+        ("corrupt-v2", "truncated-column", "is truncated"),
+        ("corrupt-v2", "bad-offsets", "outside"),
+        ("corrupt-v2", "mutated-codebook", "hash to its own id"),
+        // --- v1: still readable, so still refusable ---
+        ("corrupt", "flipped-byte", "checksum"),
+        ("corrupt", "truncated-column", "bytes"),
+        ("corrupt", "future-format", "format version"),
+        ("corrupt", "mutated-codebook", "hash to its own id"),
+        ("corrupt", "bad-offsets", "outside"),
     ];
 
-    for (dir, expect) in cases {
-        let path = corrupt.join(dir);
-        assert!(path.exists(), "missing corrupt fixture {dir}");
+    for (family, dir, expect) in cases {
+        let path = repo_root().join("testing/compat").join(family).join(dir);
+        assert!(path.exists(), "missing corrupt fixture {family}/{dir}");
 
-        // Whatever the failure is, it must surface as a specific Corrupt error,
-        // and the message must say which byte lied.
         let err = Engine::open(&path)
             .and_then(|e| e.catalog().verify())
-            .expect_err(&format!("corrupt fixture `{dir}` was accepted"));
+            .expect_err(&format!("corrupt fixture `{family}/{dir}` was accepted"));
 
         let msg = err.to_string();
         assert!(
             matches!(err, PrismError::Corrupt(_)),
-            "fixture `{dir}` produced {err:?}, not a Corrupt error"
+            "fixture `{family}/{dir}` produced {err:?}, not a Corrupt error"
         );
         assert!(
             msg.contains(expect),
-            "fixture `{dir}` error did not explain itself: {msg}"
+            "fixture `{family}/{dir}` did not explain itself.\n  wanted: {expect}\n  got:    {msg}"
         );
     }
+}
+
+#[test]
+fn fsck_condemns_a_bad_part_without_a_catalog_and_reports_every_wound() {
+    // The offline validator answers one question about a directory of bytes,
+    // needing no engine and no catalog: is this a part, and is it intact?
+    let good = repo_root().join("testing/compat/v2");
+    let reports = prism_part::fsck::fsck(&good).unwrap();
+    assert_eq!(reports.len(), 1);
+    assert!(
+        reports[0].ok,
+        "a healthy part was condemned: {:?}",
+        reports[0].findings
+    );
+    assert!(reports[0].blocks_checked > 0);
+    assert_eq!(reports[0].rerank_encoding.as_deref(), Some("float32/exact"));
+
+    let bad = repo_root().join("testing/compat/corrupt-v2/block-checksum");
+    let reports = prism_part::fsck::fsck(&bad).unwrap();
+    assert!(!reports[0].ok);
+    assert!(
+        reports[0].findings.iter().any(|f| f.kind == "block"),
+        "a damaged block should be reported as a block finding: {:?}",
+        reports[0].findings
+    );
+}
+
+#[test]
+fn a_v1_part_is_migrated_forward_by_a_merge_not_by_a_rewrite() {
+    // The compatibility promise has two halves. Today's build must *read*
+    // yesterday's parts — and it must have a way to move them forward that does
+    // not violate immutability. That way is the merge: read the old immutable
+    // part, write a new immutable part, swap the catalog. The v1 bytes are never
+    // touched, which is why a rollback is still possible afterwards.
+    let root = tmp("migrate");
+    copy_tree(&repo_root().join("testing/compat/v1"), &root);
+
+    let engine = Engine::open(&root).unwrap();
+    let before = engine.snapshot().unwrap();
+    let old_parts = before.parts.clone();
+    assert!(
+        engine.open_parts(&before).unwrap()[0].is_legacy(),
+        "the fixture should start out as a v1 part"
+    );
+
+    let mut query = q("tool call timed out retrying");
+    query.nprobe = 8;
+    let hits_before: Vec<String> = engine
+        .search(&query)
+        .unwrap()
+        .hits
+        .iter()
+        .map(|h| h.event.event_id.clone())
+        .collect();
+
+    // No new data: a legacy part is reason enough for a merge to run, because the
+    // merge is the migration. Nothing else about the store changes, so the
+    // answers must come out bit-for-bit identical.
+    let report = engine.merge(6_000).unwrap();
+    assert_eq!(report.parts_out, 1);
+    assert_eq!(
+        report.parts_migrated, 1,
+        "the merge did not report a migration"
+    );
+    assert_eq!(report.duplicates_reconciled, 0);
+    assert_eq!(report.rows_in, report.rows_out);
+
+    // Everything is v2 now...
+    let after = engine.snapshot().unwrap();
+    let parts = engine.open_parts(&after).unwrap();
+    assert!(
+        parts.iter().all(|p| !p.is_legacy()),
+        "the merge did not migrate the v1 part"
+    );
+    assert_eq!(parts[0].manifest.rerank.describe(), "float32/exact");
+
+    // ...the v1 bytes are still sitting there, untouched and still valid...
+    for p in &old_parts {
+        let old = PartReader::open(&engine.store.part_dir(p)).unwrap();
+        assert!(old.is_legacy());
+        old.verify()
+            .expect("the v1 part was mutated by the migration");
+    }
+
+    // ...and the answers are identical. A migration that changes an answer is not
+    // a migration, it is a data-loss incident with good PR.
+    let hits_after: Vec<String> = engine
+        .search(&query)
+        .unwrap()
+        .hits
+        .iter()
+        .map(|h| h.event.event_id.clone())
+        .collect();
+    assert_eq!(
+        hits_before, hits_after,
+        "migrating v1 -> v2 changed the answer"
+    );
+
+    // And the store still verifies end to end after the format moved under it.
+    engine.catalog().verify().unwrap();
+
+    std::fs::remove_dir_all(root).ok();
+}
+
+fn copy_tree(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for e in std::fs::read_dir(from).unwrap() {
+        let e = e.unwrap();
+        let dst = to.join(e.file_name());
+        if e.path().is_dir() {
+            copy_tree(&e.path(), &dst);
+        } else {
+            std::fs::copy(e.path(), dst).unwrap();
+        }
+    }
+}
+
+// -------------------------------------------------- the recall tail (S1)
+
+#[test]
+fn the_default_nprobe_still_matches_its_committed_provenance() {
+    // PRISM.md Part I §5.3: "No magic constants in docs or defaults without
+    // benchmark provenance." DEFAULT_NPROBE is derived from a sweep on the golden
+    // corpus, and `testing/golden/nprobe-provenance.json` is the receipt. This
+    // test is what stops the constant from drifting away from its evidence: if
+    // someone edits one without re-deriving the other, CI says so.
+    let prov: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(repo_root().join("testing/golden/nprobe-provenance.json")).unwrap(),
+    )
+    .unwrap();
+
+    let chosen = prov["chosen_nprobe"].as_u64().unwrap() as usize;
+    assert_eq!(
+        chosen,
+        prism_types::query::DEFAULT_NPROBE,
+        "DEFAULT_NPROBE is {} but the committed sweep chose {chosen}. One of them is stale — \
+         re-derive with `prism golden sweep`, do not just edit the constant.",
+        prism_types::query::DEFAULT_NPROBE
+    );
+
+    // And the receipt must actually justify the choice: the chosen probe count
+    // clears the tail floor, and every smaller one does not.
+    let floor = prov["p1_floor"].as_f64().unwrap();
+    for row in prov["sweep"].as_array().unwrap() {
+        let np = row["nprobe"].as_u64().unwrap() as usize;
+        let p1 = row["p1_recall"].as_f64().unwrap();
+        if np < chosen {
+            assert!(
+                p1 < floor,
+                "nprobe={np} already clears the p1 floor ({p1:.3} >= {floor}), so {chosen} is \
+                 not the smallest probe count that does"
+            );
+        }
+        if np == chosen {
+            assert!(
+                p1 >= floor,
+                "the chosen nprobe does not clear its own floor"
+            );
+        }
+    }
+}
+
+#[test]
+fn cluster_boundary_queries_are_what_expose_the_recall_tail() {
+    // The finding this whole sprint's recall work exists for. At nprobe=1, queries
+    // aimed at the *middle* of a cluster are answered perfectly — and queries that
+    // sit *between* two clusters fail outright, because their true neighbours are
+    // split across two centroids and one probe reaches only one of them.
+    //
+    // A benchmark that only asks easy questions reports a mean of 0.90 and calls
+    // it a day. This test insists the hard class exists, and that the default
+    // probe count actually fixes it.
+    let root = tmp("boundary");
+    let engine = Engine::init(
+        &root,
+        StoreConfig {
+            format_version: STORE_VERSION,
+            dim: 64,
+            nlist: 32,
+            pq_m: 8,
+            seed: 1234,
+        },
+    )
+    .unwrap();
+    let events = tsv::parse(
+        &std::fs::read_to_string(repo_root().join("testing/golden/corpus.tsv")).unwrap(),
+    )
+    .unwrap();
+    engine.ingest(events, 1_000).unwrap();
+
+    let golden: oracle::Golden = serde_json::from_slice(
+        &std::fs::read(repo_root().join("testing/golden/expected.json")).unwrap(),
+    )
+    .unwrap();
+
+    let by = |r: &oracle::RecallReport, kind: &str| -> oracle::ClassRecall {
+        r.by_kind.iter().find(|c| c.kind == kind).unwrap().clone()
+    };
+
+    // One probe: the easy class is perfect, the hard class is not.
+    let one = oracle::measure_recall(&engine, &golden, 1, 200, 50).unwrap();
+    let topic = by(&one, oracle::KIND_TOPIC);
+    let boundary = by(&one, oracle::KIND_BOUNDARY);
+
+    assert_eq!(
+        topic.zero_recall_queries, 0,
+        "topic queries should be easy even at nprobe=1"
+    );
+    assert!(
+        boundary.zero_recall_queries > 0,
+        "no cluster-boundary query failed at nprobe=1 — the golden set is not actually testing \
+         the boundary case, and the tail metric is measuring nothing"
+    );
+    assert!(
+        one.mean_recall > 0.85,
+        "the mean is supposed to look *reassuring* here; that is the entire point"
+    );
+    assert_eq!(
+        one.p1_recall, 0.0,
+        "the tail is supposed to be catastrophic here"
+    );
+
+    // The derived default: nobody is left behind.
+    let dflt = oracle::measure_recall(
+        &engine,
+        &golden,
+        prism_types::query::DEFAULT_NPROBE,
+        200,
+        50,
+    )
+    .unwrap();
+    assert_eq!(
+        dflt.zero_recall_queries, 0,
+        "the default probe count still fails {} queries entirely",
+        dflt.zero_recall_queries
+    );
+    assert!(
+        dflt.p1_recall >= 0.8,
+        "p1 recall {} is below the floor",
+        dflt.p1_recall
+    );
+    assert!(
+        dflt.mean_scan_fraction < 0.25,
+        "the default buys its tail by scanning {:.1}% of the data",
+        dflt.mean_scan_fraction * 100.0
+    );
+
+    std::fs::remove_dir_all(root).ok();
 }
 
 // ------------------------------------------------------------------ grouping
