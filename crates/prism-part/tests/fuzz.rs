@@ -52,6 +52,8 @@ fn build_part(root: &Path, rows: usize) -> PathBuf {
             pq_m: PQ_M,
             seed: 1,
             block_size: prism_part::format::DEFAULT_BLOCK_SIZE,
+            partitions: Default::default(),
+            promote: Vec::new(),
         },
     )
     .unwrap();
@@ -92,6 +94,7 @@ fn build_part(root: &Path, rows: usize) -> PathBuf {
         DIM,
         PQ_M,
         prism_part::format::DEFAULT_BLOCK_SIZE,
+        &prism_part::part::PartSpec::default(),
         rows,
         1_000,
     )

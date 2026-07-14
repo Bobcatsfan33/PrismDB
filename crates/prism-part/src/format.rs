@@ -115,7 +115,7 @@ pub const FEATURE_TRACE_CONTEXT: u64 = 1 << 2;
 // that sets one is refused by this build, which is exactly right — we cannot read
 // it, and guessing would be worse than failing.
 
-/// S3/S4: hot attributes promoted to typed top-level columns (issue #2).
+/// S4: hot attributes promoted to typed top-level columns (issue #2).
 pub const FEATURE_PROMOTED_COLUMNS: u64 = 1 << 3;
 /// S4: outer-partition metadata (tenant-bucket x time-window x generation).
 pub const FEATURE_PARTITION_META: u64 = 1 << 4;
@@ -125,8 +125,11 @@ pub const FEATURE_COLUMN_COMPRESSION: u64 = 1 << 5;
 pub const FEATURE_ENCRYPTION: u64 = 1 << 6;
 
 /// Every feature this build understands. Anything outside this mask is refused.
-pub const SUPPORTED_FEATURES: u64 =
-    FEATURE_BLOCK_FRAMING | FEATURE_ATTRIBUTES | FEATURE_TRACE_CONTEXT;
+pub const SUPPORTED_FEATURES: u64 = FEATURE_BLOCK_FRAMING
+    | FEATURE_ATTRIBUTES
+    | FEATURE_TRACE_CONTEXT
+    | FEATURE_PARTITION_META
+    | FEATURE_PROMOTED_COLUMNS;
 
 // --- TLV extensions -----------------------------------------------------------
 
@@ -152,9 +155,16 @@ impl Extension {
     }
 }
 
-/// Extension ids this build understands. Empty today — the mechanism ships before
-/// its first user, on purpose, so that the first user is not also a format break.
-pub const SUPPORTED_EXTENSIONS: &[u16] = &[];
+/// Extension ids this build understands.
+///
+/// The mechanism shipped in S2 with this list **empty**, on purpose, so that its first user
+/// would not also be a format break. S4 is that first user: partition metadata, per-tenant
+/// scoped statistics and promoted columns land here as a flagged extension on v3 — not a v4
+/// (D-020).
+///
+/// Forgetting to register an extension here is not a subtle bug: the build refuses its own
+/// parts, loudly, at the commit that would have published them. It did, during S4.
+pub const SUPPORTED_EXTENSIONS: &[u16] = &[crate::ext::EXT_S4_PARTITION];
 
 /// Fixed reserved manifest words. Must be zero; a non-zero value means a writer
 /// put something there that this build cannot interpret, and we refuse rather

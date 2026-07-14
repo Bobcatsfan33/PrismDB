@@ -46,6 +46,20 @@ pub struct StoreConfig {
     /// every part, so a store built at one block size stays readable forever.
     #[serde(default = "default_block_size")]
     pub block_size: u32,
+
+    /// How tenants map onto physical buckets (S4). Retention and isolation become
+    /// *structural* rather than filtered.
+    #[serde(default)]
+    pub partitions: crate::partition::PartitionScheme,
+
+    /// Attribute keys promoted to typed columns in new parts (issue #2).
+    ///
+    /// **Promotion is a versioned, generation-like schema event, never an in-place rewrite.**
+    /// Changing this list does not touch a single existing part: new parts promote, old parts
+    /// keep the key in their attribute map, and both representations coexist. A merge is what
+    /// migrates a part forward — the same mechanism as every other migration in this system.
+    #[serde(default)]
+    pub promote: Vec<String>,
 }
 
 fn default_block_size() -> u32 {
@@ -66,6 +80,7 @@ impl StoreConfig {
         if self.nlist == 0 {
             return Err(PrismError::Invalid("nlist must be positive".into()));
         }
+        self.partitions.validate()?;
         if self.block_size == 0 || !self.block_size.is_power_of_two() {
             return Err(PrismError::Invalid(format!(
                 "block_size {} is not a positive power of two",

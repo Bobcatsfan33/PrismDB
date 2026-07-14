@@ -225,6 +225,21 @@ impl PartManifest {
         self.feature_flags & FEATURE_ATTRIBUTES != 0 && self.has_column("attributes.data")
     }
 
+    /// The S4 extension: partition key, per-tenant scoped stats, promoted columns.
+    ///
+    /// Decoded on demand rather than stored, because most readers never need it and the ones
+    /// that do need it once.
+    pub fn s4(&self) -> Result<crate::ext::S4Ext> {
+        match self
+            .extensions
+            .iter()
+            .find(|e| e.id == crate::ext::EXT_S4_PARTITION)
+        {
+            Some(e) => crate::ext::S4Ext::decode(&e.bytes),
+            None => Ok(crate::ext::S4Ext::default()),
+        }
+    }
+
     pub fn has_trace_context(&self) -> bool {
         self.feature_flags & FEATURE_TRACE_CONTEXT != 0 && self.has_column("trace_id.data")
     }
@@ -710,6 +725,19 @@ pub struct PartRows {
 
 pub struct PartWriter;
 
+/// Everything about *where* and *how* a part is written, beyond its rows.
+#[derive(Clone, Debug, Default)]
+pub struct PartSpec {
+    /// The outer partition this part belongs to (S4).
+    pub partition: Option<crate::partition::PartitionKey>,
+    /// Attribute keys to promote to typed columns.
+    ///
+    /// A promoted key is **removed from the attribute map** in this part. Storing it twice
+    /// would make promotion cost storage rather than save it, and leave two sources of truth
+    /// for one value.
+    pub promote: Vec<String>,
+}
+
 /// One row on its way into a part.
 pub struct RowIn {
     pub event: Event,
@@ -741,6 +769,7 @@ impl PartWriter {
         dim: usize,
         pq_m: usize,
         block_size: u32,
+        spec: &PartSpec,
         mut rows: Vec<RowIn>,
         now_ms: i64,
     ) -> Result<PartManifest> {
@@ -825,6 +854,53 @@ impl PartWriter {
         // admission, long before here; this is the backstop that makes it a
         // property of the *format* and not merely of the ingest path, because a
         // part written by any other code path must obey it too.
+        // --- promotion (issue #2, directive 4) ---
+        //
+        // A promoted key is REMOVED from the attribute map and written as its own typed
+        // column. The two representations therefore coexist across parts of different ages --
+        // an old part has the key in its map, a new one has it in a column -- and every reader
+        // must dispatch on which. That dispatch is what the S4 gate test hammers: the same
+        // query over a promoted key must return identical rows and identical logical counters
+        // whichever representation it lands on.
+        let mut promoted: Vec<crate::ext::PromotedColumn> = Vec::new();
+        let mut promoted_values: Vec<Vec<Option<prism_types::AttrValue>>> = Vec::new();
+        for key in &spec.promote {
+            let mut col: Vec<Option<prism_types::AttrValue>> = Vec::with_capacity(row_count);
+            let mut tag: Option<u8> = None;
+            let mut any = false;
+            for a in attr_rows.iter_mut() {
+                match a.remove(key) {
+                    Some(v) => {
+                        // A promoted column is TYPED. If a key is used with two different types
+                        // across rows, it is not a column -- it is a map entry pretending to be
+                        // one, and promoting it would silently coerce or drop values.
+                        match tag {
+                            None => tag = Some(v.type_tag()),
+                            Some(t) if t != v.type_tag() => {
+                                return Err(PrismError::Invariant(format!(
+                                    "cannot promote attribute `{key}`: it is used with more than one \
+                                     value type in this part, so it has no column type"
+                                )));
+                            }
+                            _ => {}
+                        }
+                        any = true;
+                        col.push(Some(v));
+                    }
+                    None => col.push(None),
+                }
+            }
+            if !any {
+                continue; // nothing to promote in this part
+            }
+            promoted.push(crate::ext::PromotedColumn {
+                key: key.clone(),
+                column: crate::ext::PromotedColumn::column_for(key),
+                type_tag: tag.unwrap_or(prism_types::attributes::ATTR_TYPE_STR),
+            });
+            promoted_values.push(col);
+        }
+
         let key_set: BTreeSet<String> = attr_rows.iter().flat_map(|a| a.keys().cloned()).collect();
         if key_set.len() > MAX_ATTRIBUTE_KEY_CARDINALITY {
             return Err(PrismError::Invariant(format!(
@@ -887,6 +963,59 @@ impl PartWriter {
         let (nam_dat, nam_off) = io::encode_strings(&event_names);
         let (bod_dat, bod_off) = io::encode_strings(&bodies);
 
+        // --- per-tenant scoped statistics (directive 3) ---
+        //
+        // In a SHARED bucket, part-level metadata describes the bucket, not the tenant: one
+        // time range, one cost range, one union key dictionary. Every one of those tells tenant
+        // A something about tenant B. So the metadata a query can observe is scoped per tenant,
+        // and a query only ever reads its own section.
+        let mut per_tenant: BTreeMap<String, crate::ext::TenantStats> = BTreeMap::new();
+        for (i, r) in rows.iter().enumerate() {
+            let e = &r.event;
+            let st =
+                per_tenant
+                    .entry(e.tenant_id.clone())
+                    .or_insert_with(|| crate::ext::TenantStats {
+                        tenant: e.tenant_id.clone(),
+                        rows: 0,
+                        time_min: i64::MAX,
+                        time_max: i64::MIN,
+                        cost_min: f64::INFINITY,
+                        cost_max: f64::NEG_INFINITY,
+                        has_error: false,
+                        has_success: false,
+                        attribute_keys: Vec::new(),
+                    });
+            st.rows += 1;
+            st.time_min = st.time_min.min(e.event_time);
+            st.time_max = st.time_max.max(e.event_time);
+            st.cost_min = st.cost_min.min(e.cost);
+            st.cost_max = st.cost_max.max(e.cost);
+            st.has_error |= e.error;
+            st.has_success |= !e.error;
+            for k in attr_rows[i].keys() {
+                if !st.attribute_keys.iter().any(|x| x == k) {
+                    st.attribute_keys.push(k.clone());
+                }
+            }
+            // A promoted key still belongs to the tenant that used it -- otherwise promoting a
+            // key would make it invisible to "does this part hold key X for me?".
+            for (pi, p) in promoted.iter().enumerate() {
+                if promoted_values[pi][i].is_some() && !st.attribute_keys.contains(&p.key) {
+                    st.attribute_keys.push(p.key.clone());
+                }
+            }
+        }
+        for st in per_tenant.values_mut() {
+            st.attribute_keys.sort();
+        }
+
+        let s4 = crate::ext::S4Ext {
+            partition: spec.partition.clone(),
+            tenant_stats: per_tenant.into_values().collect(),
+            promoted: promoted.clone(),
+        };
+
         let (tr_dat, tr_off) = io::encode_strings(&trace_ids);
         let (sp_dat, sp_off) = io::encode_strings(&span_ids);
         let (ik_dat, ik_off) = io::encode_strings(&idem_keys);
@@ -921,6 +1050,50 @@ impl PartWriter {
             ("attributes.data", "attrs.dat", attr_dat),
             ("attributes.offsets", "attrs.off", attr_off),
         ];
+
+        // Promoted columns: a null map plus a typed value column, so `absent` stays distinct
+        // from `zero` -- an attribute a row does not have is Null, and Null is not false.
+        let mut promoted_files: Vec<(String, String, Vec<u8>)> = Vec::new();
+        for (pi, p) in promoted.iter().enumerate() {
+            let vals = &promoted_values[pi];
+            let nulls: Vec<u8> = vals.iter().map(|v| u8::from(v.is_some())).collect();
+            let mut data: Vec<u8> = Vec::new();
+            let mut offs: Vec<i64> = Vec::with_capacity(row_count + 1);
+            offs.push(0);
+            for v in vals {
+                if let Some(v) = v {
+                    match v {
+                        prism_types::AttrValue::Str(x) => data.extend_from_slice(x.as_bytes()),
+                        prism_types::AttrValue::Int(x) => data.extend_from_slice(&x.to_le_bytes()),
+                        prism_types::AttrValue::Double(x) => {
+                            data.extend_from_slice(&x.to_bits().to_le_bytes())
+                        }
+                        prism_types::AttrValue::Bool(x) => data.push(u8::from(*x)),
+                    }
+                }
+                offs.push(data.len() as i64);
+            }
+            let safe = p.key.replace(['/', '\\'], "_");
+            promoted_files.push((
+                format!("{}.nulls", p.column),
+                format!("pc_{safe}.null"),
+                nulls,
+            ));
+            promoted_files.push((format!("{}.data", p.column), format!("pc_{safe}.dat"), data));
+            promoted_files.push((
+                format!("{}.offsets", p.column),
+                format!("pc_{safe}.off"),
+                io::encode_i64(&offs),
+            ));
+        }
+        let logical: Vec<(&str, &str, Vec<u8>)> = logical
+            .into_iter()
+            .chain(
+                promoted_files
+                    .iter()
+                    .map(|(n, f, b)| (n.as_str(), f.as_str(), b.clone())),
+            )
+            .collect();
 
         // --- frame each column into checksummed blocks ---
         let mut framed: Vec<(&str, Vec<u8>)> = Vec::with_capacity(logical.len());
@@ -962,9 +1135,28 @@ impl PartWriter {
 
         let manifest = PartManifest {
             format_version: FORMAT_VERSION,
-            feature_flags: FEATURE_BLOCK_FRAMING | FEATURE_ATTRIBUTES | FEATURE_TRACE_CONTEXT,
+            feature_flags: FEATURE_BLOCK_FRAMING
+                | FEATURE_ATTRIBUTES
+                | FEATURE_TRACE_CONTEXT
+                | if spec.partition.is_some() {
+                    crate::format::FEATURE_PARTITION_META
+                } else {
+                    0
+                }
+                | if promoted.is_empty() {
+                    0
+                } else {
+                    crate::format::FEATURE_PROMOTED_COLUMNS
+                },
             attribute_keys,
-            extensions: Vec::new(),
+            extensions: if spec.partition.is_some() || !promoted.is_empty() {
+                vec![Extension {
+                    id: crate::ext::EXT_S4_PARTITION,
+                    bytes: s4.encode(),
+                }]
+            } else {
+                Vec::new()
+            },
             reserved: [0u64; RESERVED_WORDS],
             part_id: part_id.clone(),
             generation_id: generation_id.to_string(),
@@ -1254,6 +1446,119 @@ impl PartReader {
             .collect()
     }
 
+    /// Load a **promoted** attribute column, once.
+    ///
+    /// The dispatch that makes promotion safe. A part that promoted `gen_ai.system` no longer
+    /// has it in its attribute map; a part written before the promotion still does. The caller
+    /// asks for a *key* and gets the same answer either way.
+    ///
+    /// Loaded **once per part**, not once per row. The first version of this re-read all three
+    /// column files on every single row — which made promotion read *more* bytes than the map it
+    /// was supposed to replace, and the equivalence test caught it by asserting the win rather
+    /// than assuming it.
+    pub fn promoted_column(&self, p: &crate::ext::PromotedColumn) -> Result<PromotedCol> {
+        let n = self.manifest.row_count;
+        Ok(PromotedCol {
+            type_tag: p.type_tag,
+            column: p.column.clone(),
+            nulls: self.read_column_checked(&format!("{}.nulls", p.column))?,
+            data: self.read_column_checked(&format!("{}.data", p.column))?,
+            offs: io::string_offsets(
+                &self.read_column_checked(&format!("{}.offsets", p.column))?,
+                n,
+            )?,
+            row_count: n,
+        })
+    }
+}
+
+/// One promoted column, loaded.
+pub struct PromotedCol {
+    type_tag: u8,
+    column: String,
+    nulls: Vec<u8>,
+    data: Vec<u8>,
+    offs: Vec<i64>,
+    row_count: usize,
+}
+
+impl PromotedCol {
+    pub fn value(&self, row: usize) -> Result<Option<prism_types::AttrValue>> {
+        use prism_types::attributes::*;
+
+        let n = self.row_count;
+        let p = self;
+        if row >= n {
+            return Err(PrismError::Corrupt(format!(
+                "row {row} is out of range for promoted column `{}` ({n} rows)",
+                p.column
+            )));
+        }
+        if p.nulls.get(row).copied().unwrap_or(0) == 0 {
+            // Absent, not zero. An attribute a row does not have is Null, and Null is not false.
+            return Ok(None);
+        }
+        let (data, offs) = (&p.data, &p.offs);
+        let (a, b) = (offs[row], offs[row + 1]);
+        if a < 0 || b < a || b as usize > data.len() {
+            return Err(PrismError::Corrupt(format!(
+                "promoted column `{}` offset pair ({a}, {b}) is outside a {}-byte blob",
+                p.column,
+                data.len()
+            )));
+        }
+        let raw = &data[a as usize..b as usize];
+
+        Ok(Some(match p.type_tag {
+            ATTR_TYPE_STR => AttrValue::Str(
+                std::str::from_utf8(raw)
+                    .map_err(|e| {
+                        PrismError::Corrupt(format!(
+                            "promoted column `{}` is not utf-8: {e}",
+                            p.column
+                        ))
+                    })?
+                    .to_string(),
+            ),
+            ATTR_TYPE_INT => {
+                if raw.len() != 8 {
+                    return Err(PrismError::Corrupt(format!(
+                        "promoted int column `{}` row {row} is {} bytes, not 8",
+                        p.column,
+                        raw.len()
+                    )));
+                }
+                AttrValue::Int(i64::from_le_bytes(raw.try_into().unwrap()))
+            }
+            ATTR_TYPE_DOUBLE => {
+                if raw.len() != 8 {
+                    return Err(PrismError::Corrupt(format!(
+                        "promoted double column `{}` row {row} is {} bytes, not 8",
+                        p.column,
+                        raw.len()
+                    )));
+                }
+                let d = f64::from_bits(u64::from_le_bytes(raw.try_into().unwrap()));
+                if !d.is_finite() {
+                    return Err(PrismError::Corrupt(format!(
+                        "promoted column `{}` row {row} is not a finite number",
+                        p.column
+                    )));
+                }
+                AttrValue::Double(d)
+            }
+            ATTR_TYPE_BOOL => AttrValue::Bool(raw.first().copied().unwrap_or(0) != 0),
+            other => {
+                return Err(PrismError::Corrupt(format!(
+                    "promoted column `{}` has type tag {other}, which this build cannot decode",
+                    p.column
+                )))
+            }
+        }))
+    }
+}
+
+impl PartReader {
     /// The scalar columns the fused filter mask needs, without touching text and
     /// without allocating a `String` per row.
     ///
@@ -1323,6 +1628,13 @@ impl PartReader {
         } else {
             None
         };
+        let promoted: Vec<(String, PromotedCol)> = self
+            .manifest
+            .s4()?
+            .promoted
+            .iter()
+            .map(|p| Ok((p.key.clone(), self.promoted_column(p)?)))
+            .collect::<Result<Vec<_>>>()?;
 
         let mut out = Vec::with_capacity(rows.len());
         for &r in rows {
@@ -1350,12 +1662,21 @@ impl PartReader {
                 }
                 None => None,
             };
-            let attributes = match &attrs {
+            let mut attributes = match &attrs {
                 Some((d, o)) => {
                     io::decode_attributes_at(d, o, r, n, &self.manifest.attribute_keys)?
                 }
                 None => Attributes::new(),
             };
+            // Re-attach promoted keys. **A promoted key is still an attribute of the event.**
+            // Promotion is a storage decision, not a schema change -- an event read back out of
+            // a part that promoted a key must be byte-identical to the same event read out of a
+            // part that did not, or every equivalence in the system quietly stops holding.
+            for (key, col) in &promoted {
+                if let Some(v) = col.value(r)? {
+                    attributes.insert(key.clone(), v);
+                }
+            }
 
             out.push(Event {
                 event_id: io::string_at(&eid_d, &eid_o, r, n)?.to_string(),
