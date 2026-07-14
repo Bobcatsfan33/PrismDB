@@ -455,6 +455,8 @@ Two tests now bind it, and both were verified to **fail against the old code** b
 
 ## S5 — complete
 
+**Proof:** [CI run #29367911566](https://github.com/Bobcatsfan33/PrismDB/actions/runs/29367911566) — all seventeen jobs green on `main`, including the two new gates: **the S5 gate** (migration, wrong codebook, bridges, DEGRADED alarms) and **charter C-4** (the answer is a function of the data, not the layout). 255 tests.
+
 **Gate:** *queries available throughout a two-generation migration; rollback is catalog-only; property/fault tests prove no part decodes with the wrong codebook.* Plus the architect's two additions: **no two spaces' scores merge without a declared bridge**, and **drift baselines are generation-scoped, with DEGRADED rather than silence.**
 
 Contract first, as always: [docs/GENERATION-CONTRACT.md](GENERATION-CONTRACT.md) was written before the lifecycle existed.
