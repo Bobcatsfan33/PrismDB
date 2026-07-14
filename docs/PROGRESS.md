@@ -87,6 +87,8 @@ Single writer, single node, in-process. No SQL. Scalar loops only — no SIMD, n
 
 **Gate:** *10,000 randomized kill/reopen runs yield old-or-new snapshot, never hybrid; all compatibility fixtures open, all corrupt fixtures rejected with specific errors; no untrusted length allocates unbounded.*
 
+**Proof:** [CI run #29304251262](https://github.com/Bobcatsfan33/PrismDB/actions/runs/29304251262) — all ten jobs green on `main`, including the format fuzzer, a 400-run randomized kill campaign, both format-compatibility corpora, and the recall contract with a **tail** floor. The full 10,000-run gate runs nightly ([nightly.yml](../.github/workflows/nightly.yml)) and its local result is below.
+
 ### 1. Ten thousand crashes, zero hybrids
 
 ```
