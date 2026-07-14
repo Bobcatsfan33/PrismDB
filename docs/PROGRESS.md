@@ -194,6 +194,8 @@ Adaptive per-query probing — scaling the probe count when the centroid margins
 
 **Gate:** *replaying acknowledged input → no missing rows, documented duplicate behavior; offsets never advance pre-publication; one tenant cannot exceed quota or starve others.*
 
+**Proof:** [CI run #29341659110](https://github.com/Bobcatsfan33/PrismDB/actions/runs/29341659110) — all twelve jobs green on `main`, including the S2 gate suite (real process deaths at three new admission kill points), the charter-C-1 constant ledger check, three format-compatibility corpora, and the recall contract with its tail floor.
+
 The architect's instruction was to **write the contract before the code**, because the risk in this sprint was never the schema — it was the duplicate/replay semantics. [**docs/INGESTION-CONTRACT.md**](INGESTION-CONTRACT.md) is that contract, and every test in `crates/prism-cli/tests/ingestion.rs` asserts a clause of it. Where the contract and the code disagree, the contract is right and the code is a bug.
 
 ### 1. Duplicate behavior, documented and enforced
