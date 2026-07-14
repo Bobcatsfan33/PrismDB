@@ -229,6 +229,18 @@ impl PartManifest {
     ///
     /// Decoded on demand rather than stored, because most readers never need it and the ones
     /// that do need it once.
+    /// Lineage + retention (S5). Absent means: an ordinary part, bodies intact.
+    pub fn s5(&self) -> Result<crate::ext::S5Ext> {
+        match self
+            .extensions
+            .iter()
+            .find(|e| e.id == crate::ext::EXT_S5_LINEAGE)
+        {
+            Some(e) => crate::ext::S5Ext::decode(&e.bytes),
+            None => Ok(crate::ext::S5Ext::default()),
+        }
+    }
+
     pub fn s4(&self) -> Result<crate::ext::S4Ext> {
         match self
             .extensions
@@ -749,6 +761,9 @@ pub struct PartSpec {
     /// would make promotion cost storage rather than save it, and leave two sources of truth
     /// for one value.
     pub promote: Vec<String>,
+    /// Lineage and retention (S5). Default = a part written by an ordinary ingest, from bodies
+    /// that are still here.
+    pub lineage: crate::ext::S5Ext,
 }
 
 /// One row on its way into a part.
@@ -1162,13 +1177,24 @@ impl PartWriter {
                     crate::format::FEATURE_PROMOTED_COLUMNS
                 },
             attribute_keys,
-            extensions: if spec.partition.is_some() || !promoted.is_empty() {
-                vec![Extension {
-                    id: crate::ext::EXT_S4_PARTITION,
-                    bytes: s4.encode(),
-                }]
-            } else {
-                Vec::new()
+            extensions: {
+                let mut ext = Vec::new();
+                if spec.partition.is_some() || !promoted.is_empty() {
+                    ext.push(Extension {
+                        id: crate::ext::EXT_S4_PARTITION,
+                        bytes: s4.encode(),
+                    });
+                }
+                // Only written when it says something. A part with nothing to declare declares
+                // nothing -- an extension that is always present is a header field wearing a
+                // costume, and it would break every pre-S5 compatibility fixture for no gain.
+                if !spec.lineage.is_default() {
+                    ext.push(Extension {
+                        id: crate::ext::EXT_S5_LINEAGE,
+                        bytes: spec.lineage.encode(),
+                    });
+                }
+                ext
             },
             reserved: [0u64; RESERVED_WORDS],
             part_id: part_id.clone(),

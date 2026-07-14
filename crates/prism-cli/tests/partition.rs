@@ -36,6 +36,7 @@ fn config(scheme: PartitionScheme, promote: Vec<String>) -> StoreConfig {
         nlist: 16,
         pq_m: 8,
         seed: 9,
+        kmeans_restarts: prism_quantizer::kmeans::KMEANS_RESTARTS,
         block_size: prism_part::format::DEFAULT_BLOCK_SIZE,
         partitions: scheme,
         promote,

@@ -134,6 +134,36 @@ jobs:
       # discipline applied one layer down, to partition metadata.
       - run: cargo test --release -p prism-cli --test partition -- --nocapture
 
+  generations:
+    name: the S5 gate — migration, wrong codebook, bridges, DEGRADED alarms
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Queries answer at EVERY step of a two-generation migration; rollback is catalog-only; a
+      # part filed under the wrong generation is REFUSED rather than decoded (the failure mode is
+      # not a crash -- it is a plausible wrong answer); a cross-space query is refused unless a
+      # bridge is declared, and a bridge fuses RANKS, never scores; seeded drift mid-migration
+      # fires on BOTH generations against their own baselines; and a baseline that cannot be
+      # rebuilt because retention expired its raw bodies goes DEGRADED rather than silent.
+      - run: cargo test --release -p prism-cli --test generations -- --nocapture
+
+  layout:
+    name: charter C-4 — the answer is a function of the data, not the layout
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # THE PERMANENT GATE. One frozen logical corpus (C-2), materialized four ways -- different
+      # time windows, different ingest batchings, before and after a merge, one part to fifty-five.
+      # Every golden query must answer byte-identically across all of them, the same rows must
+      # train a byte-identical codebook, and the exact oracle must be layout-invariant even before
+      # the store is settled. This gate does not get retired when today's violations are fixed,
+      # because the CLASS is what recurs: a merge runs, a window is retuned, a batch size doubles.
+      - run: cargo test --release -p prism-cli --test layout -- --nocapture
+
   golden-frozen:
     name: the golden corpus has not moved (charter C-2)
     runs-on: ubuntu-latest

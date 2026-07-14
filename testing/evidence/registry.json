@@ -27,11 +27,11 @@
   "constants": [
     {
       "name": "DEFAULT_NPROBE",
-      "value": 4,
+      "value": 6,
       "kind": "tuned",
       "evidence": "testing/evidence/nprobe.json",
       "evidence_key": "chosen_nprobe",
-      "rule": "the smallest probe count whose p1 recall@10 clears 0.8 on the golden corpus. Chosen on the TAIL, not the mean: at nprobe=1 the mean is 0.904 while five queries return nothing at all.",
+      "rule": "the smallest probe count whose p1 recall@10 clears 0.8 on the golden corpus. Chosen on the TAIL, not the mean: at nprobe=1 the mean is 0.941 while two queries return nothing at all. Rose from 4 to 6 in S5 -- not because the engine got worse, but because the codebook stopped depending on a lucky input order (charter C-4, D-034/D-036). The old value was measured against a codebook that a layout accident had flattered.",
       "corpus_version": "v1",
       "corpus_conditional": true,
       "corpus_conditional_reason": "derived on the deterministic hash-embedder corpus, whose motifs are unusually well-separated. On a real embedding space this value may move -- issue #3.",
@@ -40,7 +40,9 @@
           "bound": "chosen on the p1 tail, not the mean",
           "why_measurement_cannot_see_it": "A mean is not a policy. At nprobe=1 the mean recall is 0.904 while five queries return NOTHING AT ALL. Optimising the mean is how a system with total failures in it gets shipped as '90% accurate'."
         }
-      ]
+      ],
+      "generation_conditional": true,
+      "generation_conditional_reason": "A new codebook generation changes the PQ geometry, so this constant may not transfer across one. Re-sweep on a new generation -- the same standing obligation as re-sweeping on a real-embedding corpus (charter C-3, issue #3). S5 proved this is not hypothetical: the C-4 fix to the training sample changed the codebook, and DEFAULT_NPROBE stopped clearing its own floor until the codebook was fixed too."
     },
     {
       "name": "BLOCK_SIZE",
@@ -57,7 +59,9 @@
           "bound": "manifest block directory <= 4 bytes/row",
           "why_measurement_cannot_see_it": "The directory is read IN FULL on every part open, including the opens that then prune the part away without reading a column. At a 2,000-row corpus that term is invisible, so the byte-count objective collapses onto the smallest candidate -- which at 512-byte blocks would give a billion-row part a ~16 GB directory that every reader must load before it can decide the part is irrelevant. No number of saved read-bytes buys that back."
         }
-      ]
+      ],
+      "generation_conditional": true,
+      "generation_conditional_reason": "A new codebook generation changes the PQ geometry, so this constant may not transfer across one. Re-sweep on a new generation -- the same standing obligation as re-sweeping on a real-embedding corpus (charter C-3, issue #3). S5 proved this is not hypothetical: the C-4 fix to the training sample changed the codebook, and DEFAULT_NPROBE stopped clearing its own floor until the codebook was fixed too."
     },
     {
       "name": "DEFAULT_CANDIDATES",
@@ -74,7 +78,9 @@
           "bound": "candidates >= rerank",
           "why_measurement_cannot_see_it": "A rerank budget wider than the candidate list is not a configuration, it is a misunderstanding: you cannot exactly score rows that never entered the heap. Points where rerank > candidates are really just 'rerank = candidates' and would pad the receipt."
         }
-      ]
+      ],
+      "generation_conditional": true,
+      "generation_conditional_reason": "A new codebook generation changes the PQ geometry, so this constant may not transfer across one. Re-sweep on a new generation -- the same standing obligation as re-sweeping on a real-embedding corpus (charter C-3, issue #3). S5 proved this is not hypothetical: the C-4 fix to the training sample changed the codebook, and DEFAULT_NPROBE stopped clearing its own floor until the codebook was fixed too."
     },
     {
       "name": "DEFAULT_RERANK",
@@ -91,7 +97,29 @@
           "bound": "rerank >= MIN_PAGEABLE_ROWS (50)",
           "why_measurement_cannot_see_it": "The paginated result set IS the rerank survivor set (docs/QUERY-CONTRACT.md \u00a74). A rerank width of 10 with a default page size of 10 makes the first page the entire result and the cursor decorative. Recall cannot see this -- and on this corpus the recall floors do not bind at all, so without the bound the sweep chooses rerank=10."
         }
-      ]
+      ],
+      "generation_conditional": true,
+      "generation_conditional_reason": "A new codebook generation changes the PQ geometry, so this constant may not transfer across one. Re-sweep on a new generation -- the same standing obligation as re-sweeping on a real-embedding corpus (charter C-3, issue #3). S5 proved this is not hypothetical: the C-4 fix to the training sample changed the codebook, and DEFAULT_NPROBE stopped clearing its own floor until the codebook was fixed too."
+    },
+    {
+      "name": "KMEANS_RESTARTS",
+      "value": 5,
+      "kind": "tuned",
+      "evidence": "testing/evidence/kmeans-restarts.json",
+      "evidence_key": "chosen_restarts",
+      "rule": "the SMALLEST restart count whose codebook reaches the best derived nprobe on the grid (and leaves no query empty). The objective is deliberately NOT inertia -- inertia is what each restart minimizes internally, and best-by-inertia is NOT best-by-recall: at 3 and 5 restarts the lowest-inertia codebook needs SEVEN probes to clear the tail floors, where one unlucky init needed five and eight restarts need four. A tighter fit in the k-means sense can be a more unbalanced one in the IVF sense, and IVF is what a query pays for. So the objective is probes -- which are scan fraction, which is the bill. Smallest-on-the-plateau, because training cost is linear in this and paying for 25 restarts to get what 8 gives you is paying for nothing.",
+      "corpus_version": "v1",
+      "corpus_conditional": true,
+      "corpus_conditional_reason": "derived on the deterministic hash-embedder corpus -- issue #3.",
+      "generation_conditional": true,
+      "generation_conditional_reason": "A new codebook generation changes the PQ geometry, so this constant may not transfer across one. Re-sweep on a new generation -- the same standing obligation as re-sweeping on a real-embedding corpus (charter C-3, issue #3). S5 proved this is not hypothetical: the C-4 fix to the training sample changed the codebook, and DEFAULT_NPROBE stopped clearing its own floor until the codebook was fixed too.",
+      "policy_bounds": [
+        {
+          "bound": "the grid is bounded at 25 restarts",
+          "why_measurement_cannot_see_it": "Training cost is linear in this constant and training is on the critical path of a MIGRATION, which is an operation an operator is watching. Measurement will happily keep buying marginal codebook quality with unbounded training time; the bound says how much time we are willing to spend. The chosen value (8) is interior to the grid and sits at the start of a plateau that 12, 16 and 25 do not improve on, so this bound is not what selected it (charter C-3)."
+        }
+      ],
+      "note": "S5. This constant exists because of charter C-4. When the training sample stopped being keyed on physical position, recall fell below its floor -- k-means++ had been relying on a lucky first point handed to it by the corpus's natural order. The recall we had been reporting was, in part, a coincidence of the input order. Restarts make the codebook depend on the data instead of on a draw."
     },
     {
       "name": "MAX_ATTRIBUTE_KEYS",
@@ -188,6 +216,36 @@
       "value": 4096,
       "kind": "policy",
       "rationale": "docs/QUERY-CONTRACT.md \u00a77 -- bounds the lexer independently of the byte cap: 64 KiB of single-character tokens is a different attack from one long string literal."
+    },
+    {
+      "name": "TRAIN_SAMPLE_MAX",
+      "value": 50000,
+      "kind": "policy",
+      "rationale": "A bound on how long codebook training may take and how much memory it may hold, chosen so a codebook can be trained on a laptop. Not a measured optimum: raising it buys a marginally better-fitted codebook at a linear cost in time, and the recall receipts are what measure whether the fit is good enough. NOTE: this constant steered behaviour from S0 and was never registered -- an existing hole in the ledger, found by the S5 charter-C-4 audit and closed there. The audit was worth running for this alone."
+    },
+    {
+      "name": "STRATUM_FLOOR_SHARE",
+      "value": 4,
+      "kind": "policy",
+      "rationale": "docs/GENERATION-CONTRACT.md \u00a72 -- the share (one quarter) of the training sample allocated EQUALLY across partition strata before the remainder goes proportionally. Purely proportional allocation is not stratification: it reproduces exactly the imbalance it claims to fix, because a stratum holding 1% of the rows gets 1% of the sample whether you stratify or not. The floor is what makes a small tenant's geometry visible to the codebook at all. Measurement cannot see this -- a codebook that ignores a quiet tenant still scores well on a corpus dominated by the loud one, which is precisely the problem."
+    },
+    {
+      "name": "BASELINE_CLUSTERS",
+      "value": 16,
+      "kind": "policy",
+      "rationale": "docs/GENERATION-CONTRACT.md \u00a77 -- how coarse a summary of 'normal' a drift baseline is. Too few and every cluster is a blur that nothing looks novel against; too many and the baseline memorizes its own window and nothing is ever novel again. S9 owns drift as a feature, and is where this earns a receipt rather than a rationale."
+    },
+    {
+      "name": "BASELINE_QUANTILE_PCT",
+      "value": 99,
+      "kind": "policy",
+      "rationale": "The novelty percentile of a baseline's OWN window that becomes its alarm threshold. A threshold picked by hand is a number somebody liked; a threshold calibrated from the data is a statement about the data. At p99 roughly one event in a hundred of normal traffic is 'novel', which is what makes an alarm firing on 20% of a window mean something. An integer on purpose: a constant that escaped C-1 because of its TYPE would be a constant that escaped on a technicality."
+    },
+    {
+      "name": "DRIFT_FIRE_MULTIPLE",
+      "value": 5,
+      "kind": "policy",
+      "rationale": "How many times the calibrated novelty rate must be exceeded before a drift alarm fires. The baseline is calibrated so that ~1% of normal traffic is novel; five times the expected rate is not noise, it is a different distribution. Firing at 2x would page somebody every time a tenant deployed a new prompt, and an alarm that pages on deploys is an alarm that gets muted."
     }
   ]
 }

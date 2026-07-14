@@ -17,6 +17,41 @@ use prism_types::error::{PrismError, Result};
 use prism_types::hash::content_id;
 use serde::{Deserialize, Serialize};
 
+/// Where a generation is in its lifecycle (S5).
+///
+/// **The state lives in the catalog snapshot, not in the generation record.** The record is
+/// content-addressed and immutable — it *is* its codebooks. The state is a fact about the store
+/// at an instant, so it moves with the snapshot, which is why every lifecycle transition is one
+/// atomic catalog commit and why rollback restores the states along with everything else.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GenerationState {
+    /// Trained and registered. Encodes nothing, answers nothing, changes nothing.
+    Candidate,
+    /// Carrying a bounded set of partitions, alongside the active generation.
+    Canary,
+    /// New writes encode under this one.
+    Active,
+    /// Still holds parts, but nothing new is written under it. The state a generation is in
+    /// for the whole of a migration.
+    Deprecated,
+}
+
+/// How the codebooks were trained. See `prism_engine::sample`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrainingProvenance {
+    pub strategy: String,
+    pub seed: u64,
+    pub rows_offered: usize,
+    pub rows_sampled: usize,
+    pub strata: usize,
+    pub snapshot_id: String,
+    /// The bootstrap generation, which had only the first batch to learn from. Marked, never
+    /// hidden — a provisional generation is not a bug; a provisional generation nobody told you
+    /// about is.
+    pub provisional: bool,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Generation {
     /// SHA-256 (truncated) of every field below. Derived, never assigned.
@@ -28,6 +63,22 @@ pub struct Generation {
     pub pq: PqCodebook,
     /// Free-text note: how this generation was trained. Provenance, not policy.
     pub trained_from: String,
+    /// Structured provenance (S5). Absent on generations written before S5, which is exactly
+    /// what it means: we do not know how they were trained, and saying so is the honest record.
+    #[serde(default)]
+    pub training: Option<TrainingProvenance>,
+}
+
+impl Generation {
+    /// The embedding **space**: `model_id:model_version`.
+    ///
+    /// Two generations in the same space disagree only about how to *approximate* a vector, so
+    /// their exact scores are comparable and a query merges them at exact-score time. Two
+    /// generations in different spaces disagree about what a vector *is*, and merging their
+    /// scores is a category error (invariant 9).
+    pub fn space(&self) -> String {
+        format!("{}:{}", self.model_id, self.model_version)
+    }
 }
 
 /// The content-addressed payload: everything except the id itself.
@@ -73,7 +124,21 @@ impl Generation {
             coarse,
             pq,
             trained_from: trained_from.to_string(),
+            training: None,
         })
+    }
+
+    /// Attach structured training provenance.
+    ///
+    /// Deliberately **not** part of the content address. The id is the hash of what the
+    /// generation *means* — its codebooks — and two codebooks that are byte-identical are the
+    /// same generation no matter what story is told about how they were trained. Folding
+    /// provenance into the id would mean the same codebooks hashed to two different ids, and
+    /// the parts pinned to them would stop being interchangeable for no reason a reader could
+    /// see.
+    pub fn with_training(mut self, t: TrainingProvenance) -> Self {
+        self.training = Some(t);
+        self
     }
 
     /// Recompute the content address and compare. A generation that does not

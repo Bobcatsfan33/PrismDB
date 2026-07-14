@@ -51,6 +51,7 @@ fn build_part(root: &Path, rows: usize) -> PathBuf {
             nlist: 4,
             pq_m: PQ_M,
             seed: 1,
+            kmeans_restarts: prism_quantizer::kmeans::KMEANS_RESTARTS,
             block_size: prism_part::format::DEFAULT_BLOCK_SIZE,
             partitions: Default::default(),
             promote: Vec::new(),

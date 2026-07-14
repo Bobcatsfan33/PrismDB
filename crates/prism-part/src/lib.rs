@@ -10,6 +10,7 @@
 //! 5. Codebooks and models are content-addressed; a part pins the generation it
 //!    was written under, and its bytes mean nothing without it.
 
+pub mod baseline;
 pub mod catalog;
 pub mod ext;
 pub mod faults;

@@ -26,6 +26,10 @@ pub const STORE_VERSION: u32 = 2;
 /// Store layouts this build can open.
 pub const SUPPORTED_STORE_VERSIONS: &[u32] = &[1, 2];
 
+fn default_restarts() -> usize {
+    prism_quantizer::kmeans::KMEANS_RESTARTS
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct StoreConfig {
     pub format_version: u32,
@@ -38,6 +42,14 @@ pub struct StoreConfig {
     pub pq_m: usize,
     /// Seed for every deterministic step, so a store is reproducible.
     pub seed: u64,
+
+    /// How many k-means++ restarts train a codebook, best-by-inertia (S5).
+    ///
+    /// A *tuned* default (charter C-1), derived in `testing/evidence/kmeans-restarts.json`.
+    /// Configurable because a corpus with unusual geometry may want to pay more at training time
+    /// for a better fit -- training is offline, and its cost is linear in this.
+    #[serde(default = "default_restarts")]
+    pub kmeans_restarts: usize,
 
     /// Logical bytes per column block.
     ///
@@ -108,6 +120,7 @@ impl Store {
         }
         io::ensure_dir(root)?;
         io::ensure_dir(&root.join("generations"))?;
+        io::ensure_dir(&root.join("baselines"))?;
         io::ensure_dir(&root.join("parts"))?;
         io::ensure_dir(&root.join("catalog/snapshots"))?;
         io::ensure_dir(&root.join("deadletter"))?;
@@ -156,6 +169,12 @@ impl Store {
     }
     pub fn generation_path(&self, gen_id: &str) -> PathBuf {
         self.root.join("generations").join(format!("{gen_id}.json"))
+    }
+    pub fn baselines_dir(&self) -> PathBuf {
+        self.root.join("baselines")
+    }
+    pub fn baseline_path(&self, id: &str) -> PathBuf {
+        self.root.join("baselines").join(format!("{id}.json"))
     }
     pub fn catalog_dir(&self) -> PathBuf {
         self.root.join("catalog")

@@ -55,11 +55,23 @@ pub struct ReembedReport {
 }
 
 /// The duplicate policy, stated once so it is never re-decided by accident:
-/// **last write wins by `event_time`; ties go to the later part.** Documented,
-/// deterministic, and tested — the S2 gate demands duplicate behavior be
-/// *documented*, not that duplicates be impossible.
+/// **last write wins by `event_time`; ties break on the content hash.**
+///
+/// The tie-break used to be *"ties go to the later part"* — which is a tie broken on **physical
+/// position**, and charter **C-4** forbids the entire class. It is the same defect as
+/// [D-033](../../../docs/DECISIONS.md): two stores holding identical rows would reconcile the
+/// same duplicate pair differently depending on which part each copy happened to land in, so a
+/// merge's output would depend on the layout of its input rather than on its content.
+///
+/// The content hash is a total order on the *data*. Two events with the same id, the same
+/// `event_time` and the same content hash are byte-identical, so which one wins is not
+/// observable — which is exactly what a tie-break should mean.
 fn supersedes(new: &Event, old: &Event) -> bool {
-    new.event_time >= old.event_time
+    match new.event_time.cmp(&old.event_time) {
+        std::cmp::Ordering::Greater => true,
+        std::cmp::Ordering::Less => false,
+        std::cmp::Ordering::Equal => new.content_hash() > old.content_hash(),
+    }
 }
 
 impl Engine {
@@ -161,6 +173,7 @@ impl Engine {
             let spec = PartSpec {
                 partition: Some(key.clone()),
                 promote: self.store.config.promote.clone(),
+                lineage: Default::default(),
             };
             let manifest = PartWriter::write(
                 &self.store.parts_dir(),
@@ -266,25 +279,32 @@ impl Engine {
         // 2. Train new codebooks over a reservoir sample of the whole store —
         //    not the first batch, and not the old codebooks reused in a new
         //    space, which would be meaningless.
-        let sample = crate::ingest::reservoir_sample(
-            &vectors,
-            crate::ingest::TRAIN_SAMPLE_MAX,
+        // Stratified, and keyed on `event_id` -- never on where the row was sitting (C-4).
+        // A codebook trained from a layout-dependent sample is a layout-dependent *meaning* for
+        // every byte the re-embed writes.
+        let (sample, prov) = crate::sample::stratified_sample(
+            &crate::generations::sample_rows(&kept, &vectors),
+            crate::sample::TRAIN_SAMPLE_MAX,
             self.store.config.seed,
-        );
-        let n = sample.len() / dim;
-        let coarse = CoarseCodebook::train(
+            &snap.snapshot_id,
+            false,
+        )?;
+        let n = prov.rows_sampled;
+        let coarse = CoarseCodebook::train_restarts(
             &sample,
             n,
             dim,
             self.store.config.nlist,
             self.store.config.seed,
+            self.store.config.kmeans_restarts,
         )?;
-        let pq = PqCodebook::train(
+        let pq = PqCodebook::train_restarts(
             &sample,
             n,
             dim,
             self.store.config.pq_m,
             self.store.config.seed,
+            self.store.config.kmeans_restarts,
         )?;
         let new_gen = Generation::new(
             embedder.model_id(),
@@ -340,6 +360,7 @@ impl Engine {
             let spec = PartSpec {
                 partition: Some(key.clone()),
                 promote: self.store.config.promote.clone(),
+                lineage: Default::default(),
             };
             let manifest = PartWriter::write(
                 &self.store.parts_dir(),

@@ -165,6 +165,25 @@ impl Engine {
         // section (directive 3).
         let mut eligible: Vec<&PartReader> = Vec::new();
         for r in readers.iter() {
+            // **No part is ever decoded with the wrong codebook.** The catalog says which
+            // generation this part is in; the part itself says so too. If they ever disagree,
+            // one of them is lying, and the cost of guessing which is not a crash -- it is a
+            // PLAUSIBLE WRONG ANSWER, because a PQ code read against the wrong codebook still
+            // produces a number, and the number looks fine. So: refuse.
+            if let Some(pr) = snap
+                .parts
+                .iter()
+                .find_map(|e| e.located().filter(|pr| pr.part_id == r.manifest.part_id))
+            {
+                if pr.partition.generation != r.manifest.generation_id {
+                    return Err(PrismError::Corrupt(format!(
+                        "part {} is filed in the catalog under generation {} but its manifest \
+                         says it was encoded under {}. Decoding it with either codebook would \
+                         produce a number, and the number would look fine. Refusing.",
+                        r.manifest.part_id, pr.partition.generation, r.manifest.generation_id
+                    )));
+                }
+            }
             let keep = match (
                 q.tenant.as_deref(),
                 r.manifest.s4()?.stats_for_owned(q.tenant.as_deref()),
@@ -207,11 +226,21 @@ impl Engine {
                     c.parts_pruned += before - eligible.len();
                 }
                 None => {
+                    // A bridge, if somebody declared one, is the ONLY way across (generation
+                    // contract §6). It does not merge scores -- it fuses ranks, which are
+                    // unitless. Obeying invariant 9 rather than working around it.
+                    let list: Vec<&String> = spaces.iter().collect();
+                    if list.len() == 2 {
+                        if let Some(b) = snap.bridge(list[0], list[1]) {
+                            return self.search_bridged(snap, q, &spaces, b);
+                        }
+                    }
                     return Err(PrismError::Invariant(format!(
                         "eligible parts span {} embedding spaces ({:?}). Scores from \
                          different embedding spaces are not comparable, so this query \
                          will not merge them. Name one with `--space <model:version>`, \
-                         or finish the re-embed migration so a single space remains.",
+                         declare a bridge (`prism bridge declare`), or finish the re-embed \
+                         migration so a single space remains.",
                         spaces.len(),
                         spaces
                     )));
@@ -227,6 +256,7 @@ impl Engine {
                 clusters: None,
                 counters: c,
                 generations: Vec::new(),
+                bridge: None,
                 snapshot_id: snap.snapshot_id.clone(),
             });
         }
@@ -501,6 +531,102 @@ impl Engine {
             clusters,
             counters: c,
             generations: gen_ids.into_iter().collect(),
+            bridge: None,
+            snapshot_id: snap.snapshot_id.clone(),
+        })
+    }
+
+    /// Answer a query that spans two embedding spaces, through a **declared bridge**.
+    ///
+    /// > *"Scores from different embedding spaces are never merged without an explicit,
+    /// > validated bridge policy."* — PRISM.md, invariant 9
+    ///
+    /// **This does not merge scores. It merges ranks.** Each space answers the query natively —
+    /// its own query embedding, its own codebooks, its own cosines, entirely inside its own
+    /// geometry — and then the two *rankings* are fused. A rank is unitless, which is exactly why
+    /// this obeys the invariant rather than sneaking around it. A cosine of 0.83 in one model's
+    /// space and 0.83 in another's are two different numbers that happen to be printed the same
+    /// way, and averaging them would be a category error with a plausible-looking result.
+    ///
+    /// Reciprocal-rank fusion: a row's fused score is the sum of `1 / (K + rank)` over the spaces
+    /// that returned it. The score in the output is the **fusion score, not a cosine**, and
+    /// `bridge` is set so nobody can mistake it for one.
+    fn search_bridged(
+        &self,
+        snap: &prism_part::catalog::Snapshot,
+        q: &Query,
+        spaces: &BTreeSet<String>,
+        bridge: &prism_part::catalog::Bridge,
+    ) -> Result<SearchResult> {
+        /// The RRF damping constant. **Policy**: it decides how steeply rank 1 outweighs rank 10.
+        /// 60 is the value the fusion literature settled on; we have no measurement of our own
+        /// that would justify a different one, and inventing a number here would be worse than
+        /// borrowing one honestly.
+        const RRF_K: f32 = 60.0;
+
+        let mut fused: BTreeMap<String, (f32, Hit)> = BTreeMap::new();
+        let mut counters = Counters::default();
+        let mut generations: Vec<String> = Vec::new();
+
+        for space in spaces {
+            let mut sub = q.clone();
+            sub.space = Some(space.clone());
+            // Each space answers natively, in its own geometry, on its own terms.
+            let r = self.search_at(snap, &sub)?;
+
+            for (i, hit) in r.hits.iter().enumerate() {
+                let e = fused
+                    .entry(hit.event.event_id.clone())
+                    .or_insert_with(|| (0.0, hit.clone()));
+                e.0 += 1.0 / (RRF_K + (i + 1) as f32);
+            }
+
+            counters.parts_total = r.counters.parts_total;
+            counters.parts_pruned += r.counters.parts_pruned;
+            counters.parts_opened += r.counters.parts_opened;
+            counters.rows_scanned_pq += r.counters.rows_scanned_pq;
+            counters.rows_passing_filter += r.counters.rows_passing_filter;
+            counters.candidates_considered += r.counters.candidates_considered;
+            counters.exact_vectors_fetched += r.counters.exact_vectors_fetched;
+            counters.exact_bytes_fetched += r.counters.exact_bytes_fetched;
+            counters.physical_bytes_read += r.counters.physical_bytes_read;
+            counters.rows_eligible += r.counters.rows_eligible;
+            generations.extend(r.generations);
+        }
+
+        let mut rows: Vec<(f32, Hit)> = fused.into_values().collect();
+        // Fused score descending, ties on event_id — the same total order as everywhere else
+        // (C-4). The *selection* below is bounded, so the tie-break decides which rows are
+        // allowed to be answers, not merely how they are printed.
+        rows.sort_by(|a, b| {
+            b.0.total_cmp(&a.0)
+                .then(a.1.event.event_id.cmp(&b.1.event.event_id))
+        });
+        rows.truncate(q.k);
+
+        let hits = rows
+            .into_iter()
+            .map(|(score, mut h)| {
+                // The score is a FUSION SCORE, not a cosine. Leaving the native cosine here
+                // would be handing back a number from one geometry and calling it the answer for
+                // two.
+                h.score = score;
+                h
+            })
+            .collect();
+
+        generations.sort();
+        generations.dedup();
+
+        Ok(SearchResult {
+            hits,
+            clusters: None,
+            counters,
+            generations,
+            bridge: Some(format!(
+                "{:?} across {} <-> {} ({})",
+                bridge.policy, bridge.from_space, bridge.to_space, bridge.validation
+            )),
             snapshot_id: snap.snapshot_id.clone(),
         })
     }

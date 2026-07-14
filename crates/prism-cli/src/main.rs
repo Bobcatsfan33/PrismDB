@@ -58,6 +58,27 @@ USAGE:
                      [--min-recall 0.9] [--min-p1 0.8]
   prism golden sweep --path <dir> --golden <golden.json> --out <provenance.json>
                      [--p1-floor 0.8]      derive the default nprobe from the tail
+  prism generation status  --path <dir>
+  prism generation create  --path <dir> [--version <v>]  train a candidate; changes nothing
+                           no --version retrains codebooks in the SAME embedding space;
+                           --version moves to a NEW space, which needs a bridge or a
+                           finished migration before a query can span both
+  prism generation canary  --path <dir> --gen <id> [--partitions 1]
+  prism generation compare --path <dir> --gen <id> --golden <golden.json>
+  prism generation promote --path <dir> --gen <id>      new writes encode under it
+  prism generation migrate --path <dir> --gen <id> [--partitions N]
+  prism generation retire  --path <dir> --gen <id>      refused while a snapshot names it
+  prism baseline build   --path <dir> --tenant <T> --gen <id>
+  prism baseline refresh --path <dir>   rebuild every baseline; DEGRADE what cannot be
+  prism drift check      --path <dir> --tenant <T> [--from ms] [--to ms]
+                         exits non-zero if an alarm is DEGRADED -- an alarm that is not
+                         running is an incident, not a quiet day
+  prism redact    --path <dir> --before <ms> --reason "<why>"
+                  expire raw bodies. The rows stay queryable and can NEVER be
+                  re-embedded again, so any baseline needing them goes DEGRADED.
+  prism bridge declare --path <dir> --from <space> --to <space> --validation "<why>"
+                  the only way to answer across two embedding spaces. Fuses RANKS,
+                  never scores (invariant 9).
   prism kill-points
 
 Four separate query controls, all reported in the counters:
@@ -114,6 +135,11 @@ fn run(argv: Vec<String>) -> Result<()> {
         "bench" => cmd_bench(&a),
         "gen-corpus" => cmd_gen_corpus(&a),
         "golden" => cmd_golden(&a),
+        "generation" => cmd_generation(&a),
+        "baseline" => cmd_baseline(&a),
+        "drift" => cmd_drift(&a),
+        "redact" => cmd_redact(&a),
+        "bridge" => cmd_bridge(&a),
         "kill-points" => emit(&prism_part::faults::KILL_POINTS),
         other => Err(PrismError::Invalid(format!(
             "unknown command `{other}`\n\n{USAGE}"
@@ -138,6 +164,7 @@ fn cmd_init(a: &Args) -> Result<()> {
         "seed",
         "block-size",
         "buckets",
+        "kmeans-restarts",
         "time-window-ms",
         "dedicated",
         "promote",
@@ -148,6 +175,8 @@ fn cmd_init(a: &Args) -> Result<()> {
         nlist: a.parse_opt("nlist", 32usize)?,
         pq_m: a.parse_opt("pq-m", 8usize)?,
         seed: a.parse_opt("seed", 42u64)?,
+        kmeans_restarts: a
+            .parse_opt("kmeans-restarts", prism_quantizer::kmeans::KMEANS_RESTARTS)?,
         block_size: a.parse_opt("block-size", prism_part::format::DEFAULT_BLOCK_SIZE)?,
         partitions: prism_part::partition::PartitionScheme {
             buckets: a.parse_opt("buckets", prism_part::partition::DEFAULT_BUCKETS)?,
@@ -340,6 +369,25 @@ fn cmd_evidence(a: &Args) -> Result<()> {
             }
             emit(&ev)
         }
+        Some("restarts") => {
+            // KMEANS_RESTARTS. Tuned the moment it was chosen by measurement (C-1).
+            let root = std::env::temp_dir().join(format!("prism-restarts-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            let manifest: serde_json::Value =
+                serde_json::from_slice(&std::fs::read("testing/golden/MANIFEST.json")?)?;
+            let version = manifest["current"].as_str().unwrap_or("v1").to_string();
+            let ev = prism_engine::evidence::sweep_restarts(
+                &root,
+                std::path::Path::new(&format!("testing/golden/{version}/corpus.tsv")),
+                &version,
+                a.parse_opt("p1-floor", 0.8f32)?,
+            )?;
+            let _ = std::fs::remove_dir_all(&root);
+            if let Some(out) = a.opt("out") {
+                std::fs::write(out, serde_json::to_string_pretty(&ev)?)?;
+            }
+            emit(&ev)
+        }
         Some("widths") => {
             // DEFAULT_CANDIDATES x DEFAULT_RERANK, swept jointly. They interact, so there
             // is no honest single-axis sweep of either one.
@@ -358,6 +406,7 @@ fn cmd_evidence(a: &Args) -> Result<()> {
                     nlist: 32,
                     pq_m: 8,
                     seed: 1234,
+                    kmeans_restarts: prism_quantizer::kmeans::KMEANS_RESTARTS,
                     block_size: prism_part::format::DEFAULT_BLOCK_SIZE,
                     partitions: Default::default(),
                     promote: Vec::new(),
@@ -678,6 +727,143 @@ fn cmd_golden(a: &Args) -> Result<()> {
 
         _ => Err(PrismError::Invalid(
             "usage: prism golden <build|check|sweep> ...".into(),
+        )),
+    }
+}
+
+// --- S5: the generation lifecycle -------------------------------------------------
+
+fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+fn cmd_generation(a: &Args) -> Result<()> {
+    let engine = open(a)?;
+    match a.sub.as_deref() {
+        Some("status") => {
+            a.allow(&["path"])?;
+            emit(&engine.migration_status()?)
+        }
+        Some("create") => {
+            a.allow(&["path", "version"])?;
+            let g = engine.generation_create(a.opt("version"), now())?;
+            eprintln!(
+                "prism: candidate generation {} created. It encodes nothing and answers nothing \
+                 until you canary or promote it.",
+                g.generation_id
+            );
+            emit(&g.generation_id)
+        }
+        Some("canary") => {
+            a.allow(&["path", "gen", "partitions"])?;
+            let r = engine.generation_canary(
+                a.req("gen")?,
+                a.parse_opt("partitions", 1usize)?,
+                now(),
+            )?;
+            emit(&r)
+        }
+        Some("compare") => {
+            a.allow(&["path", "gen", "golden", "k"])?;
+            let golden: prism_engine::oracle::Golden =
+                serde_json::from_slice(&std::fs::read(a.req("golden")?)?)?;
+            emit(&engine.generation_compare(a.req("gen")?, &golden)?)
+        }
+        Some("promote") => {
+            a.allow(&["path", "gen"])?;
+            let s = engine.generation_promote(a.req("gen")?, now())?;
+            emit(&s)
+        }
+        Some("migrate") => {
+            a.allow(&["path", "gen", "partitions"])?;
+            let r = engine.generation_migrate(
+                a.req("gen")?,
+                a.parse_some::<usize>("partitions")?,
+                now(),
+            )?;
+            emit(&r)
+        }
+        Some("retire") => {
+            a.allow(&["path", "gen"])?;
+            let s = engine.generation_retire(a.req("gen")?, now())?;
+            emit(&s)
+        }
+        _ => Err(PrismError::Invalid(
+            "usage: prism generation <status|create|canary|compare|promote|migrate|retire>".into(),
+        )),
+    }
+}
+
+fn cmd_baseline(a: &Args) -> Result<()> {
+    let engine = open(a)?;
+    match a.sub.as_deref() {
+        Some("build") => {
+            a.allow(&["path", "tenant", "gen"])?;
+            let b = engine.baseline_build(a.req("tenant")?, a.req("gen")?, now())?;
+            emit(&b.baseline_id)
+        }
+        Some("refresh") => {
+            a.allow(&["path"])?;
+            let set = engine.baselines_refresh(now())?;
+            emit(&set)
+        }
+        _ => Err(PrismError::Invalid(
+            "usage: prism baseline <build|refresh>".into(),
+        )),
+    }
+}
+
+fn cmd_drift(a: &Args) -> Result<()> {
+    a.allow(&["path", "tenant", "from", "to"])?;
+    let engine = open(a)?;
+    let r = engine.drift_check(
+        a.req("tenant")?,
+        a.parse_some::<i64>("from")?,
+        a.parse_some::<i64>("to")?,
+    )?;
+    emit(&r)?;
+
+    // An alarm that is not running is an incident, not a quiet day. Exiting zero here would
+    // let a cron job treat "we stopped watching" as "nothing to see".
+    if r.is_degraded() {
+        for d in &r.degraded {
+            eprintln!(
+                "prism: DEGRADED -- tenant `{}`, generation {}: {} rows are NOT being watched.\n  {}",
+                d.tenant, d.generation_id, d.rows_unwatched, d.reason
+            );
+        }
+        return Err(PrismError::Invalid(
+            "drift check is DEGRADED: at least one alarm is not running".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn cmd_redact(a: &Args) -> Result<()> {
+    a.allow(&["path", "before", "reason"])?;
+    let engine = open(a)?;
+    let n = engine.redact_bodies(a.parse_opt::<i64>("before", 0)?, a.req("reason")?, now())?;
+    eprintln!(
+        "prism: redacted the bodies of {n} parts. Those rows can never be re-embedded again; any \
+         drift baseline that needed them is now DEGRADED, not silent."
+    );
+    emit(&n)
+}
+
+fn cmd_bridge(a: &Args) -> Result<()> {
+    match a.sub.as_deref() {
+        Some("declare") => {
+            a.allow(&["path", "from", "to", "validation"])?;
+            let engine = open(a)?;
+            let s =
+                engine.bridge_declare(a.req("from")?, a.req("to")?, a.req("validation")?, now())?;
+            emit(&s)
+        }
+        _ => Err(PrismError::Invalid(
+            "usage: prism bridge declare ...".into(),
         )),
     }
 }

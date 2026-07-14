@@ -32,7 +32,7 @@ use serde::{Deserialize, Serialize};
 /// This number is not universal. A different `nlist`, a different embedding
 /// model, or a different corpus will have a different answer — re-derive it with
 /// `prism golden sweep`. Adaptive per-query probing is issue #1, targeted at S6.
-pub const DEFAULT_NPROBE: usize = 4;
+pub const DEFAULT_NPROBE: usize = 6;
 
 /// Default candidate width: how many PQ-scored rows survive into the heap.
 ///
@@ -186,5 +186,14 @@ pub struct SearchResult {
     /// generations are never compared without a bridge (invariant 9), so the
     /// generation is part of the result, not metadata about it.
     pub generations: Vec<String>,
+    /// Set when this answer crossed an embedding-space boundary through a **declared bridge**
+    /// (generation contract §6). Names the policy that produced it.
+    ///
+    /// A bridged answer must never be mistakable for a native one. The two are not the same kind
+    /// of thing: a native score is a cosine in one geometry, and a bridged result is a *fusion of
+    /// ranks* from two geometries that were never comparable. Silence about that would make the
+    /// output a lie by omission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bridge: Option<String>,
     pub snapshot_id: String,
 }

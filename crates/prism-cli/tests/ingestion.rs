@@ -59,6 +59,7 @@ fn config() -> StoreConfig {
         nlist: 8,
         pq_m: 4,
         seed: 7,
+        kmeans_restarts: prism_quantizer::kmeans::KMEANS_RESTARTS,
         block_size: prism_part::format::DEFAULT_BLOCK_SIZE,
         partitions: Default::default(),
         promote: Vec::new(),

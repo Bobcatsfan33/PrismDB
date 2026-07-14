@@ -19,7 +19,6 @@ use prism_part::partition::{PartRef, PartitionKey};
 use prism_quantizer::{CoarseCodebook, PqCodebook};
 use prism_types::error::Result;
 use prism_types::event::{DeadLetter, Event};
-use prism_types::rng::Rng;
 use prism_types::Embedder;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -51,32 +50,13 @@ pub fn part_ref(m: &PartManifest, key: &PartitionKey) -> Result<PartRef> {
     })
 }
 
-/// Cap on how many vectors are used to train a codebook. Reservoir-sampled, so
-/// the sample is spread across everything offered rather than being "the first
-/// N rows" — which would bake the first batch's distribution into the meaning
-/// of every byte written afterwards.
-pub const TRAIN_SAMPLE_MAX: usize = 50_000;
-
-pub fn reservoir_sample(vectors: &[Vec<f32>], max: usize, seed: u64) -> Vec<f32> {
-    let mut rng = Rng::new(seed);
-    let mut chosen: Vec<usize> = Vec::with_capacity(max.min(vectors.len()));
-    for i in 0..vectors.len() {
-        if i < max {
-            chosen.push(i);
-        } else {
-            let j = (rng.next_u64() % (i as u64 + 1)) as usize;
-            if j < max {
-                chosen[j] = i;
-            }
-        }
-    }
-    chosen.sort_unstable(); // deterministic output order
-    let mut flat = Vec::with_capacity(chosen.len() * vectors.first().map_or(0, |v| v.len()));
-    for i in chosen {
-        flat.extend_from_slice(&vectors[i]);
-    }
-    flat
-}
+/// Cap on how many vectors train a codebook: see `crate::sample::TRAIN_SAMPLE_MAX`.
+///
+/// The position-keyed reservoir that used to live here is gone. It sampled by *index into a
+/// vector built by reading parts in catalog order*, so the same rows, laid out differently,
+/// trained a different codebook -- and a codebook is the meaning of every byte encoded under it.
+/// Charter C-4 forbids the class; `crate::sample` is the replacement, keyed on `event_id`.
+pub use crate::sample::TRAIN_SAMPLE_MAX;
 
 impl Engine {
     pub fn ingest(&self, events: Vec<Event>, now_ms: i64) -> Result<IngestReport> {
@@ -114,21 +94,34 @@ impl Engine {
                     return self.finish_empty(&snap, dead, now_ms);
                 }
 
-                let sample = reservoir_sample(&vectors, TRAIN_SAMPLE_MAX, self.store.config.seed);
-                let n = sample.len() / dim;
-                let coarse = CoarseCodebook::train(
+                // The bootstrap generation: the one honest exception to "never the first
+                // batch", because the first batch is all there is. It is stratified, keyed on
+                // event_id, and recorded as PROVISIONAL -- which is exactly what `prism
+                // generation create` exists to replace. A provisional generation is not a bug;
+                // a provisional generation nobody told you about is.
+                let (sample, prov) = crate::sample::stratified_sample(
+                    &crate::generations::sample_rows(&admitted, &vectors),
+                    crate::sample::TRAIN_SAMPLE_MAX,
+                    self.store.config.seed,
+                    &snap.snapshot_id,
+                    true,
+                )?;
+                let n = prov.rows_sampled;
+                let coarse = CoarseCodebook::train_restarts(
                     &sample,
                     n,
                     dim,
                     self.store.config.nlist,
                     self.store.config.seed,
+                    self.store.config.kmeans_restarts,
                 )?;
-                let pq = PqCodebook::train(
+                let pq = PqCodebook::train_restarts(
                     &sample,
                     n,
                     dim,
                     self.store.config.pq_m,
                     self.store.config.seed,
+                    self.store.config.kmeans_restarts,
                 )?;
                 let g = Generation::new(
                     embedder.model_id(),
@@ -136,8 +129,12 @@ impl Engine {
                     dim,
                     coarse,
                     pq,
-                    &format!("bootstrap: reservoir sample of {n} vectors from the first ingest"),
-                )?;
+                    &format!(
+                        "bootstrap (PROVISIONAL): stratified sample of {n} vectors from the \
+                         first ingest, keyed on event_id"
+                    ),
+                )?
+                .with_training(crate::generations::provenance(&prov));
                 self.catalog().put_generation(&g)?;
 
                 return self.write_and_commit(&snap, &g, admitted, vectors, dead, true, now_ms);
@@ -246,6 +243,7 @@ impl Engine {
             let spec = PartSpec {
                 partition: Some(key.clone()),
                 promote: self.store.config.promote.clone(),
+                lineage: Default::default(),
             };
             let manifest = PartWriter::write(
                 &self.store.parts_dir(),
@@ -323,32 +321,6 @@ fn embed_all(embedder: &dyn Embedder, events: Vec<Event>) -> (Embedded, Vec<Dead
     ((kept_events, kept_vecs), dead)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn reservoir_sample_is_deterministic_and_bounded() {
-        let vectors: Vec<Vec<f32>> = (0..1000).map(|i| vec![i as f32, 0.0]).collect();
-        let a = reservoir_sample(&vectors, 100, 7);
-        let b = reservoir_sample(&vectors, 100, 7);
-        assert_eq!(a, b);
-        assert_eq!(a.len(), 200); // 100 vectors x 2 dims
-    }
-
-    #[test]
-    fn reservoir_sample_spans_the_whole_input_not_just_the_head() {
-        let vectors: Vec<Vec<f32>> = (0..10_000).map(|i| vec![i as f32]).collect();
-        let s = reservoir_sample(&vectors, 100, 3);
-        let max = s.iter().cloned().fold(f32::MIN, f32::max);
-        // If it were "the first 100 rows", the max would be 99.
-        assert!(max > 1000.0, "sample looks like a head sample: max={max}");
-    }
-
-    #[test]
-    fn sampling_everything_keeps_everything() {
-        let vectors: Vec<Vec<f32>> = (0..10).map(|i| vec![i as f32]).collect();
-        let s = reservoir_sample(&vectors, 100, 1);
-        assert_eq!(s.len(), 10);
-    }
-}
+// The sampler's own tests moved to `crate::sample` along with the sampler. The three that used
+// to live here tested a reservoir keyed on *position*, which is exactly the thing charter C-4
+// forbids -- they asserted the old behaviour was deterministic, and it was, and that was the bug.

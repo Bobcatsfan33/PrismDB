@@ -349,6 +349,12 @@ pub struct SweepRow {
 /// receipt without CI noticing.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NprobeProvenance {
+    /// The codebook generation this was measured under (S5, directive 3).
+    ///
+    /// A new generation changes the PQ geometry, so this constant may not transfer across one.
+    /// A receipt that does not name its generation cannot tell you whether it still applies.
+    #[serde(default)]
+    pub generation_id: String,
     pub corpus: String,
     pub corpus_rows: usize,
     pub corpus_seed: u64,
@@ -409,6 +415,10 @@ pub fn sweep_nprobe(
         .clone();
 
     Ok(NprobeProvenance {
+        generation_id: engine
+            .snapshot()?
+            .active_generation
+            .unwrap_or_else(|| "(none)".into()),
         corpus: golden.corpus_kind.clone(),
         corpus_rows: golden.corpus_rows,
         corpus_seed: golden.corpus_seed,

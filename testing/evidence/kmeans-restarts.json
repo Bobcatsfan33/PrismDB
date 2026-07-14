@@ -1,0 +1,92 @@
+{
+  "corpus_version": "v1",
+  "generation_id": "d93625d4300c0a30",
+  "p1_floor": 0.8,
+  "sweep": [
+    {
+      "restarts": 1,
+      "generation_id": "0c6f4b2a93cb8177",
+      "derived_nprobe": 7,
+      "mean_scan_fraction": 0.24571236464567908,
+      "mean_recall": 0.9951923,
+      "p1_recall": 0.8,
+      "zero_recall_queries": 0,
+      "train_seconds": 0.559483333
+    },
+    {
+      "restarts": 2,
+      "generation_id": "0c6f4b2a93cb8177",
+      "derived_nprobe": 7,
+      "mean_scan_fraction": 0.24571236464567908,
+      "mean_recall": 0.9951923,
+      "p1_recall": 0.8,
+      "zero_recall_queries": 0,
+      "train_seconds": 0.784209417
+    },
+    {
+      "restarts": 3,
+      "generation_id": "833b1780e7d99d64",
+      "derived_nprobe": 3,
+      "mean_scan_fraction": 0.10572035910960437,
+      "mean_recall": 0.99038464,
+      "p1_recall": 0.8,
+      "zero_recall_queries": 0,
+      "train_seconds": 1.0336409579999999
+    },
+    {
+      "restarts": 5,
+      "generation_id": "d93625d4300c0a30",
+      "derived_nprobe": 6,
+      "mean_scan_fraction": 0.20330958394450208,
+      "mean_recall": 0.998077,
+      "p1_recall": 1.0,
+      "zero_recall_queries": 0,
+      "train_seconds": 1.462316041
+    },
+    {
+      "restarts": 8,
+      "generation_id": "d93625d4300c0a30",
+      "derived_nprobe": 6,
+      "mean_scan_fraction": 0.20330958394450208,
+      "mean_recall": 0.998077,
+      "p1_recall": 1.0,
+      "zero_recall_queries": 0,
+      "train_seconds": 2.1544495
+    },
+    {
+      "restarts": 12,
+      "generation_id": "d93625d4300c0a30",
+      "derived_nprobe": 6,
+      "mean_scan_fraction": 0.20330958394450208,
+      "mean_recall": 0.998077,
+      "p1_recall": 1.0,
+      "zero_recall_queries": 0,
+      "train_seconds": 3.071201333
+    },
+    {
+      "restarts": 16,
+      "generation_id": "d93625d4300c0a30",
+      "derived_nprobe": 6,
+      "mean_scan_fraction": 0.20330958394450208,
+      "mean_recall": 0.998077,
+      "p1_recall": 1.0,
+      "zero_recall_queries": 0,
+      "train_seconds": 3.997122875
+    },
+    {
+      "restarts": 25,
+      "generation_id": "d93625d4300c0a30",
+      "derived_nprobe": 6,
+      "mean_scan_fraction": 0.20330958394450208,
+      "mean_recall": 0.998077,
+      "p1_recall": 1.0,
+      "zero_recall_queries": 0,
+      "train_seconds": 6.040869291
+    }
+  ],
+  "chosen_restarts": 5,
+  "chosen_nprobe": 6,
+  "chosen_scan_fraction": 0.20330958394450208,
+  "rule": "the SMALLEST restart count that begins a PLATEAU -- one whose derived probe count is matched by every larger point on the grid. Deliberately NOT 'the restart count with the best derived nprobe', which is the obvious rule and a trap: this sweep is jagged (1-2 restarts need 7 probes, 3 needs only 3, and 5 through 25 all settle on 6), so the winner-takes-all rule would pick 3 -- a single lucky draw that no larger restart count reproduces. We are choosing a METHOD, not a lottery ticket, and selecting the luckiest point on the grid would reintroduce exactly the dependence on a fortunate init that this constant exists to remove. A plateau is the signature of a method that has stopped depending on its draw. Note also that the objective is NOT inertia: inertia is what each restart minimizes internally, and best-by-inertia is not best-by-recall, because a tighter fit in the k-means sense can be a more unbalanced one in the IVF sense -- and IVF is what a query pays for. Smallest on the plateau, because training cost is linear in this and the plateau is flat.",
+  "note": "S5. This constant became TUNED the moment it was chosen by measurement, and it was chosen because fixing charter C-4 (the training sample keyed on event_id rather than on physical position) removed a LUCKY INPUT ORDER that k-means++ had been quietly relying on -- recall fell below its floor, and the fix was to stop depending on a draw. Corpus- AND generation-conditional: a different corpus or a different embedder will have a different answer."
+}

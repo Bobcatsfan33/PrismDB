@@ -15,14 +15,14 @@
 //! ever removes what no retained snapshot names.
 
 use crate::faults;
-use crate::generation::Generation;
+use crate::generation::{Generation, GenerationState};
 use crate::io;
 use crate::part::PartReader;
 use crate::partition::{PartRef, PartitionKey};
 use crate::store::Store;
 use prism_types::error::{PrismError, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 
 /// A part as the catalog knows it.
@@ -81,7 +81,88 @@ pub struct Snapshot {
     /// The generation new writes are encoded under. Parts under older
     /// generations remain readable; each brings its own ADC table.
     pub active_generation: Option<String>,
+    /// Where every known generation is in its lifecycle (S5).
+    ///
+    /// In the snapshot, not in the generation record: the record is content-addressed and
+    /// immutable, and a lifecycle *state* is a fact about the store at an instant. So every
+    /// transition — create, canary, promote, retire — is one atomic catalog commit, and
+    /// **rollback restores the states along with the parts**, because they are the same object.
+    #[serde(default)]
+    pub generations: BTreeMap<String, GenerationState>,
+    /// Declared cross-space score bridges (S5, §6 of the generation contract). Empty is the
+    /// normal state, and it means a cross-space query is refused.
+    #[serde(default)]
+    pub bridges: Vec<Bridge>,
+    /// Drift baselines, and — the point — the ones that are **degraded**.
+    #[serde(default)]
+    pub baselines: Vec<BaselineRef>,
     pub created_at_ms: i64,
+}
+
+/// A declared bridge between two embedding spaces (generation contract §6).
+///
+/// The default is that there is no bridge and a cross-space query is **refused**. A bridge is
+/// somebody explicitly saying "these two may be answered together, this way", and it carries a
+/// receipt because an unvalidated bridge is a guess with a schema.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Bridge {
+    pub from_space: String,
+    pub to_space: String,
+    pub policy: BridgePolicy,
+    /// Why this bridge is believed to be sound. Free text pointing at a receipt — reviewable,
+    /// which is the most a document can promise.
+    pub validation: String,
+    pub declared_at_ms: i64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BridgePolicy {
+    /// Merge **ranks**, never scores.
+    ///
+    /// Each space ranks its own rows, in its own units, against its own query embedding, and
+    /// the ranks — which are unitless — are fused. This *obeys* invariant 9 rather than working
+    /// around it. A policy that averaged scores across spaces would be forbidden by the
+    /// generation contract even if somebody implemented it.
+    RankFusion,
+}
+
+impl Bridge {
+    /// Does this bridge join these two spaces? Bridges are symmetric: a declaration that two
+    /// spaces may be fused is not a statement about which one you asked from.
+    pub fn joins(&self, a: &str, b: &str) -> bool {
+        (self.from_space == a && self.to_space == b) || (self.from_space == b && self.to_space == a)
+    }
+}
+
+/// A drift baseline, and its state (generation contract §7).
+///
+/// A baseline is a statement about a distribution **in one embedding space**. When the space
+/// changes underneath it, the baseline is not stale — it is *meaningless*, and invariant 9
+/// forbids comparing across it. So a baseline is pinned to its generation, and a migration is
+/// not complete until every one of them has been rebuilt in the new space.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BaselineRef {
+    pub baseline_id: String,
+    pub tenant: String,
+    pub generation_id: String,
+    pub state: BaselineState,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum BaselineState {
+    Ready,
+    /// The baseline could not be rebuilt in this generation's space — most often because the
+    /// raw bodies it would have to re-embed have expired under retention.
+    ///
+    /// **This state exists so that an alarm is never silently absent.** A drift alarm that
+    /// quietly stops firing is worse than one that was never configured, because a configured
+    /// alarm is *trusted*. Degraded says the alarm is not running, names the reason, and keeps
+    /// saying it on every evaluation.
+    Degraded {
+        reason: String,
+    },
 }
 
 impl Snapshot {
@@ -126,7 +207,59 @@ impl Snapshot {
             parts: Vec::new(),
             next_seq: 1,
             active_generation: None,
+            generations: BTreeMap::new(),
+            bridges: Vec::new(),
+            baselines: Vec::new(),
             created_at_ms: 0,
+        }
+    }
+
+    /// The generations this snapshot's parts are actually encoded under.
+    ///
+    /// Not the same thing as `generations`, which is the *lifecycle* map. This is the set a
+    /// reader must be able to resolve, and it is what makes `retire` safe: retiring a generation
+    /// that a retained snapshot still names would make that snapshot unreadable, and a rollback
+    /// target that cannot be read is not a rollback target.
+    pub fn generations_in_use(&self) -> BTreeSet<String> {
+        self.parts
+            .iter()
+            .filter_map(|e| e.located().map(|r| r.partition.generation.clone()))
+            .collect()
+    }
+
+    pub fn state_of(&self, gen: &str) -> Option<GenerationState> {
+        self.generations.get(gen).copied()
+    }
+
+    /// The bridge joining two spaces, if one has been declared.
+    pub fn bridge(&self, a: &str, b: &str) -> Option<&Bridge> {
+        self.bridges.iter().find(|br| br.joins(a, b))
+    }
+
+    pub fn baseline_for(&self, tenant: &str, generation: &str) -> Option<&BaselineRef> {
+        self.baselines
+            .iter()
+            .find(|b| b.tenant == tenant && b.generation_id == generation)
+    }
+}
+
+/// Everything a lifecycle transition may change about a snapshot other than its parts.
+///
+/// Passed as one value so that a transition is one commit: there is no window in which the
+/// generation map says one thing and the parts say another.
+#[derive(Clone, Debug, Default)]
+pub struct SnapshotMeta {
+    pub generations: BTreeMap<String, GenerationState>,
+    pub bridges: Vec<Bridge>,
+    pub baselines: Vec<BaselineRef>,
+}
+
+impl SnapshotMeta {
+    pub fn of(snap: &Snapshot) -> Self {
+        SnapshotMeta {
+            generations: snap.generations.clone(),
+            bridges: snap.bridges.clone(),
+            baselines: snap.baselines.clone(),
         }
     }
 }
@@ -209,6 +342,26 @@ impl<'a> Catalog<'a> {
         active_generation: Option<String>,
         now_ms: i64,
     ) -> Result<Snapshot> {
+        self.commit_meta(
+            parent,
+            parts,
+            next_seq,
+            active_generation,
+            SnapshotMeta::of(parent),
+            now_ms,
+        )
+    }
+
+    /// Commit, and set the lifecycle metadata explicitly. Every S5 transition goes through here.
+    pub fn commit_meta(
+        &self,
+        parent: &Snapshot,
+        parts: Vec<PartEntry>,
+        next_seq: u64,
+        active_generation: Option<String>,
+        meta: SnapshotMeta,
+        now_ms: i64,
+    ) -> Result<Snapshot> {
         for p in &parts {
             p.validate()?;
             let dir = self.store.part_dir(p.part_id());
@@ -226,6 +379,9 @@ impl<'a> Catalog<'a> {
             parts,
             next_seq,
             active_generation,
+            generations: meta.generations,
+            bridges: meta.bridges,
+            baselines: meta.baselines,
             created_at_ms: now_ms,
         };
 
@@ -266,6 +422,32 @@ impl<'a> Catalog<'a> {
         let g: Generation = serde_json::from_slice(&io::read_file(&path)?)?;
         g.verify_content_address()?;
         Ok(g)
+    }
+
+    // --- drift baselines (S5) ---
+
+    /// Baselines are content-addressed and immutable, exactly like generations, and for exactly
+    /// the same reason: a baseline is the definition of "normal" that an alarm's numbers are
+    /// measured against, so editing one in place would silently change the meaning of every
+    /// novelty score ever computed from it.
+    pub fn put_baseline(&self, b: &crate::baseline::Baseline) -> Result<()> {
+        let path = self.store.baseline_path(&b.baseline_id);
+        if path.exists() {
+            return Ok(());
+        }
+        io::ensure_dir(&self.store.baselines_dir())?;
+        io::write_atomic(&path, &serde_json::to_vec_pretty(b)?)?;
+        Ok(())
+    }
+
+    pub fn get_baseline(&self, id: &str) -> Result<crate::baseline::Baseline> {
+        let path = self.store.baseline_path(id);
+        if !path.exists() {
+            return Err(PrismError::NotFound(format!("baseline `{id}`")));
+        }
+        let b: crate::baseline::Baseline = serde_json::from_slice(&io::read_file(&path)?)?;
+        b.verify_content_address()?;
+        Ok(b)
     }
 
     // --- garbage collection: explicit, and never on the publish path ---

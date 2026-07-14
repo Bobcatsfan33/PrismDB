@@ -9,7 +9,88 @@ use serde::{Deserialize, Serialize};
 /// currently furthest from its own centroid — deterministically, so two runs
 /// with the same seed produce byte-identical codebooks. A codebook that is not
 /// reproducible cannot be content-addressed.
+/// How many independent k-means++ restarts to run, keeping the best by inertia.
+///
+/// **Policy** (C-1). k-means++ seeds itself from a *random draw*, and a single draw is a
+/// lottery: one unlucky init produces a codebook whose centroids describe the data badly, and
+/// since a codebook is the meaning of every byte encoded under it, "unlucky" is not a word that
+/// belongs anywhere near it.
+///
+/// S5 found this the hard way. The training sample became order-independent (charter C-4, keyed
+/// on `event_id` rather than on position) — which is *correct* — and recall promptly fell below
+/// its floor, because the old order happened to hand k-means++ a lucky first point. A pipeline
+/// whose quality depends on a lucky draw is not a pipeline, it is a coincidence. Restarts make
+/// the outcome depend on the data instead.
+///
+/// Five is a deliberate compromise: training is offline and its cost is linear in this number,
+/// while the variance it removes is most of the variance there is.
+pub const KMEANS_RESTARTS: usize = 5;
+
+/// Train, restarting `KMEANS_RESTARTS` times and keeping the codebook that fits best.
+///
+/// "Best" is **inertia**: the sum of squared distances from every training point to its nearest
+/// centroid. Lower is a tighter description of the data. Ties break on the restart index, which
+/// is deterministic, so the same inputs always give the same codebook.
 pub fn kmeans(
+    vectors: &[f32],
+    n: usize,
+    dim: usize,
+    k: usize,
+    iters: usize,
+    seed: u64,
+) -> Result<Vec<f32>> {
+    kmeans_restarts(vectors, n, dim, k, iters, seed, KMEANS_RESTARTS)
+}
+
+/// Train with an explicit restart count. Exists so the C-1 sweep can *measure* the constant
+/// rather than assert it, and so an operator with an unusual corpus can pay for a better fit.
+pub fn kmeans_restarts(
+    vectors: &[f32],
+    n: usize,
+    dim: usize,
+    k: usize,
+    iters: usize,
+    seed: u64,
+    restarts: usize,
+) -> Result<Vec<f32>> {
+    let mut best: Option<(f64, Vec<f32>)> = None;
+    for r in 0..restarts.max(1) {
+        // Each restart is its own deterministic draw. Derived from the store seed, so the whole
+        // thing stays reproducible.
+        let c = kmeans_once(
+            vectors,
+            n,
+            dim,
+            k,
+            iters,
+            seed.wrapping_add(r as u64 * 0x9E37_79B9),
+        )?;
+        let inertia = inertia(vectors, n, dim, &c, k);
+        if best.as_ref().map_or(true, |(b, _)| inertia < *b) {
+            best = Some((inertia, c));
+        }
+    }
+    Ok(best.expect("restarts is at least 1").1)
+}
+
+/// Sum of squared distances from each point to its nearest centroid. The thing restarts minimize.
+fn inertia(vectors: &[f32], n: usize, dim: usize, centroids: &[f32], k: usize) -> f64 {
+    let point = |i: usize| &vectors[i * dim..(i + 1) * dim];
+    let mut total = 0.0f64;
+    for i in 0..n {
+        let mut best = f32::INFINITY;
+        for c in 0..k {
+            let d = l2_sq(point(i), &centroids[c * dim..(c + 1) * dim]);
+            if d < best {
+                best = d;
+            }
+        }
+        total += best as f64;
+    }
+    total
+}
+
+fn kmeans_once(
     vectors: &[f32],
     n: usize,
     dim: usize,
@@ -139,11 +220,22 @@ pub struct CoarseCodebook {
 
 impl CoarseCodebook {
     pub fn train(vectors: &[f32], n: usize, dim: usize, nlist: usize, seed: u64) -> Result<Self> {
+        Self::train_restarts(vectors, n, dim, nlist, seed, KMEANS_RESTARTS)
+    }
+
+    pub fn train_restarts(
+        vectors: &[f32],
+        n: usize,
+        dim: usize,
+        nlist: usize,
+        seed: u64,
+        restarts: usize,
+    ) -> Result<Self> {
         // With fewer training points than clusters, asking for `nlist` clusters
         // is meaningless; shrink and record the truth rather than fabricate
         // empty partitions.
         let nlist = nlist.min(n).max(1);
-        let centroids = kmeans(vectors, n, dim, nlist, 25, seed)?;
+        let centroids = kmeans_restarts(vectors, n, dim, nlist, 25, seed, restarts)?;
         Ok(CoarseCodebook {
             dim,
             nlist,

@@ -1,15 +1,16 @@
 {
+  "generation_id": "d93625d4300c0a30",
   "constants": [
     "DEFAULT_CANDIDATES",
     "DEFAULT_RERANK"
   ],
   "chosen_candidates": 50,
   "chosen_rerank": 50,
-  "held_nprobe": 4,
+  "held_nprobe": 6,
   "p1_floor": 0.8,
   "corpus_version": "v1",
   "queries": 104,
-  "rule": "swept JOINTLY, because the two controls interact: the candidate width decides who is allowed to be reranked and the rerank width decides how many of them actually are, so an independent single-axis sweep of either measures a cross-section of a surface and reports it as the surface. nprobe is held at its own receipted value (4). Among the points clearing BOTH tail floors -- p1 recall@10 >= 0.8 AND zero_recall_queries == 0, the same floors nprobe was chosen against, because a control that quietly relaxes the recall contract is a downgrade and not a tuning choice -- take the smallest RERANK width first, then the smallest CANDIDATE width. Rerank leads because it is the expensive one: an exact vector is ~32x a coded row, so one rerank fetch costs 32 rows of scanning; the candidate heap costs memory, not I/O. SUBJECT TO rerank >= 50 (MIN_PAGEABLE_ROWS), because the paginated result set IS the rerank survivor set and a rerank width of 10 with a page size of 10 makes the cursor decorative. THE RECALL FLOORS DO NOT BIND ON THIS CORPUS -- every point in the grid clears them -- so the pagination bound is what actually selects the value. If a future corpus makes recall bind, this receipt moves.",
+  "rule": "swept JOINTLY, because the two controls interact: the candidate width decides who is allowed to be reranked and the rerank width decides how many of them actually are, so an independent single-axis sweep of either measures a cross-section of a surface and reports it as the surface. nprobe is held at its own receipted value (6). Among the points clearing BOTH tail floors -- p1 recall@10 >= 0.8 AND zero_recall_queries == 0, the same floors nprobe was chosen against, because a control that quietly relaxes the recall contract is a downgrade and not a tuning choice -- take the smallest RERANK width first, then the smallest CANDIDATE width. Rerank leads because it is the expensive one: an exact vector is ~32x a coded row, so one rerank fetch costs 32 rows of scanning; the candidate heap costs memory, not I/O. SUBJECT TO rerank >= 50 (MIN_PAGEABLE_ROWS), because the paginated result set IS the rerank survivor set and a rerank width of 10 with a page size of 10 makes the cursor decorative. THE RECALL FLOORS DO NOT BIND ON THIS CORPUS -- every point in the grid clears them -- so the pagination bound is what actually selects the value. If a future corpus makes recall bind, this receipt moves.",
   "sweep": [
     {
       "candidates": 25,
@@ -19,8 +20,8 @@
       "min_recall": 0.8,
       "zero_recall_queries": 0,
       "mean_exact_bytes": 2560.0,
-      "mean_physical_bytes": 522078.2788461539,
-      "query_p50_ms": 10.032209,
+      "mean_physical_bytes": 545972.5096153846,
+      "query_p50_ms": 6.9095830000000005,
       "meets_floor": true
     },
     {
@@ -31,8 +32,8 @@
       "min_recall": 0.8,
       "zero_recall_queries": 0,
       "mean_exact_bytes": 6400.0,
-      "mean_physical_bytes": 585304.2884615385,
-      "query_p50_ms": 9.236334000000001,
+      "mean_physical_bytes": 609255.1346153846,
+      "query_p50_ms": 7.4877080000000005,
       "meets_floor": true
     },
     {
@@ -43,8 +44,8 @@
       "min_recall": 0.8,
       "zero_recall_queries": 0,
       "mean_exact_bytes": 2560.0,
-      "mean_physical_bytes": 522078.2788461539,
-      "query_p50_ms": 14.251790999999999,
+      "mean_physical_bytes": 545972.5096153846,
+      "query_p50_ms": 6.925708,
       "meets_floor": true
     },
     {
@@ -55,8 +56,8 @@
       "min_recall": 0.8,
       "zero_recall_queries": 0,
       "mean_exact_bytes": 6400.0,
-      "mean_physical_bytes": 585304.2884615385,
-      "query_p50_ms": 9.242959,
+      "mean_physical_bytes": 609255.1346153846,
+      "query_p50_ms": 7.51375,
       "meets_floor": true
     },
     {
@@ -66,9 +67,9 @@
       "p1_recall": 1.0,
       "min_recall": 0.8,
       "zero_recall_queries": 0,
-      "mean_exact_bytes": 12704.0,
-      "mean_physical_bytes": 686601.75,
-      "query_p50_ms": 11.308375,
+      "mean_exact_bytes": 12800.0,
+      "mean_physical_bytes": 712018.8269230769,
+      "query_p50_ms": 8.480709,
       "meets_floor": true
     },
     {
@@ -79,8 +80,8 @@
       "min_recall": 0.8,
       "zero_recall_queries": 0,
       "mean_exact_bytes": 2560.0,
-      "mean_physical_bytes": 522078.2788461539,
-      "query_p50_ms": 9.915916000000001,
+      "mean_physical_bytes": 545972.5096153846,
+      "query_p50_ms": 7.020917,
       "meets_floor": true
     },
     {
@@ -91,8 +92,8 @@
       "min_recall": 0.8,
       "zero_recall_queries": 0,
       "mean_exact_bytes": 6400.0,
-      "mean_physical_bytes": 585304.2884615385,
-      "query_p50_ms": 9.564167,
+      "mean_physical_bytes": 609255.1346153846,
+      "query_p50_ms": 7.647458,
       "meets_floor": true
     },
     {
@@ -102,9 +103,9 @@
       "p1_recall": 1.0,
       "min_recall": 0.8,
       "zero_recall_queries": 0,
-      "mean_exact_bytes": 12704.0,
-      "mean_physical_bytes": 686601.75,
-      "query_p50_ms": 11.344750000000001,
+      "mean_exact_bytes": 12800.0,
+      "mean_physical_bytes": 712018.8269230769,
+      "query_p50_ms": 8.68575,
       "meets_floor": true
     },
     {
@@ -114,9 +115,9 @@
       "p1_recall": 1.0,
       "min_recall": 0.8,
       "zero_recall_queries": 0,
-      "mean_exact_bytes": 24669.53846153846,
-      "mean_physical_bytes": 878960.4423076923,
-      "query_p50_ms": 14.662834,
+      "mean_exact_bytes": 25275.076923076922,
+      "mean_physical_bytes": 912518.8269230769,
+      "query_p50_ms": 10.615625,
       "meets_floor": true
     },
     {
@@ -127,8 +128,8 @@
       "min_recall": 0.8,
       "zero_recall_queries": 0,
       "mean_exact_bytes": 2560.0,
-      "mean_physical_bytes": 522078.2788461539,
-      "query_p50_ms": 9.3195,
+      "mean_physical_bytes": 545972.5096153846,
+      "query_p50_ms": 7.057291,
       "meets_floor": true
     },
     {
@@ -139,8 +140,8 @@
       "min_recall": 0.8,
       "zero_recall_queries": 0,
       "mean_exact_bytes": 6400.0,
-      "mean_physical_bytes": 585304.2884615385,
-      "query_p50_ms": 9.380625,
+      "mean_physical_bytes": 609255.1346153846,
+      "query_p50_ms": 7.6555,
       "meets_floor": true
     },
     {
@@ -150,9 +151,9 @@
       "p1_recall": 1.0,
       "min_recall": 0.8,
       "zero_recall_queries": 0,
-      "mean_exact_bytes": 12704.0,
-      "mean_physical_bytes": 686601.75,
-      "query_p50_ms": 11.627833,
+      "mean_exact_bytes": 12800.0,
+      "mean_physical_bytes": 712018.8269230769,
+      "query_p50_ms": 8.621666999999999,
       "meets_floor": true
     },
     {
@@ -162,9 +163,9 @@
       "p1_recall": 1.0,
       "min_recall": 0.8,
       "zero_recall_queries": 0,
-      "mean_exact_bytes": 24669.53846153846,
-      "mean_physical_bytes": 878960.4423076923,
-      "query_p50_ms": 21.797458,
+      "mean_exact_bytes": 25275.076923076922,
+      "mean_physical_bytes": 912518.8269230769,
+      "query_p50_ms": 10.71175,
       "meets_floor": true
     },
     {
@@ -174,9 +175,9 @@
       "p1_recall": 1.0,
       "min_recall": 0.8,
       "zero_recall_queries": 0,
-      "mean_exact_bytes": 45435.07692307692,
-      "mean_physical_bytes": 1212552.75,
-      "query_p50_ms": 31.671417,
+      "mean_exact_bytes": 48324.92307692308,
+      "mean_physical_bytes": 1282325.2884615385,
+      "query_p50_ms": 14.594667000000001,
       "meets_floor": true
     },
     {
@@ -187,8 +188,8 @@
       "min_recall": 0.8,
       "zero_recall_queries": 0,
       "mean_exact_bytes": 2560.0,
-      "mean_physical_bytes": 522078.2788461539,
-      "query_p50_ms": 8.134541,
+      "mean_physical_bytes": 545972.5096153846,
+      "query_p50_ms": 7.051917,
       "meets_floor": true
     },
     {
@@ -199,8 +200,8 @@
       "min_recall": 0.8,
       "zero_recall_queries": 0,
       "mean_exact_bytes": 6400.0,
-      "mean_physical_bytes": 585304.2884615385,
-      "query_p50_ms": 9.289250000000001,
+      "mean_physical_bytes": 609255.1346153846,
+      "query_p50_ms": 7.61425,
       "meets_floor": true
     },
     {
@@ -210,9 +211,9 @@
       "p1_recall": 1.0,
       "min_recall": 0.8,
       "zero_recall_queries": 0,
-      "mean_exact_bytes": 12704.0,
-      "mean_physical_bytes": 686601.75,
-      "query_p50_ms": 11.326625,
+      "mean_exact_bytes": 12800.0,
+      "mean_physical_bytes": 712018.8269230769,
+      "query_p50_ms": 8.572750000000001,
       "meets_floor": true
     },
     {
@@ -222,9 +223,9 @@
       "p1_recall": 1.0,
       "min_recall": 0.8,
       "zero_recall_queries": 0,
-      "mean_exact_bytes": 24669.53846153846,
-      "mean_physical_bytes": 878960.4423076923,
-      "query_p50_ms": 14.420041999999999,
+      "mean_exact_bytes": 25275.076923076922,
+      "mean_physical_bytes": 912518.8269230769,
+      "query_p50_ms": 10.502125,
       "meets_floor": true
     },
     {
@@ -234,9 +235,9 @@
       "p1_recall": 1.0,
       "min_recall": 0.8,
       "zero_recall_queries": 0,
-      "mean_exact_bytes": 45435.07692307692,
-      "mean_physical_bytes": 1212552.75,
-      "query_p50_ms": 32.956292,
+      "mean_exact_bytes": 48324.92307692308,
+      "mean_physical_bytes": 1282325.2884615385,
+      "query_p50_ms": 14.367667,
       "meets_floor": true
     },
     {
@@ -246,9 +247,9 @@
       "p1_recall": 1.0,
       "min_recall": 0.8,
       "zero_recall_queries": 0,
-      "mean_exact_bytes": 67448.61538461539,
-      "mean_physical_bytes": 1566766.673076923,
-      "query_p50_ms": 32.305041,
+      "mean_exact_bytes": 84871.38461538461,
+      "mean_physical_bytes": 1867966.9038461538,
+      "query_p50_ms": 21.36575,
       "meets_floor": true
     },
     {
@@ -259,8 +260,8 @@
       "min_recall": 0.8,
       "zero_recall_queries": 0,
       "mean_exact_bytes": 2560.0,
-      "mean_physical_bytes": 522078.2788461539,
-      "query_p50_ms": 8.901791,
+      "mean_physical_bytes": 545972.5096153846,
+      "query_p50_ms": 6.944959,
       "meets_floor": true
     },
     {
@@ -271,8 +272,8 @@
       "min_recall": 0.8,
       "zero_recall_queries": 0,
       "mean_exact_bytes": 6400.0,
-      "mean_physical_bytes": 585304.2884615385,
-      "query_p50_ms": 10.135667,
+      "mean_physical_bytes": 609255.1346153846,
+      "query_p50_ms": 7.533584,
       "meets_floor": true
     },
     {
@@ -282,9 +283,9 @@
       "p1_recall": 1.0,
       "min_recall": 0.8,
       "zero_recall_queries": 0,
-      "mean_exact_bytes": 12704.0,
-      "mean_physical_bytes": 686601.75,
-      "query_p50_ms": 11.698084,
+      "mean_exact_bytes": 12800.0,
+      "mean_physical_bytes": 712018.8269230769,
+      "query_p50_ms": 8.579417000000001,
       "meets_floor": true
     },
     {
@@ -294,9 +295,9 @@
       "p1_recall": 1.0,
       "min_recall": 0.8,
       "zero_recall_queries": 0,
-      "mean_exact_bytes": 24669.53846153846,
-      "mean_physical_bytes": 878960.4423076923,
-      "query_p50_ms": 19.436709,
+      "mean_exact_bytes": 25275.076923076922,
+      "mean_physical_bytes": 912518.8269230769,
+      "query_p50_ms": 10.496417,
       "meets_floor": true
     },
     {
@@ -306,9 +307,9 @@
       "p1_recall": 1.0,
       "min_recall": 0.8,
       "zero_recall_queries": 0,
-      "mean_exact_bytes": 45435.07692307692,
-      "mean_physical_bytes": 1212552.75,
-      "query_p50_ms": 22.483125,
+      "mean_exact_bytes": 48324.92307692308,
+      "mean_physical_bytes": 1282325.2884615385,
+      "query_p50_ms": 14.448917,
       "meets_floor": true
     },
     {
@@ -318,9 +319,9 @@
       "p1_recall": 1.0,
       "min_recall": 0.8,
       "zero_recall_queries": 0,
-      "mean_exact_bytes": 67448.61538461539,
-      "mean_physical_bytes": 1566766.673076923,
-      "query_p50_ms": 28.969375,
+      "mean_exact_bytes": 84871.38461538461,
+      "mean_physical_bytes": 1867966.9038461538,
+      "query_p50_ms": 21.299333,
       "meets_floor": true
     }
   ],

@@ -164,7 +164,8 @@ impl Extension {
 ///
 /// Forgetting to register an extension here is not a subtle bug: the build refuses its own
 /// parts, loudly, at the commit that would have published them. It did, during S4.
-pub const SUPPORTED_EXTENSIONS: &[u16] = &[crate::ext::EXT_S4_PARTITION];
+pub const SUPPORTED_EXTENSIONS: &[u16] =
+    &[crate::ext::EXT_S4_PARTITION, crate::ext::EXT_S5_LINEAGE];
 
 /// Fixed reserved manifest words. Must be zero; a non-zero value means a writer
 /// put something there that this build cannot interpret, and we refuse rather

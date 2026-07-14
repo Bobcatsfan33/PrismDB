@@ -68,7 +68,42 @@ pub fn constants() -> Vec<Constant> {
             value: prism_types::query::DEFAULT_RERANK as i64,
             kind: Kind::Tuned,
         },
+        // S5. Became *tuned* the moment it was chosen by measurement -- and it had to be,
+        // because fixing charter C-4 removed a lucky input order that k-means++ had been
+        // quietly relying on.
+        Constant {
+            name: "KMEANS_RESTARTS",
+            value: prism_quantizer::kmeans::KMEANS_RESTARTS as i64,
+            kind: Kind::Tuned,
+        },
         // --- policy: a decision about behaviour, owes a rationale ---
+        // S5. `TRAIN_SAMPLE_MAX` steered behaviour from S0 and was never registered -- an
+        // existing hole in the ledger, found by the C-4 audit and closed here.
+        Constant {
+            name: "TRAIN_SAMPLE_MAX",
+            value: crate::sample::TRAIN_SAMPLE_MAX as i64,
+            kind: Kind::Policy,
+        },
+        Constant {
+            name: "STRATUM_FLOOR_SHARE",
+            value: crate::sample::STRATUM_FLOOR_SHARE as i64,
+            kind: Kind::Policy,
+        },
+        Constant {
+            name: "BASELINE_CLUSTERS",
+            value: crate::drift::BASELINE_CLUSTERS as i64,
+            kind: Kind::Policy,
+        },
+        Constant {
+            name: "BASELINE_QUANTILE_PCT",
+            value: crate::drift::BASELINE_QUANTILE_PCT as i64,
+            kind: Kind::Policy,
+        },
+        Constant {
+            name: "DRIFT_FIRE_MULTIPLE",
+            value: crate::drift::DRIFT_FIRE_MULTIPLE as i64,
+            kind: Kind::Policy,
+        },
         Constant {
             name: "MIN_PAGEABLE_ROWS",
             value: crate::evidence::MIN_PAGEABLE_ROWS as i64,

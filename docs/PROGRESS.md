@@ -9,7 +9,7 @@ Sprint gates from [PRISM.md](PRISM.md) Part IV. **A sprint is done when its gate
 | **S2** | Production ingestion + OTel GenAI schema | replaying acknowledged input loses no rows; offsets never advance pre-publication; one tenant cannot starve another | ✅ **complete** |
 | **S3** | Minimal SQL + scalar analytics | scalar-subset parity against an oracle; hybrid smoke queries identical through SQL | ✅ **complete** |
 | **S4** | Hybrid partitioning + typed columns + data skipping | selective benchmarks read only eligible partitions; cross-tenant reads impossible even with malformed metadata | ✅ **complete** |
-| S5 | Immutable generations | queries available throughout a two-generation migration; rollback is catalog-only; no part decodes with the wrong codebook | ⬜ **next** |
+| **S5** | Immutable generations | queries available throughout a two-generation migration; rollback is catalog-only; no part decodes with the wrong codebook | ✅ **complete** |
 | S6 | CPU scan engine | bit/epsilon equivalence to the scalar oracle; zero heap allocation in the block loop | ⬜ |
 | S7 | GPU compressed scan + rerank | GPU meets recall/tolerance vs the CPU oracle; p99 bounded under saturation; speedups end-to-end | ⬜ |
 | S8 | Cost-based hybrid optimizer + full SQL semantics | SQL ≡ direct-executor results; fuzzing cannot bypass tenant policy; plan selection beats any fixed plan | ⬜ |
@@ -453,13 +453,98 @@ Two tests now bind it, and both were verified to **fail against the old code** b
 
 ---
 
-## S5 — next
+## S5 — complete
 
-**Immutable generations.** Content-addressed model/preprocessing/coarse/OPQ/PQ generation records; codebooks trained from stratified/reservoir samples (never just the first batch); mixed-generation planning with per-generation ADC tables; a create/canary/compare/rollback/retire lifecycle; the score-bridge rule enforced.
+**Gate:** *queries available throughout a two-generation migration; rollback is catalog-only; property/fault tests prove no part decodes with the wrong codebook.* Plus the architect's two additions: **no two spaces' scores merge without a declared bridge**, and **drift baselines are generation-scoped, with DEGRADED rather than silence.**
 
-**Gate:** queries available throughout a two-generation migration; rollback is catalog-only; property/fault tests prove no part decodes with the wrong codebook.
+Contract first, as always: [docs/GENERATION-CONTRACT.md](GENERATION-CONTRACT.md) was written before the lifecycle existed.
 
-**Carry into S5:**
-- **Most of the machinery already exists** — generations are content-addressed (S0), a part pins its generation, mixed-generation queries build one ADC table per generation, and a cross-space query is *refused* rather than silently merged (invariant 9). S5 is the **lifecycle**: canary a new generation, compare it, promote or roll it back, retire the old one.
-- **Generation is part of the partition key**, so a re-embed necessarily writes into *new* partitions. That is right — a partition whose parts disagree about what their bytes mean is not a partition — but it means the merge scheduler must not try to combine across generations, and S10 will need to know that.
-- **The open tension flagged in S0 comes due here:** a re-embed silently invalidates any `NOVELTY … AGAINST` drift baseline, because a baseline's centroids belong to a generation and invariant 9 forbids cross-space comparison. S9 owns novelty, but **S5 is where the migration that breaks it happens.** Decide the baseline re-projection story now, not when a customer's drift alarms go quiet.
+### 1. The lifecycle, and why a crash in the middle of it is boring
+
+`create → canary → compare → promote → migrate → complete → retire`, and **every transition is one catalog commit**. Not "mostly". The generation *record* is content-addressed and immutable — it **is** its codebooks — so the lifecycle *state* lives in the snapshot, where it belongs ([D-037](DECISIONS.md)). Which buys the hard parts for free: there is no half-migrated flag, no repair path, no state in a writer's memory, and **rollback restores the states along with the parts, because they are the same object.**
+
+The gate test walks every step and asks a real question at each one. It answers at all of them, including with two live generations.
+
+**No part is ever decoded with the wrong codebook.** The failure mode here is not a crash — it is a **plausible wrong answer**: a PQ code read against the wrong codebook still produces a number, and the number looks fine. So the catalog's generation and the part's own manifest must agree, and a poisoned catalog is **refused**, not decoded.
+
+**Retire is the only step that forecloses anything**, so it is last, and it refuses while any *retained snapshot* still names the generation — because a rollback target that cannot be read is not a rollback target.
+
+### 2. Drift baselines are generation-scoped, and never silent
+
+A baseline is a statement about a distribution **in one embedding space**. When the space changes underneath it, the baseline is not stale — it is **meaningless**, and invariant 9 forbids comparing across it.
+
+So a migration is **not complete** when no part references the old generation. That definition is *necessary and not sufficient*, and shipping it alone would have broken drift detection **silently**: the alarm would have gone on producing numbers, every number would have been nonsense, and nobody would have been told. `migration_status` refuses to say `complete` while a baseline still points at a dead space.
+
+And when a baseline **cannot** be rebuilt — because rebuilding means re-embedding history, re-embedding needs the raw bodies, and raw bodies expire under retention because prompts contain secrets — the alarm goes **`DEGRADED`**, names the reason, says how many rows are going unwatched, and **`prism drift check` exits non-zero**. An alarm that is not running is an incident, not a quiet day.
+
+> **A drift alarm that quietly stops firing is worse than one that was never configured, because a configured alarm is trusted.**
+
+Getting the DEGRADED *rule* right took a failing test. The naive version — "degraded if this generation's rows were redacted" — is wrong in the direction that stays silent: redaction does not invalidate an existing baseline, because the vectors are still there and the space has not moved. What breaks is the **new** generation's baseline, which could only be calibrated on whatever rows *happened* to survive. That is not a baseline; it is a biased subset wearing a threshold ([D-038](DECISIONS.md)).
+
+### 3. Bridges fuse ranks, never scores
+
+A cross-space query is **refused** by default, and that is the correct behaviour: a cosine of 0.83 in one model's space and 0.83 in another's are two different numbers that print the same. A **bridge** is a catalog-registered, validated declaration that two spaces may be answered together — and the only policy is `rank_fusion`, which **does not merge scores at all**. Each space answers natively, inside its own geometry, and the *rankings* are fused. A rank is unitless. This **obeys** invariant 9 rather than working around it, and a bridged answer is **labelled**, because letting it pass for a native one would be a lie by omission ([D-039](DECISIONS.md)).
+
+### 4. Charter C-4 — and the audit that found two live violations
+
+> *"any bounded or truncating selection breaks ties on logical row identity, never on physical position."*
+
+The audit swept every bounded structure in the engine. It found **two live violations in code that passed every test in the suite**:
+
+- **The training sample** was a reservoir keyed on *index into a vector built by reading parts in catalog order*. Same rows, different layout → **different codebook** → a different meaning for every byte in the store. This is D-033's disease in the place it would have been hardest to ever notice, and it is what S5 is *built on* ([D-034](DECISIONS.md)). Now: bottom-k by `sha256(seed ‖ event_id)`, stratified by **tenant** — every key logical, so the sample is a pure function of the *set* of rows.
+- **Merge duplicate reconciliation** broke `event_time` ties with *"the later part wins"* — physical position, stated as a feature in a comment ([D-035](DECISIONS.md)). Now the content hash wins, which is a total order on the data.
+
+**The permanent gate:** one frozen logical corpus (C-2), materialized **four ways** — different time windows, different ingest batchings, before and after a merge, **one part to fifty-five**. Every golden query must answer byte-identically across all of them, and the same rows must train a **byte-identical codebook** (asserted on the generation id, which *is* the content hash of the codebooks).
+
+### 5. What the layout gate found that nothing else could
+
+Three of the four layouts failed it, and the cause was not a tie-break.
+
+**The bootstrap generation is trained on the first batch** — because on the first batch, the first batch is all there is. No amount of C-4 discipline fixes that: you cannot train on data that has not arrived. So the gate states what is actually true, in two halves ([D-041](DECISIONS.md)):
+
+1. **The exact path is layout-invariant always**, even on a provisional store. It uses no codebook, so there is nothing to hide behind.
+2. **The approximate path is layout-invariant once the store is settled** — trained from the whole store and migrated onto. Which is what the lifecycle is *for*.
+
+And on the way it exposed a second, fixable violation: the training sample was stratified **by partition**, and a time window is a *store configuration*. Two stores with identical rows and different window sizes trained different codebooks. **The strata themselves have to be logical**, or keying the sample on `event_id` buys nothing. A tenant is a fact about a row; a time window is a fact about a config file.
+
+### 6. `DEFAULT_NPROBE` rose from 4 to 6, and the engine did not get worse
+
+Fixing the sample removed a **lucky input order** that k-means++ had been quietly relying on — the training vectors arrived in corpus order, which handed it a fortunate first point and produced centroids that happened to align with the corpus's motifs. Recall promptly fell below its floor.
+
+**The recall we had been reporting was, in part, a coincidence of the input order.**
+
+`KMEANS_RESTARTS` (5 seeded inits, best by inertia) makes the codebook depend on the data instead of on a draw — and it is a **tuned** constant with [its own receipt](../testing/evidence/kmeans-restarts.json), because it was chosen by measurement. Its rule had to be rewritten once: the obvious "pick the best point" chose a **singleton lucky dip** (3 restarts needed only 3 probes; nothing larger reproduced it). The rule is now **the smallest restart count that begins a plateau**, because *we are choosing a method, not a lottery ticket* ([D-042](DECISIONS.md)) — C-3's "a boundary optimum is an artifact", generalized to singletons.
+
+Then `DEFAULT_NPROBE` was re-derived against the new geometry, exactly as directive 3 demands, and moved **4 → 6**; mean scan fraction 0.146 → **0.203**. What that bought ([D-043](DECISIONS.md)):
+
+| | before | after |
+|---|---|---|
+| `p1 recall@10` at the default | 0.80 | **1.00** |
+| codebook depends on layout | **yes** | no |
+| loudest tenant writes the codebook | yes | no |
+
+**A number that goes up when you stop fooling yourself is the correct number.**
+
+### 7. Receipts are generation-conditional (directive 3)
+
+Every tuned entry now carries `generation_conditional: true`, and every receipt records the **generation id** it was measured under. This is not hypothetical — S5 lived it twice: the receipts had to be re-derived after the sampler changed, and again after the strata changed. **A receipt that describes an engine which no longer exists is not evidence; it is decoration.**
+
+### Bugs and findings
+
+- **The training sample depended on the layout** — the codebook, and therefore the meaning of every byte in the store.
+- **Merge reconciled duplicates by address.**
+- **The strata were physical** (partitions), which reintroduced the same defect one level up.
+- **k-means++ was riding a lucky input order**, and the recall floor had been flattering it since S0.
+- **The restart sweep's first rule picked a lottery ticket**, and had to be rewritten to prefer a plateau.
+- **`TRAIN_SAMPLE_MAX` had steered behaviour since S0 and was never in the ledger** — a C-1 hole the audit closed.
+
+---
+
+## S6 — next
+
+**CPU engine.** SIMD kernels — ADC scan, fused scalar masks, exact rerank — each with a **scalar twin that CI proves equal**, per the charter. Plus [issue #1](https://github.com/Bobcatsfan33/PrismDB/issues/1), adaptive `nprobe`: scale the probe count when the centroid distance margins are tight, rather than paying a fixed six probes on every query.
+
+**Carry into S6:**
+- **The scan just got 39% more expensive** (`nprobe` 4 → 6), and it is now honest. S6 is where that gets paid back in the kernel rather than in the geometry.
+- **Adaptive `nprobe` matters more than it did.** The tail is what forced 6 probes; a query sitting in the middle of a cluster does not need them, and the margin is measurable at probe time.
+- **Every kernel needs its scalar twin**, and the twin is the one that already exists. The equality test is not a formality: an ADC table is a lookup, and a SIMD lookup that disagrees with the scalar one in the last ulp will move a candidate across the heap boundary and change an answer — which, after C-4, is now a thing we have a permanent gate for.

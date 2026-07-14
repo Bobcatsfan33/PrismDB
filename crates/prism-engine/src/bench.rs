@@ -140,6 +140,7 @@ pub fn run(root: &Path, opts: &BenchOpts) -> Result<Baselines> {
             nlist: opts.nlist,
             pq_m: opts.pq_m,
             seed: opts.seed,
+            kmeans_restarts: prism_quantizer::kmeans::KMEANS_RESTARTS,
             block_size: opts.block_size,
             partitions: Default::default(),
             promote: Vec::new(),

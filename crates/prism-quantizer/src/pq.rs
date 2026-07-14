@@ -1,4 +1,3 @@
-use crate::kmeans::kmeans;
 use prism_types::error::{PrismError, Result};
 use prism_types::vector::l2_sq;
 use serde::{Deserialize, Serialize};
@@ -20,6 +19,17 @@ pub struct PqCodebook {
 
 impl PqCodebook {
     pub fn train(vectors: &[f32], n: usize, dim: usize, m: usize, seed: u64) -> Result<Self> {
+        Self::train_restarts(vectors, n, dim, m, seed, crate::kmeans::KMEANS_RESTARTS)
+    }
+
+    pub fn train_restarts(
+        vectors: &[f32],
+        n: usize,
+        dim: usize,
+        m: usize,
+        seed: u64,
+        restarts: usize,
+    ) -> Result<Self> {
         if m == 0 || dim % m != 0 {
             return Err(PrismError::Invalid(format!(
                 "pq_m ({m}) must be positive and divide dim ({dim})"
@@ -46,7 +56,15 @@ impl PqCodebook {
             // -- inventing random codewords -- would put codes in the table that
             // no encoder can ever emit and quietly distort ADC distances.
             let k = PQ_KSUB.min(n);
-            let trained = kmeans(&sub, n, sub_dim, k, 20, seed.wrapping_add(j as u64))?;
+            let trained = crate::kmeans::kmeans_restarts(
+                &sub,
+                n,
+                sub_dim,
+                k,
+                20,
+                seed.wrapping_add(j as u64),
+                restarts,
+            )?;
 
             let base = j * PQ_KSUB * sub_dim;
             codewords[base..base + k * sub_dim].copy_from_slice(&trained);

@@ -25,7 +25,7 @@ use crate::engine::Engine;
 use crate::oracle;
 use crate::tsv;
 use prism_part::store::StoreConfig;
-use prism_types::error::Result;
+use prism_types::error::{PrismError, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::time::Instant;
@@ -111,6 +111,7 @@ pub fn sweep_block_size(workdir: &Path, corpus_tsv: &Path) -> Result<BlockSizeEv
                 nlist: base.nlist,
                 pq_m: base.pq_m,
                 seed: 1234,
+                kmeans_restarts: prism_quantizer::kmeans::KMEANS_RESTARTS,
                 block_size: bs,
                 partitions: Default::default(),
                 promote: Vec::new(),
@@ -290,6 +291,9 @@ pub struct WidthRow {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WidthEvidence {
+    /// The codebook generation this was measured under (S5, directive 3).
+    #[serde(default)]
+    pub generation_id: String,
     pub constants: Vec<String>,
     pub chosen_candidates: usize,
     pub chosen_rerank: usize,
@@ -396,6 +400,10 @@ pub fn sweep_widths(
         .clone();
 
     Ok(WidthEvidence {
+        generation_id: engine
+            .snapshot()?
+            .active_generation
+            .unwrap_or_else(|| "(none)".into()),
         constants: vec!["DEFAULT_CANDIDATES".into(), "DEFAULT_RERANK".into()],
         chosen_candidates: best.candidates,
         chosen_rerank: best.rerank,
@@ -428,5 +436,187 @@ pub fn sweep_widths(
                invalidate this receipt, it simply means this receipt describes the corpus it \
                names."
             .to_string(),
+    })
+}
+
+// --- KMEANS_RESTARTS (S5, charter C-1) ------------------------------------------------
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RestartRow {
+    pub restarts: usize,
+    /// The codebook this restart count actually produced. Different restarts train different
+    /// codebooks -- that is the whole point of the sweep -- so each row names its own.
+    pub generation_id: String,
+    /// The probe count this codebook needs to clear the tail floors — the thing that actually
+    /// costs money at query time.
+    pub derived_nprobe: usize,
+    pub mean_scan_fraction: f64,
+    pub mean_recall: f32,
+    pub p1_recall: f32,
+    pub zero_recall_queries: usize,
+    pub train_seconds: f64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RestartEvidence {
+    pub corpus_version: String,
+    pub generation_id: String,
+    pub p1_floor: f32,
+    pub sweep: Vec<RestartRow>,
+    pub chosen_restarts: usize,
+    pub chosen_nprobe: usize,
+    pub chosen_scan_fraction: f64,
+    pub rule: String,
+    pub note: String,
+}
+
+/// Sweep the k-means restart count against the frozen golden corpus.
+///
+/// **This constant became `tuned` the moment it was chosen by measurement**, so it owes a
+/// receipt like every other tuned constant (C-1).
+///
+/// The objective is *not* inertia — inertia is what each restart minimizes internally, and S5
+/// learned the hard way that **best-by-inertia is not best-by-recall**: at 5 restarts the
+/// lowest-inertia codebook prunes *worse* than the one a single unlucky init produced. A tighter
+/// fit in the k-means sense can be a more unbalanced one in the IVF sense, and IVF is what a
+/// query pays for.
+///
+/// So the objective is the one the query actually feels: **the smallest restart count whose
+/// codebook needs the fewest probes to clear the recall tail floors.** Probes are scan fraction,
+/// and scan fraction is the bill.
+pub fn sweep_restarts(
+    workdir: &Path,
+    corpus_tsv: &Path,
+    corpus_version: &str,
+    p1_floor: f32,
+) -> Result<RestartEvidence> {
+    let grid = [1usize, 2, 3, 5, 8, 12, 16, 25];
+    let events = crate::tsv::parse(&std::fs::read_to_string(corpus_tsv)?)?;
+
+    let mut sweep: Vec<RestartRow> = Vec::new();
+
+    for &restarts in &grid {
+        let root = workdir.join(format!("restarts-{restarts}"));
+        let _ = std::fs::remove_dir_all(&root);
+
+        let t = Instant::now();
+        let engine = Engine::init(
+            &root,
+            StoreConfig {
+                format_version: prism_part::store::STORE_VERSION,
+                dim: 64,
+                nlist: 32,
+                pq_m: 8,
+                seed: 1234,
+                kmeans_restarts: restarts,
+                block_size: prism_part::format::DEFAULT_BLOCK_SIZE,
+                partitions: Default::default(),
+                promote: Vec::new(),
+            },
+        )?;
+        engine.ingest(events.clone(), 1_760_000_000_000)?;
+        let train_seconds = t.elapsed().as_secs_f64();
+
+        let golden = oracle::build(&engine, "golden", events.len(), 1234, 10)?;
+
+        // Derive the probe count this codebook needs, exactly the way DEFAULT_NPROBE is derived.
+        let prov = oracle::sweep_nprobe(
+            &engine,
+            &golden,
+            200,
+            prism_types::query::DEFAULT_RERANK,
+            p1_floor,
+        )?;
+        let row = prov
+            .sweep
+            .iter()
+            .find(|r| r.nprobe == prov.chosen_nprobe)
+            .ok_or_else(|| {
+                PrismError::Invariant("the nprobe sweep chose a point it did not measure".into())
+            })?;
+
+        let gen = engine
+            .snapshot()?
+            .active_generation
+            .unwrap_or_else(|| "(none)".into());
+
+        sweep.push(RestartRow {
+            restarts,
+            generation_id: gen,
+            derived_nprobe: prov.chosen_nprobe,
+            mean_scan_fraction: row.mean_scan_fraction,
+            mean_recall: row.mean_recall,
+            p1_recall: row.p1_recall,
+            zero_recall_queries: row.zero_recall_queries,
+            train_seconds,
+        });
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // **The rule: the smallest restart count that begins a PLATEAU** -- one whose derived nprobe
+    // is matched by every larger point on the grid.
+    //
+    // Not "the restart count with the best derived nprobe", which is the obvious rule and a trap.
+    // This sweep is jagged: on the golden corpus, 1 and 2 restarts need 7 probes, *3 needs only
+    // 3*, and 5 through 25 all settle on 6. Taking the winner would pick 3 -- a single lucky draw
+    // that no larger restart count reproduces. **We are choosing a method, not a lottery ticket.**
+    // Selecting the luckiest point on the grid would reintroduce exactly the dependence on a
+    // fortunate init that this constant exists to remove, and the next corpus would not be lucky
+    // in the same place.
+    //
+    // A plateau is the signature of a method that has stopped depending on its draw. Smallest,
+    // because training cost is linear in this and the plateau is flat by definition.
+    let mut chosen: Option<RestartRow> = None;
+    for (i, row) in sweep.iter().enumerate() {
+        if row.zero_recall_queries > 0 {
+            continue;
+        }
+        let plateau = sweep[i..]
+            .iter()
+            .all(|r| r.derived_nprobe == row.derived_nprobe);
+        if plateau {
+            chosen = Some(row.clone());
+            break;
+        }
+    }
+    let chosen = chosen.ok_or_else(|| {
+        PrismError::Invariant(
+            "no restart count on the grid reached a plateau: the derived probe count never \
+             settled, which means the codebook is still a lottery. Widen the grid."
+                .into(),
+        )
+    })?;
+
+    Ok(RestartEvidence {
+        corpus_version: corpus_version.to_string(),
+        // The generation the CHOSEN restart count produced -- which is the one the store will
+        // actually run, and the one the other receipts were measured under.
+        generation_id: chosen.generation_id.clone(),
+        p1_floor,
+        chosen_restarts: chosen.restarts,
+        chosen_nprobe: chosen.derived_nprobe,
+        chosen_scan_fraction: chosen.mean_scan_fraction,
+        sweep,
+        rule: "the SMALLEST restart count that begins a PLATEAU -- one whose derived probe count \
+               is matched by every larger point on the grid. Deliberately NOT 'the restart count \
+               with the best derived nprobe', which is the obvious rule and a trap: this sweep is \
+               jagged (1-2 restarts need 7 probes, 3 needs only 3, and 5 through 25 all settle on \
+               6), so the winner-takes-all rule would pick 3 -- a single lucky draw that no larger \
+               restart count reproduces. We are choosing a METHOD, not a lottery ticket, and \
+               selecting the luckiest point on the grid would reintroduce exactly the dependence \
+               on a fortunate init that this constant exists to remove. A plateau is the signature \
+               of a method that has stopped depending on its draw. Note also that the objective is \
+               NOT inertia: inertia is what each restart minimizes internally, and best-by-inertia \
+               is not best-by-recall, because a tighter fit in the k-means sense can be a more \
+               unbalanced one in the IVF sense -- and IVF is what a query pays for. Smallest on \
+               the plateau, because training cost is linear in this and the plateau is flat."
+            .into(),
+        note: "S5. This constant became TUNED the moment it was chosen by measurement, and it was \
+               chosen because fixing charter C-4 (the training sample keyed on event_id rather \
+               than on physical position) removed a LUCKY INPUT ORDER that k-means++ had been \
+               quietly relying on -- recall fell below its floor, and the fix was to stop \
+               depending on a draw. Corpus- AND generation-conditional: a different corpus or a \
+               different embedder will have a different answer."
+            .into(),
     })
 }

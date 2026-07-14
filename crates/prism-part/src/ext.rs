@@ -23,6 +23,83 @@ use serde::{Deserialize, Serialize};
 /// Partition + per-tenant stats + promoted columns. Required.
 pub const EXT_S4_PARTITION: u16 = 0x8001 | EXT_REQUIRED;
 
+/// Lineage + retention (S5). **Required.**
+///
+/// Required, and the requirement is not ceremonial. This extension is what says *"the raw
+/// bodies in this part are gone"*. A reader that skipped it would see a column full of empty
+/// strings and have no way to tell "this event had no body" from "this event's body expired
+/// under retention" — and a re-embed migration that could not tell those apart would either
+/// dead-letter a partition it should have reported as un-re-embeddable, or, if some future
+/// embedder tolerated empty input, write a part full of meaningless vectors and call the
+/// migration a success. The whole point of §7 of the generation contract is that the second
+/// outcome is unacceptable *silently*, so the format refuses to let a reader be unaware.
+pub const EXT_S5_LINEAGE: u16 = 0x8002 | EXT_REQUIRED;
+
+/// What a part remembers about where it came from and what it has lost.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct S5Ext {
+    /// The generation whose rows were re-embedded to produce this part, if it was produced by a
+    /// migration. Lineage: it makes a migration *enumerable* rather than a matter of faith.
+    pub reembedded_from: Option<String>,
+    /// The raw bodies are gone — expired under retention policy.
+    ///
+    /// The rows are still here and still queryable; what is gone is the text they were embedded
+    /// from. Which means they can never be re-embedded into a new space, which means any drift
+    /// baseline that would have been rebuilt from them **cannot be**, which is exactly when an
+    /// alarm goes DEGRADED instead of silent.
+    pub bodies_redacted: bool,
+    pub redacted_at_ms: i64,
+    /// Why. An operator asking "where did my bodies go" deserves a better answer than "policy".
+    pub redaction_reason: String,
+}
+
+impl S5Ext {
+    pub fn is_default(&self) -> bool {
+        self == &S5Ext::default()
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        match &self.reembedded_from {
+            None => w.u8(0),
+            Some(g) => {
+                w.u8(1);
+                w.string(g);
+            }
+        }
+        w.u8(u8::from(self.bodies_redacted));
+        w.i64(self.redacted_at_ms);
+        w.string(&self.redaction_reason);
+        w.buf
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<S5Ext> {
+        let mut c = Cursor::new(bytes);
+        let reembedded_from = if c.u8()? == 1 {
+            Some(c.string()?)
+        } else {
+            None
+        };
+        let bodies_redacted = c.u8()? != 0;
+        let redacted_at_ms = c.i64()?;
+        let redaction_reason = c.string()?;
+        let e = S5Ext {
+            reembedded_from,
+            bodies_redacted,
+            redacted_at_ms,
+            redaction_reason,
+        };
+        if e.bodies_redacted && e.redaction_reason.is_empty() {
+            return Err(PrismError::Corrupt(
+                "part says its bodies were redacted but gives no reason; an irreversible \
+                 deletion with no recorded cause is not a retention policy, it is data loss"
+                    .into(),
+            ));
+        }
+        Ok(e)
+    }
+}
+
 /// Sanity bound on how many tenants may share one part. A shared bucket holding thousands of
 /// tenants would make the per-tenant sections larger than the data.
 pub const MAX_TENANTS_PER_PART: usize = 4_096;

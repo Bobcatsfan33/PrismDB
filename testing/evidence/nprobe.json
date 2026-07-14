@@ -1,4 +1,5 @@
 {
+  "generation_id": "d93625d4300c0a30",
   "corpus": "zipf",
   "corpus_rows": 0,
   "corpus_seed": 1234,
@@ -10,64 +11,64 @@
   "candidates": 200,
   "rerank": 50,
   "p1_floor": 0.8,
-  "chosen_nprobe": 4,
+  "chosen_nprobe": 6,
   "chosen_mean_recall": 0.998077,
   "chosen_p1_recall": 1.0,
-  "chosen_scan_fraction": 0.1487801392185335,
+  "chosen_scan_fraction": 0.20330958394450208,
   "sweep": [
     {
       "nprobe": 1,
-      "mean_recall": 0.90384614,
-      "p5_recall": 0.2,
-      "p1_recall": 0.0,
-      "min_recall": 0.0,
-      "zero_recall_queries": 5,
-      "mean_scan_fraction": 0.045469244059768515
-    },
-    {
-      "nprobe": 2,
-      "mean_recall": 0.9596154,
-      "p5_recall": 0.8,
+      "mean_recall": 0.94134617,
+      "p5_recall": 0.6,
       "p1_recall": 0.0,
       "min_recall": 0.0,
       "zero_recall_queries": 2,
-      "mean_scan_fraction": 0.07676453750533617
+      "mean_scan_fraction": 0.03498825894279974
+    },
+    {
+      "nprobe": 2,
+      "mean_recall": 0.9807692,
+      "p5_recall": 1.0,
+      "p1_recall": 0.5,
+      "min_recall": 0.2,
+      "zero_recall_queries": 0,
+      "mean_scan_fraction": 0.0650561118546643
     },
     {
       "nprobe": 3,
-      "mean_recall": 0.9855769,
+      "mean_recall": 0.98173076,
       "p5_recall": 1.0,
-      "p1_recall": 0.7,
-      "min_recall": 0.0,
-      "zero_recall_queries": 1,
-      "mean_scan_fraction": 0.11240803024107754
+      "p1_recall": 0.5,
+      "min_recall": 0.2,
+      "zero_recall_queries": 0,
+      "mean_scan_fraction": 0.09910900223173204
     },
     {
       "nprobe": 4,
-      "mean_recall": 0.998077,
+      "mean_recall": 0.99326926,
       "p5_recall": 1.0,
-      "p1_recall": 1.0,
-      "min_recall": 0.8,
+      "p1_recall": 0.7,
+      "min_recall": 0.6,
       "zero_recall_queries": 0,
-      "mean_scan_fraction": 0.1487801392185335
+      "mean_scan_fraction": 0.13130779815559313
     },
     {
       "nprobe": 5,
+      "mean_recall": 0.99326926,
+      "p5_recall": 1.0,
+      "p1_recall": 0.7,
+      "min_recall": 0.6,
+      "zero_recall_queries": 0,
+      "mean_scan_fraction": 0.1646783021148964
+    },
+    {
+      "nprobe": 6,
       "mean_recall": 0.998077,
       "p5_recall": 1.0,
       "p1_recall": 1.0,
       "min_recall": 0.8,
       "zero_recall_queries": 0,
-      "mean_scan_fraction": 0.18805300843229522
-    },
-    {
-      "nprobe": 6,
-      "mean_recall": 1.0,
-      "p5_recall": 1.0,
-      "p1_recall": 1.0,
-      "min_recall": 1.0,
-      "zero_recall_queries": 0,
-      "mean_scan_fraction": 0.22652921743222024
+      "mean_scan_fraction": 0.20330958394450208
     },
     {
       "nprobe": 7,
@@ -76,7 +77,7 @@
       "p1_recall": 1.0,
       "min_recall": 1.0,
       "zero_recall_queries": 0,
-      "mean_scan_fraction": 0.2643786175974152
+      "mean_scan_fraction": 0.23653765239132069
     },
     {
       "nprobe": 8,
@@ -85,7 +86,7 @@
       "p1_recall": 1.0,
       "min_recall": 1.0,
       "zero_recall_queries": 0,
-      "mean_scan_fraction": 0.3018336313814261
+      "mean_scan_fraction": 0.27139221584626355
     },
     {
       "nprobe": 9,
@@ -94,7 +95,7 @@
       "p1_recall": 1.0,
       "min_recall": 1.0,
       "zero_recall_queries": 0,
-      "mean_scan_fraction": 0.33847564192007895
+      "mean_scan_fraction": 0.3050593307478023
     },
     {
       "nprobe": 10,
@@ -103,7 +104,7 @@
       "p1_recall": 1.0,
       "min_recall": 1.0,
       "zero_recall_queries": 0,
-      "mean_scan_fraction": 0.3731723138675772
+      "mean_scan_fraction": 0.3350311128226051
     },
     {
       "nprobe": 11,
@@ -112,7 +113,7 @@
       "p1_recall": 1.0,
       "min_recall": 1.0,
       "zero_recall_queries": 0,
-      "mean_scan_fraction": 0.40762501572197163
+      "mean_scan_fraction": 0.36573406784542944
     },
     {
       "nprobe": 12,
@@ -121,7 +122,7 @@
       "p1_recall": 1.0,
       "min_recall": 1.0,
       "zero_recall_queries": 0,
-      "mean_scan_fraction": 0.4420368280629929
+      "mean_scan_fraction": 0.3997542820148699
     },
     {
       "nprobe": 13,
@@ -130,7 +131,7 @@
       "p1_recall": 1.0,
       "min_recall": 1.0,
       "zero_recall_queries": 0,
-      "mean_scan_fraction": 0.47684218841926584
+      "mean_scan_fraction": 0.4347268263882564
     },
     {
       "nprobe": 14,
@@ -139,7 +140,7 @@
       "p1_recall": 1.0,
       "min_recall": 1.0,
       "zero_recall_queries": 0,
-      "mean_scan_fraction": 0.5103802701371427
+      "mean_scan_fraction": 0.4694793110926747
     },
     {
       "nprobe": 15,
@@ -148,7 +149,7 @@
       "p1_recall": 1.0,
       "min_recall": 1.0,
       "zero_recall_queries": 0,
-      "mean_scan_fraction": 0.5431323242036249
+      "mean_scan_fraction": 0.5023852663718215
     },
     {
       "nprobe": 16,
@@ -157,7 +158,7 @@
       "p1_recall": 1.0,
       "min_recall": 1.0,
       "zero_recall_queries": 0,
-      "mean_scan_fraction": 0.5744964382794202
+      "mean_scan_fraction": 0.5338200891690046
     },
     {
       "nprobe": 17,
@@ -166,7 +167,7 @@
       "p1_recall": 1.0,
       "min_recall": 1.0,
       "zero_recall_queries": 0,
-      "mean_scan_fraction": 0.6074454444253764
+      "mean_scan_fraction": 0.5701513170357696
     },
     {
       "nprobe": 18,
@@ -175,7 +176,7 @@
       "p1_recall": 1.0,
       "min_recall": 1.0,
       "zero_recall_queries": 0,
-      "mean_scan_fraction": 0.6418189762823077
+      "mean_scan_fraction": 0.6058886927876901
     },
     {
       "nprobe": 19,
@@ -184,7 +185,7 @@
       "p1_recall": 1.0,
       "min_recall": 1.0,
       "zero_recall_queries": 0,
-      "mean_scan_fraction": 0.671174461400451
+      "mean_scan_fraction": 0.6321524023442682
     },
     {
       "nprobe": 20,
@@ -193,7 +194,7 @@
       "p1_recall": 1.0,
       "min_recall": 1.0,
       "zero_recall_queries": 0,
-      "mean_scan_fraction": 0.7027364135800206
+      "mean_scan_fraction": 0.6637348277492392
     },
     {
       "nprobe": 21,
@@ -202,7 +203,7 @@
       "p1_recall": 1.0,
       "min_recall": 1.0,
       "zero_recall_queries": 0,
-      "mean_scan_fraction": 0.7311173982780405
+      "mean_scan_fraction": 0.6923584784192264
     },
     {
       "nprobe": 22,
@@ -211,7 +212,7 @@
       "p1_recall": 1.0,
       "min_recall": 1.0,
       "zero_recall_queries": 0,
-      "mean_scan_fraction": 0.758150985007608
+      "mean_scan_fraction": 0.7222680474674341
     },
     {
       "nprobe": 23,
@@ -220,7 +221,7 @@
       "p1_recall": 1.0,
       "min_recall": 1.0,
       "zero_recall_queries": 0,
-      "mean_scan_fraction": 0.7838774605761164
+      "mean_scan_fraction": 0.7519927305150383
     },
     {
       "nprobe": 24,
@@ -229,7 +230,7 @@
       "p1_recall": 1.0,
       "min_recall": 1.0,
       "zero_recall_queries": 0,
-      "mean_scan_fraction": 0.8149724455429206
+      "mean_scan_fraction": 0.7807710220316475
     },
     {
       "nprobe": 25,
@@ -238,7 +239,7 @@
       "p1_recall": 1.0,
       "min_recall": 1.0,
       "zero_recall_queries": 0,
-      "mean_scan_fraction": 0.8409764468804701
+      "mean_scan_fraction": 0.8081628852233254
     },
     {
       "nprobe": 26,
@@ -247,7 +248,7 @@
       "p1_recall": 1.0,
       "min_recall": 1.0,
       "zero_recall_queries": 0,
-      "mean_scan_fraction": 0.8664236170931814
+      "mean_scan_fraction": 0.8339860411215863
     },
     {
       "nprobe": 27,
@@ -256,7 +257,7 @@
       "p1_recall": 1.0,
       "min_recall": 1.0,
       "zero_recall_queries": 0,
-      "mean_scan_fraction": 0.8914898314573267
+      "mean_scan_fraction": 0.864056073589355
     },
     {
       "nprobe": 28,
@@ -265,7 +266,7 @@
       "p1_recall": 1.0,
       "min_recall": 1.0,
       "zero_recall_queries": 0,
-      "mean_scan_fraction": 0.9159376713120388
+      "mean_scan_fraction": 0.8938533009231635
     },
     {
       "nprobe": 29,
@@ -274,7 +275,7 @@
       "p1_recall": 1.0,
       "min_recall": 1.0,
       "zero_recall_queries": 0,
-      "mean_scan_fraction": 0.9421927378669755
+      "mean_scan_fraction": 0.9179628302978329
     },
     {
       "nprobe": 30,
@@ -283,7 +284,7 @@
       "p1_recall": 1.0,
       "min_recall": 1.0,
       "zero_recall_queries": 0,
-      "mean_scan_fraction": 0.9684184777420507
+      "mean_scan_fraction": 0.9474257625158095
     },
     {
       "nprobe": 31,
@@ -292,7 +293,7 @@
       "p1_recall": 1.0,
       "min_recall": 1.0,
       "zero_recall_queries": 0,
-      "mean_scan_fraction": 0.9868347333220198
+      "mean_scan_fraction": 0.9760545514416783
     },
     {
       "nprobe": 32,
@@ -301,7 +302,7 @@
       "p1_recall": 1.0,
       "min_recall": 1.0,
       "zero_recall_queries": 0,
-      "mean_scan_fraction": 0.9996923076923073
+      "mean_scan_fraction": 0.9993846153846158
     }
   ],
   "note": "The default nprobe is the smallest probe count whose p1 recall@k clears the floor on the golden corpus, at the reference configuration recorded above. It is chosen on the tail rather than the mean because the mean hid a total failure on cluster-boundary queries in S0. Re-derive with `prism golden sweep` whenever the corpus, the embedder, or the index geometry changes. A different nlist or a different corpus will have a different answer; this number is not universal, it is provenanced."

@@ -63,6 +63,27 @@ Every C-1 sweep must:
 
 **[Issue #3](https://github.com/Bobcatsfan33/PrismDB/issues/3) files the work**: create a real-embedding golden corpus (small open model, CPU, checksum-pinned, frozen per C-2) and re-derive every C-1 sweep against it. **Not deferred to S13** — S13 is the production GPU model plane, which is not a prerequisite for running one small model once, offline, and committing its output. Waiting means every constant derived between now and then is derived on a corpus we already know is unrepresentative.
 
+**Extended in S5 (directive 3):** receipts are **generation-conditional** as well as corpus-conditional. A new codebook generation changes the PQ geometry, so `nprobe`, candidate width and rerank width may not transfer across one. Every tuned entry now carries `generation_conditional: true`, and re-sweeping on a new generation is the same standing obligation as re-sweeping on a real-embedding corpus.
+
+**This is not hypothetical.** S5's C-4 fix to the training sample changed the codebook, and `DEFAULT_NPROBE = 4` immediately stopped clearing its own floor (p1 recall 0.70 against a floor of 0.80). The constant had to be re-derived against the new geometry. A receipt that describes an engine which no longer exists is not evidence; it is decoration.
+
+## C-4 — A bounded selection breaks ties on identity, never on position
+**S5. Architect's standing rule, promoted from [D-033](DECISIONS.md).**
+
+> **Any bounded or truncating selection breaks ties on logical row identity (`event_id`), never on physical position.**
+
+D-033 was one instance: the bounded candidate heap broke score ties on `(part, row)`, so repartitioning the store changed which tied rows were *allowed to be answers*, and recall fell from 1.00 to 0.60 while probing harder did nothing. The rule generalizes the lesson, because the defect is a **class**, not a bug: anywhere the engine keeps *some* of a set and discards the rest, the tie-break decides what the store is allowed to say — and if that tie-break is an address, the store is answering questions about its own layout.
+
+Three obligations, all permanent:
+
+1. **Audit every bounded structure**, and bind each to a **layout-variant test**. The S5 audit swept the candidate heap, the rerank truncation, semantic-grouping exemplars and membership, merge duplicate reconciliation, idempotency-index eviction, the recall report's worst-query list, and codebook training. It found **two live violations** ([D-034](DECISIONS.md), [D-035](DECISIONS.md)) in code that had passed every test in the suite.
+
+2. **Layout-variant golden fixtures, as a permanent gate.** One **frozen logical corpus** (C-2), materialized under **four** physical layouts — different time windows, different ingest batchings, before and after a merge, one part to fifty-five. Every golden query must answer **byte-identically** across all of them. `crates/prism-cli/tests/layout.rs`.
+
+3. **The gate is permanent.** It does not get retired when the current violations are fixed, because the class is what recurs. A merge runs; a window is retuned; a batch size doubles. None of those is a decision about *answers* — and every one of them silently was.
+
+**Why a layout-variant test and not a code review:** each of these sites was individually self-consistent and deterministic. `(part, row)` *is* a deterministic tie-break, and the comment on the candidate heap said exactly that, and it was true, and it was the bug. Determinism in a layout is not the same property as being a function of the data, and only running the same data through two layouts can tell them apart.
+
 ---
 
 ## D-001 — `docs/PRISM.md` is the canonical v2 text — *verified*
@@ -385,3 +406,122 @@ Two tests now bind it, and both were verified to **fail against the old code** b
 - `a_merge_moves_rows_between_parts_and_changes_no_answer` — the same property along the axis a running store actually travels.
 
 Both receipts (`nprobe`, `widths`) were **re-derived against the fixed engine**, since a selection rule changing is at least as material as the corpus changing. Both chose the same constants: `nprobe = 4`, `candidates = 50`, `rerank = 50`.
+
+## D-034 — The training sample is keyed on `event_id`, not on position
+**S5. The C-4 audit's first find, and the worst one available.**
+
+The codebook training sample was a reservoir keyed on **index into a vector built by reading parts in catalog order**. So the same rows, laid out differently, trained a **different codebook** — different coarse centroids, different PQ sub-quantizers, and therefore *a different meaning for every byte in the store*.
+
+This is D-033's defect in the one place it would have been hardest to ever notice. A wrong answer from the candidate heap is at least a wrong answer to a question somebody asked. A codebook that depends on the layout is a store whose bytes quietly mean something else after a merge, and nothing anywhere reports it.
+
+**The fix:** **bottom-k by `sha256(seed ‖ event_id)`** — a reservoir that does not care what order it sees the rows in, because the chosen set is a pure function of the *set* of rows. Stratified across partitions, with an equal floor before proportional allocation, so a store whose loudest tenant emits 100× the rows of everyone else does not get a codebook that describes only that tenant.
+
+Hashed cryptographically, for the same reason bucket assignment is: **an id must not be able to steer itself into or out of the codebook's training set.**
+
+`the_same_rows_train_the_same_codebook_under_every_layout` asserts it directly on the generation id — which *is* the content hash of the codebooks, so if the ids match, every centroid is byte-identical.
+
+## D-035 — Merge duplicate reconciliation breaks `event_time` ties on the content hash
+**S5. The C-4 audit's second find.**
+
+The duplicate policy was *"last write wins by `event_time`; **ties go to the later part**"* — a tie broken on physical position, in a comment that stated it as a feature. Two stores holding identical rows would reconcile the same duplicate pair differently depending on which part each copy happened to land in, so a merge's output depended on the layout of its input rather than on its content.
+
+Ties now break on the **content hash**, which is a total order on the data. Two events with the same id, the same `event_time` *and* the same content hash are byte-identical, so which one wins is not observable — which is what a tie-break should mean.
+
+## D-036 — k-means restarts, because a codebook must not depend on a lucky draw
+**S5. Found by fixing D-034, which is the interesting part.**
+
+The moment the training sample became order-independent, **recall fell below its floor** — `p1 recall@10` 0.70 against a floor of 0.80. Nothing had broken. The old input order had simply been handing k-means++ a *lucky first point*, and the corpus-ordered sample flattered it.
+
+That is worth stating plainly: **the recall we had been reporting was, in part, a coincidence of the input order.** A pipeline whose quality depends on a lucky draw is not a pipeline.
+
+k-means now runs `KMEANS_RESTARTS = 5` independent seeded inits and keeps the codebook with the lowest **inertia**. Deterministic, offline, linear in the constant — and the quality now comes from the data rather than from the draw.
+
+**And then `DEFAULT_NPROBE` had to be re-derived**, because the codebook changed and a codebook is the PQ geometry. Which is exactly the standing obligation the architect had just added as directive 3, arriving in the same sprint that created it. See C-3.
+
+## D-037 — Generation lifecycle state lives in the catalog snapshot
+**S5.**
+
+The generation *record* is content-addressed and immutable: it **is** its codebooks. A lifecycle *state* — candidate, canary, active, deprecated — is not a property of the codebooks; it is a fact about the store at an instant. So it lives in the snapshot.
+
+Which buys the whole lifecycle for free: **every transition is one atomic catalog commit**, and **rollback restores the states along with the parts**, because they are the same object. There is no half-migrated flag, no repair path, and no state in a writer's memory. A crash in the middle of a migration leaves orphan parts and the old snapshot live — the same thing every other writer here does, because it is the only thing that is safe.
+
+`with_training` provenance is deliberately **not** in the content address. Two byte-identical codebooks are the same generation no matter what story is told about how they were trained; folding provenance into the id would mean identical codebooks hashed to different ids, and parts pinned to them would stop being interchangeable for no reason a reader could see.
+
+## D-038 — Drift baselines are generation-scoped, and a baseline that cannot be rebuilt goes DEGRADED
+**S5. Directive 2, decided as instructed.**
+
+A **baseline is a statement about a distribution in one embedding space.** When the space changes underneath it, the baseline is not *stale* — it is **meaningless**, and invariant 9 forbids comparing across it. A novelty score is a score.
+
+So:
+
+- `NOVELTY` / `SEMANTIC_DIFF` evaluate a generation's events **only** against **that generation's** baseline. Never cross-generation. Not "close enough". During the mixed window each generation runs against its own baseline, and the two are never merged into one number.
+- **A re-embed migration is not complete until every baseline has been recomputed under the new generation.** The naive definition — *"no part references the old generation"* — is **necessary and not sufficient**, and shipping only that would have broken drift detection *silently*: the alarm would have gone on producing numbers, every number would have been nonsense, and nobody would have been told. `migration_status` refuses to say `complete` while a baseline still points at a dead space.
+- **When a baseline cannot be rebuilt, the alarm goes `DEGRADED` and says so on every evaluation.** This happens for a real and unavoidable reason: rebuilding a baseline means re-embedding the historical rows, re-embedding needs the **raw bodies**, and raw bodies expire under retention because prompts contain secrets. The rows survive; the text they were embedded from does not; so those rows can never be re-embedded into any new space, by anyone, ever.
+
+  `DEGRADED` names the baseline, the generation, the reason, and **how many rows are going unwatched**. It does not return zero. It does not return the old numbers. It does not return nothing. `prism drift check` **exits non-zero**, because an alarm that is not running is an incident, not a quiet day.
+
+**A drift alarm that quietly stops firing is worse than one that was never configured, because a configured alarm is trusted.** That sentence is the entire justification for the state existing.
+
+## D-039 — A bridge fuses ranks, never scores
+**S5. Directive 4's second half.**
+
+A cross-space query is **refused** by default — that is the correct behaviour and the common case. A cosine of 0.83 in one model's space and 0.83 in another's are two different numbers that happen to print the same, and averaging them is not a merge, it is a category error with a plausible-looking result.
+
+A **bridge** is a catalog-registered declaration that two spaces may be answered together: explicit (somebody declared it), validated (it carries a note), and **named in the output** so a bridged answer can never be mistaken for a native one.
+
+**The only implemented policy is `rank_fusion`, and it does not merge scores at all.** Each space answers the query natively — its own embedding, its own codebooks, its own cosines, entirely inside its own geometry — and the two *rankings* are fused (reciprocal-rank fusion). A rank is unitless. This **obeys** invariant 9 rather than working around it, and a policy that averaged scores across spaces would be forbidden by the generation contract even if somebody implemented it.
+
+The score in a bridged result is the **fusion score, not a cosine**, and `bridge` is set on the result so nobody can mistake it for one. Silence about that would be a lie by omission.
+
+## D-040 — Redaction is a rewrite, and it is one-way
+**S5.** Retention expires raw bodies (PRISM.md: *"Raw-body retention is policy-controlled (prompts contain secrets)"*).
+
+Immutability is law, so redaction edits nothing: it **rewrites** the affected parts without their bodies and swaps the catalog, exactly like a merge. The old parts sit there untouched until GC is separately asked, which is the only reason it is safe to run at all.
+
+**The vector stays. The text does not.** That asymmetry is the whole story: the store can still answer questions about what those events *meant*, and can **never again ask a different model what they meant**. Redaction is therefore the one operation in this system that permanently forecloses a future migration for the rows it touches — which is why it demands a recorded reason, and why the parts it produces carry a **required** format extension (`EXT_S5_LINEAGE`).
+
+Required, and not ceremonially: a reader that skipped it would see a column of empty strings and could not distinguish *"this event had no body"* from *"this event's body expired"*. A migration that could not tell those apart would either dead-letter a partition it should have reported as un-re-embeddable, or — if some future embedder tolerated empty input — write a part full of meaningless vectors and call the migration a success. The format refuses to let a reader be unaware.
+
+## D-041 — A bootstrap codebook depends on arrival order, and the lifecycle is the answer
+**S5. The C-4 layout gate found this, and it is the most interesting thing it found.**
+
+The gate materializes one frozen logical corpus under four physical layouts and demands identical answers. Three of them failed, and the cause was not a tie-break: **the bootstrap generation is trained on the first batch**, so ingesting the same corpus in one batch or in twenty produces different codebooks, different PQ codes, and different approximate answers.
+
+**No amount of C-4 discipline can fix that, because you cannot train on data that has not arrived.** The first codebook is necessarily a function of what the store had seen when it trained one.
+
+So the gate states what is actually true, in two halves, and both are strict:
+
+1. **The exact path is layout-invariant always** — even on a provisional store. It uses no codebook, so there is nothing to hide behind: if two stores holding identical rows disagree here, the disagreement is in the *selection*, the *ordering* or the *reconciliation*, and every one of those is a D-033-class bug.
+2. **The approximate path is layout-invariant once the store is settled** — that is, once a generation has been trained from a stratified sample of the *whole store* and migrated onto. That is what the lifecycle is *for*, and it is the state any store that has run a migration is in.
+
+Anything weaker would be a gate that passes by being vague. Anything stronger would be a promise the arrow of time does not allow.
+
+**And it exposed a second, fixable violation on the way.** The training sample was stratified **by partition** — `tenant-bucket × time window` — and a time window is a *store configuration*. Two stores holding identical rows with different window sizes therefore got different strata, different samples, and different codebooks. That is charter C-4 one level up: **the strata themselves must be a logical property of the data**, or keying the sample on `event_id` buys nothing. Strata are now **tenants**. A tenant is a fact about a row; a time window is a fact about a config file.
+
+## D-042 — The restart sweep chooses a plateau, not the best point
+**S5. A rule that had to be rewritten after it picked a lottery ticket.**
+
+The obvious rule for [`KMEANS_RESTARTS`](../testing/evidence/kmeans-restarts.json) is *"the restart count with the best derived probe count"*. It is a trap, and the sweep is jagged enough to spring it: on the golden corpus 1 and 2 restarts need **7** probes, **3 needs only 3**, and 5 through 25 all settle on **6**.
+
+Winner-takes-all would have picked 3 — a single lucky draw that no larger restart count reproduces.
+
+> **We are choosing a method, not a lottery ticket.**
+
+Selecting the luckiest point on the grid would have reintroduced *exactly* the dependence on a fortunate init that this constant exists to remove, and the next corpus would not be lucky in the same place. The rule is now: **the smallest restart count that begins a plateau** — one whose derived probe count is matched by every larger point on the grid. A plateau is the signature of a method that has stopped depending on its draw.
+
+This is charter C-3's "a boundary optimum is presumptively an artifact", generalized: **a *singleton* optimum is an artifact too.**
+
+## D-043 — `DEFAULT_NPROBE` rose from 4 to 6, and that is the honest number
+**S5.**
+
+Fixing C-4 in the training sample (D-034) and removing the lucky-init dependence (D-036) changed the codebook, and the codebook is the PQ geometry. `DEFAULT_NPROBE` was re-derived against it, exactly as charter C-3 (extended in S5) requires, and it moved from **4 to 6**. Mean scan fraction went from 0.146 to **0.203** — about 39% more data touched per query.
+
+**The engine did not get worse. The measurement got honest.** The old value was derived against a codebook that a layout accident had flattered: the training vectors arrived in corpus order, which handed k-means++ a lucky first point and produced centroids that happened to align with the corpus's motifs. Nothing about that was a property of the data, and nothing about it would have survived a merge, a repartition, or a differently-batched ingest.
+
+What we bought for the 39%:
+
+- The codebook is now a **function of the data**, so the same rows train the same codebook under every layout — asserted directly on the generation id, which *is* the content hash of the codebooks.
+- The **tail improved**: `p1 recall@10` at the default is now **1.00**, where the old configuration cleared its floor at 0.80.
+- Stratification by tenant means the loudest tenant no longer writes the codebook on everyone else's behalf.
+
+A number that goes up when you stop fooling yourself is the correct number.
