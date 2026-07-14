@@ -30,6 +30,21 @@ The distinction exists to be *abused-proof*: without it, every inconvenient cons
 
 **The first thing this rule caught was our own.** `BLOCK_SIZE = 64 KiB` was picked in S1 because 64 KiB is what people pick. Under C-1 it had to be derived or it had to go — see [D-019](#d-019--block_size-is-64-kib-because-it-was-measured-not-because-it-is-traditional).
 
+## C-2 — Golden corpora are frozen, immutable, versioned artifacts
+**S3. Architect's standing rule, arising from [D-023](#d-023--the-corpus-generator-draws-s2-fields-from-a-separate-rng-stream).**
+
+> **A drift check compares committed bytes. It never compares regenerated output against regenerated output.**
+
+In S2 a change to the corpus *generator* silently changed the corpus, and `make-fixtures.sh` cheerfully regenerated both the corpus **and** its expected answers — so the drift check went on passing **by construction while testing nothing at all**. The near-miss was caught by luck. C-2 makes it impossible by construction instead:
+
+- `testing/golden/` holds **versioned** corpora (`v1/`, `v2/`, …) and a `MANIFEST.json` naming the `current` one and carrying a **SHA-256 of every committed file**.
+- **`make-fixtures.sh` no longer generates the corpus. It verifies it**, against those checksums, and fails if a frozen artifact has been modified in place.
+- A corpus change is a **new version**, created by `scripts/new-golden-corpus.sh`, which **refuses to overwrite an existing one**, demands a `--reason` a reviewer can evaluate, and prints the diff against the current corpus for review.
+- **Predecessors are retained forever.** Every receipt — an nprobe sweep, a block-size derivation, a recall number in a release note — names the corpus version it was measured against. A receipt that points at a corpus which no longer exists is not a receipt.
+- Flipping `current` to a new version is a **separate, deliberate edit**, and it invalidates every receipt derived from the old corpus, so those must be re-derived in the same change.
+
+`testing/golden/v1/corpus.tsv` is byte-identical to the corpus S0 committed. It is only *because* it never moved that S1's recall-tail finding — and every constant derived since — still means anything.
+
 ---
 
 ## D-001 — `docs/PRISM.md` is the canonical v2 text — *verified*
@@ -138,7 +153,7 @@ Order must be a function of the data, not of the layout. Ties now break on `even
 ## D-017 — The default `nprobe` is derived from the tail, and carries a receipt
 **S1. Architect's decision.** PRISM.md Part I §5.3: *"`nlist`/`nprobe` are outputs of recall, skew, filter selectivity and latency targets… No magic constants in docs or defaults without benchmark provenance."* S0's default of 4 was a round number that happened to be right. It is now a *derived* number that is right for a stated reason.
 
-The rule: **the smallest `nprobe` whose p1 recall@10 clears 0.8 on the golden corpus.** Chosen on the **tail**, not the mean, because the mean is exactly what hid the failure in S0. `prism golden sweep` runs it and writes `testing/golden/nprobe-provenance.json`; a test asserts `DEFAULT_NPROBE` still equals `chosen_nprobe` in that file, and that no smaller probe count clears the floor. The constant cannot drift away from its evidence without CI noticing.
+The rule: **the smallest `nprobe` whose p1 recall@10 clears 0.8 on the golden corpus.** Chosen on the **tail**, not the mean, because the mean is exactly what hid the failure in S0. `prism golden sweep` runs it and writes `testing/evidence/nprobe.json`; a test asserts `DEFAULT_NPROBE` still equals `chosen_nprobe` in that file, and that no smaller probe count clears the floor. The constant cannot drift away from its evidence without CI noticing.
 
 The sweep (104 queries, 32 centroids) is unambiguous:
 
@@ -205,7 +220,7 @@ A 300-byte centroid range and a 256-byte rerank vector were each dragging a 64 K
 
 That is worse than it sounds. `make-fixtures` regenerates the corpus *and* its expected answers, so the drift check (`the_committed_golden_corpus_still_means_what_it_meant`) would have gone on passing **by construction**, while testing nothing at all. The S1 recall-tail finding — five cluster-boundary queries returning nothing at `nprobe=1` — would have quietly evaporated with it.
 
-The S2 fields now draw from their own independent stream, and `testing/golden/corpus.tsv` is **byte-identical to the one S1 committed**. A golden corpus that moves is not a golden corpus.
+The S2 fields now draw from their own independent stream, and `testing/golden/v1/corpus.tsv` is **byte-identical to the one S1 committed**. A golden corpus that moves is not a golden corpus.
 
 ## D-024 — S2 builds the ingestion *semantics*, not the transport
 **S2.** Named so nobody mistakes silence for completeness.
@@ -214,3 +229,40 @@ The S2 fields now draw from their own independent stream, and `testing/golden/co
 - **No Kafka client.** The `Source` trait has exactly Kafka's offset semantics — poll, publish, *then* commit — and the file-backed source implements it, so invariant 7 is tested for real, through real process deaths. Wiring a broker is a transport detail. Getting the offset ordering wrong loses data permanently, and no amount of correct transport gets it back.
 
 The S2 gate is about duplicate/replay semantics, offsets and fairness. All three are built and tested. The transport is a later sprint's problem, and saying so is cheaper than pretending otherwise.
+
+## D-025 — Pagination semantics, pinned before anyone saw the syntax
+**S3. Architect's directive 2.** Pagination is the part of a query API you cannot change later without breaking every client that ever used it. So it was pinned in [`docs/QUERY-CONTRACT.md`](QUERY-CONTRACT.md) **before** the SQL surface was exposed, and the code was written against the document.
+
+- **One total order: `(score DESC, event_id ASC)`.** Ties break on `event_id`, always. For a scalar query every score is equal and the order collapses to `event_id ASC` — still total, which is all pagination needs.
+- **A cursor is an opaque token binding a snapshot and a position**, plus a fingerprint of the plan. Paging continues to read *that snapshot*, not `CURRENT`.
+- **An expired snapshot is an explicit error, never a different answer.** Silently continuing against `CURRENT` is how a client gets a page overlapping the last one, or skips rows that existed the whole time, and concludes the database is lying to them. It is.
+- **No `OFFSET`**, and the error says why.
+- **`S8 may EXTEND these semantics; it may not contradict them.`** That sentence is in the document, because by then there will be partners with cursors in their code.
+
+**Pagination needed no new invariant.** Parts are immutable and a snapshot is a fixed set of them, so the answer to a query against a given snapshot is fixed forever — ingest publishes a *new* snapshot without touching the old one, merge writes *new* parts without touching the old ones, and GC only reclaims what no retained snapshot names. It needed the invariants we already had to be *true*.
+
+**The bug this found:** the keyset skip was written as a tuple comparison, `(score, id) < (last_score, last_id)`. A tuple compares its first element **ascending**, and this order is `score DESC`. So a row with an equal score and a *smaller* id was treated as "after" the cursor — pagination rewound, repeated rows, and never terminated. It is written out longhand now, with the reason.
+
+## D-026 — `DEFAULT_CANDIDATES` and `DEFAULT_RERANK`, swept jointly
+**S3. Architect's directive 3.** Both were classified `policy` in S2, and the ledger admitted in writing that they were "empirical questions wearing a policy hat". They are now `tuned`, with a receipt (`testing/evidence/widths.json`).
+
+**Swept jointly, and that is not a stylistic choice.** The controls interact: the candidate width decides *who is allowed to be reranked*, the rerank width decides *how many of them actually are*. A rerank budget of 200 buys nothing if only 50 candidates ever entered the heap. An independent single-axis sweep of either one measures a cross-section of a surface and reports it as the surface. `nprobe` is held at its own receipted value throughout.
+
+Result: **candidates 200 → 50** (4× narrower, same recall, slightly faster); rerank stays at 50.
+
+**And the honest part: the recall floors do not bind at all.** *Every* point in the grid clears them, because on this corpus PQ's top-10 already contains the true top-10. Left there, the rule would have chosen `rerank = 10` — the hard floor, since you cannot return ten hits from fewer than ten reranked rows — and that would be overfitting to a synthetic corpus with unusually well-separated motifs.
+
+It would also have quietly broken pagination, which landed in the same sprint: **the paginated result set *is* the rerank survivor set**, so `rerank = 10` with a page size of 10 makes the first page the whole result and the cursor decorative. So the derivation carries a **policy** bound — `MIN_PAGEABLE_ROWS = 50`, five pages at the default page size — and *that* is what selects the value. Measurement could not see it. Prose can. Same shape as the manifest budget that constrains the block size (D-021).
+
+## D-027 — The SQL surface is a compiler, not an executor
+**S3. Architect's directive 4.** The gate risk was never the syntax; it was that a second door into the same engine might quietly become a second *engine*.
+
+So the SQL layer **compiles to the `Query` the direct API already takes and calls the same executor.** The filter language lives in `prism-types::predicate`, *not* in the SQL crate — which makes "the same door" a fact about the type system rather than a slogan: the direct API builds exactly what SQL compiles to, because there is only one thing to build.
+
+The parity tests assert **the physical-execution counters match, not just the rows.** If SQL ever grows its own scan, its own pruning, or its own idea of ordering, the counters diverge *before* the results do. Two doors into a database that disagree is a class of bug that takes years to find, because each door is individually self-consistent.
+
+**Tenant policy is a shape, not a check.** The binder emits `(whatever the user wrote) AND tenant_id = <session tenant>`. The user's expression is a **subtree**, and a subtree cannot widen the conjunction it is nested inside — not with an `OR`, not with a `NOT`, not with an alias, not with parentheses. There is no list of escapes to enumerate and keep up to date; there is nothing to escape *to*. The same tenant value is also what drives partition pruning, so a query that somehow got past the row filter would still be reading only its own tenant's parts. Nineteen hand-written escape attempts and 8,000 fuzzed statements confirm it.
+
+**The parser is network-facing input**, so S1's discipline applies in full: statement bytes, token count, expression depth, `IN`-list length and projection count are all bounded, and every bound is **named in its error** — "syntax error" is not something an operator can act on. The depth counter is the one that matters: a recursive-descent parser without one is a stack overflow waiting for `((((...))))`, and a stack overflow is a *process death*, not an error — it cannot be caught, reported, or attributed to the query that caused it.
+
+**Two bugs found:** an ungrouped aggregate over an empty set returned **zero rows** instead of one row saying zero (which makes "nothing matched" indistinguishable from "the query failed"), and `ORDER BY` was silently ignored rather than refused (which would let a caller believe they had asked for an order they did not get).

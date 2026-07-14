@@ -7,8 +7,8 @@ Sprint gates from [PRISM.md](PRISM.md) Part IV. **A sprint is done when its gate
 | **S0** | Executable reference slice + oracle harness | clean checkout passes CI; baselines checked in; README quickstart runs | ✅ **complete** |
 | **S1** | Part format + recovery hardening | 10,000 randomized kill/reopen runs → old-or-new, never hybrid; all compat fixtures open, all corrupt fixtures rejected specifically; no untrusted length allocates unbounded | ✅ **complete** |
 | **S2** | Production ingestion + OTel GenAI schema | replaying acknowledged input loses no rows; offsets never advance pre-publication; one tenant cannot starve another | ✅ **complete** |
-| S3 | Minimal SQL + scalar analytics | scalar-subset parity against an oracle; hybrid smoke queries identical through SQL | ⬜ **next** |
-| S4 | Hybrid partitioning + typed columns + data skipping | selective benchmarks read only eligible partitions; cross-tenant reads impossible even with malformed metadata | ⬜ |
+| **S3** | Minimal SQL + scalar analytics | scalar-subset parity against an oracle; hybrid smoke queries identical through SQL | ✅ **complete** |
+| S4 | Hybrid partitioning + typed columns + data skipping | selective benchmarks read only eligible partitions; cross-tenant reads impossible even with malformed metadata | ⬜ **next** |
 | S5 | Immutable generations | queries available throughout a two-generation migration; rollback is catalog-only; no part decodes with the wrong codebook | ⬜ |
 | S6 | CPU scan engine | bit/epsilon equivalence to the scalar oracle; zero heap allocation in the block loop | ⬜ |
 | S7 | GPU compressed scan + rerank | GPU meets recall/tolerance vs the CPU oracle; p99 bounded under saturation; speedups end-to-end | ⬜ |
@@ -183,7 +183,7 @@ hybrid            n= 16  mean=0.869  min=0.400  returned nothing: 0
 So:
 
 - every recall report carries `min`, `p1`, `p5`, `zero_recall_queries`, a per-class breakdown, and the **five worst queries by name** — a bug report, not a number;
-- the default `nprobe` is **derived**: the smallest probe count whose *p1* recall clears 0.8. It comes out at **4** (mean 0.998, p1 1.000, zero failures, 14.9% scan fraction), and `testing/golden/nprobe-provenance.json` is the receipt. A test asserts `DEFAULT_NPROBE` still equals it *and* that no smaller probe count clears the floor — the constant cannot drift from its evidence;
+- the default `nprobe` is **derived**: the smallest probe count whose *p1* recall clears 0.8. It comes out at **4** (mean 0.998, p1 1.000, zero failures, 14.9% scan fraction), and `testing/evidence/nprobe.json` is the receipt. A test asserts `DEFAULT_NPROBE` still equals it *and* that no smaller probe count clears the floor — the constant cannot drift from its evidence;
 - CI enforces `--min-p1 0.8` and `zero_recall_queries == 0`, not just a mean floor. A mean floor alone would have waved S0's failure straight through.
 
 Adaptive per-query probing — scaling the probe count when the centroid margins are tight, which *is* the boundary case — is [issue #1](https://github.com/Bobcatsfan33/PrismDB/issues/1), targeted at S6. It is deliberately not built here: it is a planner decision that must be costed against real kernel curves, and those do not exist until the CPU scan engine publishes them.
@@ -278,7 +278,7 @@ Making the constant variable also exposed a **latent bug**: `read_range` compute
 
 ### 7. A near-miss worth recording
 
-Adding attributes to the corpus generator consumed extra PRNG draws, which shifted the stream and **silently changed the committed golden corpus**. `make-fixtures` regenerates the corpus *and* its expected answers — so the drift check would have gone on passing **by construction while testing nothing**, and S1's recall-tail finding would have quietly evaporated with it. The S2 fields now draw from a separate stream, and `testing/golden/corpus.tsv` is **byte-identical to S1's**. A golden corpus that moves is not a golden corpus. ([D-023](DECISIONS.md))
+Adding attributes to the corpus generator consumed extra PRNG draws, which shifted the stream and **silently changed the committed golden corpus**. `make-fixtures` regenerates the corpus *and* its expected answers — so the drift check would have gone on passing **by construction while testing nothing**, and S1's recall-tail finding would have quietly evaporated with it. The S2 fields now draw from a separate stream, and `testing/golden/v1/corpus.tsv` is **byte-identical to S1's**. A golden corpus that moves is not a golden corpus. ([D-023](DECISIONS.md))
 
 ### What S2 does not build
 
@@ -286,13 +286,84 @@ Named so nobody mistakes silence for completeness: **no network listener** (the 
 
 ---
 
-## S3 — next
+## S3 — complete
 
-**Minimal SQL + scalar analytics.** pgwire + CLI; projections, filters, `LIMIT`, scalar aggregates and `GROUP BY`; vectorized scan with zone-map pruning; the `embedding ≈≈ 'text'` top-k predicate wired to the existing pipeline.
+**Gate:** *parity against an oracle on the scalar subset; hybrid smoke queries return slice-identical results through SQL; a design partner can be demoed.*
 
-**Gate:** parity against an oracle on the scalar subset; hybrid smoke queries return slice-identical results through SQL; a design partner can be demoed.
+The architect raised the real risk before we built anything: **the SQL path is a second door into the same engine, and it must be provably the SAME door.** So the gate is not "does SQL work" — it is "is SQL a compiler rather than a second engine", and it is enforced on the *counters*.
 
-**Carry into S3:**
-- **Pagination semantics.** S3 ships SQL syntax to design partners; S8 defines null/tie/ordering/pagination semantics five sprints later. Stable pagination over an approximate scan with a tunable `nprobe` across a moving snapshot is genuinely hard. Pin snapshot-pinned cursors and the `event_id` tiebreak ([D-008](DECISIONS.md)) **in S3**, or the partners demoed to will be broken by S8.
-- **Typed columns land as a flagged extension on v3**, not v4 ([D-020](DECISIONS.md)). The feature bit is already reserved.
-- **`DEFAULT_CANDIDATES` and `DEFAULT_RERANK` are still `policy`,** and they should not be forever — they are empirical questions wearing a policy hat. They owe a derivation once S6 publishes real kernel cost curves. The ledger says so, in writing.
+### 1. The same door, proven on the counters
+
+Every gate query runs through **both** doors and asserts identical rows **and identical physical-execution counters**.
+
+The counters are the point. If SQL ever grows its own scan, its own pruning, or its own idea of ordering, **the counters diverge before the results do** — and we would rather learn that from a counter than from a customer. Two doors into a database that disagree is a class of bug that takes years to find, because each door is individually self-consistent.
+
+It is made structural, not merely tested: the **filter language lives in `prism-types::predicate`, not in the SQL crate.** The direct API builds exactly what SQL compiles to because there is only one thing to build. `sql_compiles_to_exactly_the_query_the_direct_api_takes` asserts the compiled `Query` *equals the hand-built one as a value*, before either is ever run.
+
+The scalar subset also has a real oracle: a brute-force reference that materializes every event and filters it in a straight loop — no pruning, no zone maps, no columnar reads, no laziness. Slow and stupid on purpose, which is what an oracle should be.
+
+### 2. Tenant policy is a shape, not a check
+
+```
+(whatever the user wrote)  AND  tenant_id = <session tenant>
+```
+
+The user's expression is a **subtree**. A subtree cannot widen the conjunction it is nested inside — not with an `OR`, not a `NOT`, not an alias, not parentheses, not a comment. **There is no list of escapes to enumerate and keep current, because there is nothing to escape *to*.** And the same tenant value drives *partition pruning*, so a query that somehow got past the row filter would still be reading only its own tenant's parts.
+
+Nineteen hand-written escape attempts (`OR 1=1`, `NOT (tenant_id = 'mine')`, `tenant_id IN (…)`, comment-smuggling, alias games, case games, arbitrary nesting) and **8,000 fuzzed statements** — none escapes, none panics, none returns another tenant's row. Aliases don't even bind: `SELECT tenant_id AS t … WHERE t = 'other'` fails, because an alias is not a column and is not in scope in `WHERE`.
+
+### 3. The parser is network-facing input
+
+S1's bounded-allocation discipline, applied to SQL text — and **every bound named in its error**, because "syntax error" is not something an operator can act on.
+
+| bound | limit |
+|---|---|
+| statement bytes | 64 KiB |
+| tokens | 4,096 |
+| **expression nesting depth** | **32** |
+| `IN` list length | 1,024 |
+| projections | 64 |
+
+The depth counter is the one that matters. A recursive-descent parser without one is a stack overflow waiting for `((((((...))))))` — and a stack overflow is a **process death**, not an error. It cannot be caught, reported, or attributed to the query that caused it.
+
+Also refused rather than ignored: a second statement (`SELECT 1; DROP TABLE events` — quietly parsing the first and dropping the rest is how a stacked-query injection becomes invisible), an unterminated comment, and an `ORDER BY` that contradicts the total order.
+
+### 4. Pagination — pinned before anyone saw the syntax
+
+[**docs/QUERY-CONTRACT.md**](QUERY-CONTRACT.md), written first, containing the sentence *"S8 may EXTEND these semantics. It may not contradict them."* — because by then there will be partners with cursors in their code.
+
+- **One total order:** `(score DESC, event_id ASC)`. Always.
+- **A cursor binds a snapshot and a position.** Paging reads *that snapshot*, not `CURRENT`.
+- **An expired snapshot is an explicit error**, never a silently different answer.
+- **No `OFFSET`** — and the error says why.
+
+**The gate test pages a full result set while the store is actively changing underneath**: new events land and parts merge between *every single page*. The reader sees exactly the rows of the snapshot it started on — no duplicates, no gaps, nothing from the future.
+
+**And it needed no new invariant.** Parts are immutable, a snapshot is a fixed set of them, ingest publishes a *new* snapshot without touching the old one, and merge writes *new* parts without touching the old ones. Pagination needed the invariants we already had to be *true*.
+
+### 5. Two charter amendments' worth of discipline, and what they caught
+
+**C-2 — golden corpora are frozen, immutable, versioned artifacts.** Arising from S2's near-miss ([D-023](DECISIONS.md)): a change to the corpus *generator* silently changed the corpus, and `make-fixtures` regenerated the corpus **and** its expected answers — so the drift check would have gone on passing *by construction while testing nothing*. Now: `testing/golden/` is versioned and checksummed, `make-fixtures` **verifies and never generates**, and a new corpus requires `scripts/new-golden-corpus.sh`, which **refuses to overwrite**, demands a reviewable `--reason`, and retains every predecessor — because every receipt names the corpus version it was measured against, and a receipt pointing at a corpus that no longer exists is not a receipt.
+
+**C-1 — `DEFAULT_CANDIDATES` and `DEFAULT_RERANK` reclassified `tuned` and swept jointly.** They interact: the candidate width decides *who is allowed to be reranked*, the rerank width decides *how many actually are*. An independent single-axis sweep of either measures a cross-section of a surface and reports it as the surface. Result: **candidates 200 → 50**, rerank stays 50.
+
+**But the honest part is that the recall floors do not bind at all.** Every point in the grid clears them — on this corpus, PQ's top-10 already contains the true top-10. Left there, the rule chooses `rerank = 10`, which would be overfitting to a synthetic corpus with unusually well-separated motifs *and* would quietly break the pagination that landed in the same sprint: **the paginated result set *is* the rerank survivor set**, so `rerank = 10` at a page size of 10 makes the first page the whole result and the cursor decorative. So the derivation carries a **policy** bound, `MIN_PAGEABLE_ROWS = 50`, and that is what actually selects the value. Measurement could not see it. Prose can. (Same shape as the manifest budget that constrains the block size.)
+
+### Bugs found
+
+- **Pagination never terminated.** The keyset skip was a tuple comparison, `(score, id) < (last_score, last_id)` — and a tuple compares its first element **ascending** while this order is `score DESC`. A row with an equal score and a *smaller* id was treated as "after" the cursor, so pagination rewound and repeated forever. Written out longhand now, with the reason.
+- **An ungrouped aggregate over an empty set returned zero rows** instead of one row saying `0`, making "nothing matched" indistinguishable from "the query failed".
+- **`ORDER BY` was silently ignored** rather than refused — which would let a caller believe they had asked for an order they did not get.
+
+---
+
+## S4 — next
+
+**Hybrid partitioning + typed columns + data skipping.** Outer partitions (tenant-bucket × time × generation); typed scalar columns with null maps and dictionary/delta compression; block min/max, low-cardinality sets, bounded Blooms.
+
+**Gate:** selective benchmarks read only eligible partitions/blocks; recall within tolerance of S0; **cross-tenant reads impossible even with malformed metadata or a poisoned cache**.
+
+**Carry into S4:**
+- **Typed columns and partition metadata land as *flagged extensions on v3*, not v4** ([D-020](DECISIONS.md)). The feature bits are already reserved and already refused by this build.
+- **Attribute promotion is [issue #2](https://github.com/Bobcatsfan33/PrismDB/issues/2)** — and it belongs here, because promotion only pays once the block-skipping machinery it depends on exists. Its acceptance criteria demand the promotion decision itself be *derived* from committed evidence (cardinality, selectivity, query frequency) rather than a hand-picked list of key names — charter C-1 applies.
+- **Tenant isolation becomes structural.** Today it is a filter fused into the scan plus a pruning predicate — strong, and tested against 8,000 fuzzed statements, but still a *check*. S4's outer partitioning makes a cross-tenant read *physically impossible*, which is a different and better kind of guarantee. The S4 gate says "even with malformed metadata", so the fuzzing moves down a layer: poison the manifest, not the SQL.

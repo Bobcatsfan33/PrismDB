@@ -67,7 +67,7 @@ prism fsck --path ./demo
 
 ## Status
 
-**Executable reference core under active development.** Sprints **S0, S1 and S2** of eighteen are complete: a dependency-light, single-node vertical slice that really ingests, really prunes, really scans compressed codes, really re-ranks exactly, and really answers — on a hardened, versioned, self-describing storage format, behind an admission boundary with exactly-once replay semantics. See [docs/PRISM.md](docs/PRISM.md) for the architecture and the full sprint roadmap, [docs/INGESTION-CONTRACT.md](docs/INGESTION-CONTRACT.md) for what an acknowledgement actually promises, and [docs/PROGRESS.md](docs/PROGRESS.md) for exactly what is proven so far and by which test.
+**Executable reference core under active development.** Sprints **S0 through S3** of eighteen are complete: a dependency-light, single-node vertical slice that really ingests, really prunes, really scans compressed codes, really re-ranks exactly, and really answers — on a hardened, versioned, self-describing storage format, behind an admission boundary with exactly-once replay semantics. See [docs/PRISM.md](docs/PRISM.md) for the architecture and the full sprint roadmap, [docs/INGESTION-CONTRACT.md](docs/INGESTION-CONTRACT.md) for what an acknowledgement actually promises, [docs/QUERY-CONTRACT.md](docs/QUERY-CONTRACT.md) for what a cursor means, and [docs/PROGRESS.md](docs/PROGRESS.md) for exactly what is proven so far and by which test.
 
 **What works today**
 
@@ -77,6 +77,9 @@ prism fsck --path ./demo
 - **Nothing allocates on an untrusted length.** Every length in a part arrives from a stranger, and every one is checked against the bytes actually present before anything is reserved. The fuzz suite throws byte flips, every truncation length, total garbage, and a checksum-*repairing* adversary at the reader; it must decode or refuse, never panic.
 - **The rerank tier is described, not assumed.** Each part declares its exact-vector encoding and the accuracy contract that encoding owes you, and the reader dispatches on it. Changing it later is a data migration, never a format break.
 - **Old formats still open, and merge migrates them forward.** The v1 parts committed on day one still open, still verify, and still answer — and a merge rewrites them into v2 without ever touching the original bytes.
+- **SQL — and it is provably the *same door*.** `SELECT … FROM events WHERE embedding ≈≈ 'a failure' AND attributes['gen_ai.system'] = 'anthropic' AND cost < 0.02 LIMIT 10` compiles to the same query the direct API takes and calls the same executor. Every gate test runs each query through *both* doors and asserts the rows **and the physical-execution counters** are identical — because if SQL ever grew its own scan, the counters would diverge before the results did.
+- **Tenant policy is a shape, not a check.** The binder emits `(whatever you wrote) AND tenant_id = <your tenant>`. Your expression is a *subtree*, and a subtree cannot widen the conjunction it is nested inside — not with an `OR`, not a `NOT`, not an alias, not parentheses. There is no list of escapes to keep up to date, because there is nothing to escape *to*. Nineteen hand-written attempts and 8,000 fuzzed statements agree.
+- **Pagination that cannot duplicate or drop.** A cursor pins a *snapshot*; paging continues to read that snapshot even while ingest and merge race underneath. A cursor into a reclaimed snapshot is an explicit error, never a silently different answer. No `OFFSET`. This needed no new invariant — only the ones we already had to be true.
 - Immutable content-addressed generations; a query spanning two embedding spaces is **refused**, not silently merged (scores from different spaces are not comparable).
 - Merge with a documented duplicate policy, re-embed migration, catalog-only rollback, and explicit GC that provably never touches a referenced part.
 - **An acknowledgement is a promise, and it is kept.** An acked event *will* become queryable — even if the process dies immediately afterwards, mid-embedding, before a single byte of its part is durable. It comes back **exactly once, with its embedding**, out of a durable admission log. Replays are recognised and suppressed; a reused id with *different* content is refused rather than silently rewriting history. Source offsets are advanced only *after* publication: they may lag reality, they may never lead it.
@@ -88,7 +91,7 @@ prism fsck --path ./demo
 **Deliberate limits right now** — these are sprints, not oversights
 
 - Single writer, single node, in-process. No network, no server, no distribution.
-- No SQL yet (S3). The CLI is the whole surface.
+- SQL is a minimal subset: projections, filters, `LIMIT`, scalar aggregates and `GROUP BY`, plus the `embedding ≈≈ 'text'` predicate. No joins, no subqueries, no `OFFSET`. The full semantics — nulls, ties, model versions, the cost-based optimizer — are S8, and S8 may *extend* the query contract but not contradict it.
 - Scalar loops only: no SIMD (S6), no GPU (S7). Every kernel here is the *reference* implementation that the fast ones will have to prove themselves equal to.
 - A deterministic local hash embedder, not a real language model (S13). It exists so that every test, corpus, and baseline is reproducible on any machine with no weights and no network.
 - Semantic grouping clusters the re-rank survivors. Grouping an arbitrarily large *filtered set* — the flagship aggregate — is S9.
@@ -98,6 +101,8 @@ prism fsck --path ./demo
 - Attributes are a bounded map. Promoting hot ones to typed columns with their own zone maps is [issue #2](https://github.com/Bobcatsfan33/PrismDB/issues/2), targeted at S4 — promotion only pays once the block-skipping machinery it depends on exists.
 
 **Numbers.** There are none in this README on purpose. Every performance claim PrismDB makes must be backed by a committed, reproducible benchmark artifact, and a roofline must be labelled a roofline. Run `prism bench --out baselines.json` and read what your own hardware says.
+
+**And no golden corpus that moves.** The corpus every receipt is measured against is a *frozen, versioned, checksummed* artifact. A drift check compares committed bytes; it never regenerates what it is checking. We learned that the hard way: in S2 a change to the corpus *generator* silently changed the corpus, and the fixture script regenerated both the corpus and its expected answers — so the drift check would have gone on passing **by construction while testing nothing**.
 
 **And no tuned constant without evidence.** Every constant that steers behaviour is in a [committed ledger](testing/evidence/registry.json), classified: a *tuned* constant owes a benchmark artifact, the key inside it that **is** the value, and the rule by which that rule chose it — and a test asserts, in both directions, that the code and the ledger still agree. A *policy* constant owes a written argument instead, because some questions measurement cannot answer. The first thing that rule caught was our own: the block size had been set to 64 KiB in S1 because 64 KiB is what people set it to, and measuring it showed a **247× read amplification**. The derived answer is 4 KiB, and queries got 2.2× faster.
 

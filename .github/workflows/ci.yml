@@ -104,6 +104,48 @@ jobs:
       # select it from the data the evidence recorded.
       - run: cargo test --release -p prism-engine --test tuning -- --nocapture
 
+  sql:
+    name: the S3 gate — same door, tenant policy, bounded parsing, pagination
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Every query runs through BOTH doors, asserting identical rows AND identical
+      # physical-execution counters. Plus 8,000 fuzzed statements that must never panic and
+      # never see another tenant, every parser bound named in its error, and pagination of a
+      # full result set under concurrent ingest+merge.
+      - run: cargo test --release -p prism-cli --test sql -- --nocapture
+      - run: cargo test --release -p prism-sql
+
+  golden-frozen:
+    name: the golden corpus has not moved (charter C-2)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Compares COMMITTED BYTES against the manifest's checksums. A drift check that
+      # regenerates what it is checking tests nothing -- which is exactly what happened in S2.
+      - name: verify every frozen golden artifact
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, sys
+          m = json.load(open("testing/golden/MANIFEST.json"))
+          bad = 0
+          for version, v in m["versions"].items():
+              for name, meta in v["files"].items():
+                  path = f"testing/golden/{version}/{name}"
+                  actual = hashlib.sha256(open(path, "rb").read()).hexdigest()
+                  status = "ok " if actual == meta["sha256"] else "CHANGED"
+                  print(f"  {status} {path}")
+                  bad += actual != meta["sha256"]
+          if bad:
+              print("\nA FROZEN golden artifact was modified in place. Charter C-2: every receipt")
+              print("that names this corpus now describes something else. Restore it, and create a")
+              print("NEW VERSION with scripts/new-golden-corpus.sh instead.")
+              sys.exit(1)
+          print(f"\n  current corpus: {m['current']}")
+          PY
+
   recall:
     name: recall contract vs the exact oracle
     runs-on: ubuntu-latest
@@ -117,7 +159,7 @@ jobs:
           set -euxo pipefail
           P=./target/release/prism
           $P init --path /tmp/golden --dim 64 --nlist 32 --pq-m 8 --seed 1234
-          $P ingest --path /tmp/golden --file testing/golden/corpus.tsv
+          $P ingest --path /tmp/golden --file testing/golden/v1/corpus.tsv
           # Three checks, all of which must hold:
           #   drift  — the exact answers must not have moved (inside `golden check`)
           #   recall — the approximate path must find them, at a stated scan cost
@@ -126,7 +168,7 @@ jobs:
           # The mean floor alone would have waved S0's `min recall = 0.000`
           # straight through: a mean of 0.904 with five queries returning nothing
           # is not a 90% system. --min-p1 is the floor that actually bites.
-          $P golden check --path /tmp/golden --golden testing/golden/expected.json \
+          $P golden check --path /tmp/golden --golden testing/golden/v1/expected.json \
              --candidates 200 --rerank 50 --min-recall 0.95 --min-p1 0.8
 
   compat:

@@ -66,6 +66,29 @@ jobs:
           print("the default is still justified by its own evidence.")
           PY
 
+  width-provenance:
+    name: the default candidate/rerank widths still hold on a fresh sweep
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release
+      - name: re-derive and compare
+        run: |
+          set -euxo pipefail
+          ./target/release/prism evidence widths --out /tmp/w.json >/dev/null
+          python3 - <<'PY'
+          import json
+          fresh = json.load(open("/tmp/w.json"))
+          committed = json.load(open("testing/evidence/widths.json"))
+          for k in ("chosen_candidates", "chosen_rerank"):
+              print(f"{k}: fresh={fresh[k]} committed={committed[k]}")
+              assert fresh[k] == committed[k], f"{k} no longer reproduces; re-derive it"
+          print("the widths are still justified by their own evidence.")
+          PY
+
   nprobe-provenance:
     name: the default nprobe still holds on a fresh sweep
     runs-on: ubuntu-latest
@@ -83,13 +106,13 @@ jobs:
           set -euxo pipefail
           P=./target/release/prism
           $P init --path /tmp/g --dim 64 --nlist 32 --pq-m 8 --seed 1234
-          $P ingest --path /tmp/g --file testing/golden/corpus.tsv
-          $P golden sweep --path /tmp/g --golden testing/golden/expected.json \
+          $P ingest --path /tmp/g --file testing/golden/v1/corpus.tsv
+          $P golden sweep --path /tmp/g --golden testing/golden/v1/expected.json \
              --out /tmp/prov.json --p1-floor 0.8 >/dev/null
           python3 - <<'PY'
           import json
           fresh = json.load(open("/tmp/prov.json"))
-          committed = json.load(open("testing/golden/nprobe-provenance.json"))
+          committed = json.load(open("testing/evidence/nprobe.json"))
           print(f"fresh sweep chose nprobe={fresh['chosen_nprobe']}, "
                 f"committed receipt says {committed['chosen_nprobe']}")
           assert fresh["chosen_nprobe"] == committed["chosen_nprobe"], \
