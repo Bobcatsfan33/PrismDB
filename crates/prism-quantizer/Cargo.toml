@@ -1,0 +1,12 @@
+[package]
+name = "prism-quantizer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Coarse k-means centroids, product quantization, and ADC distance tables for PrismDB."
+
+[dependencies]
+prism-types = { workspace = true }
+serde = { workspace = true }

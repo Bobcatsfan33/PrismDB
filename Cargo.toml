@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/prism-types",
+    "crates/prism-quantizer",
 ]
 
 [workspace.package]
