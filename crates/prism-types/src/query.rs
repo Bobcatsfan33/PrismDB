@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// **Derived, not chosen.** It is the smallest `nprobe` whose *p1* recall@10
 /// clears 0.8 on the golden corpus at the reference configuration, and the
-/// receipt is `testing/golden/nprobe-provenance.json`. A test asserts this
+/// receipt is `testing/evidence/nprobe.json`. A test asserts this
 /// constant still equals the `chosen_nprobe` in that file, so the default cannot
 /// drift away from the evidence that produced it.
 ///
@@ -35,9 +35,33 @@ use serde::{Deserialize, Serialize};
 pub const DEFAULT_NPROBE: usize = 4;
 
 /// Default candidate width: how many PQ-scored rows survive into the heap.
-pub const DEFAULT_CANDIDATES: usize = 200;
+///
+/// **Derived, not chosen** (charter C-1), and derived *jointly* with [`DEFAULT_RERANK`] —
+/// the two interact, so an independent single-axis sweep of either measures a cross-section
+/// of a surface and reports it as the surface. The candidate width decides *who is allowed
+/// to be reranked*; the rerank width decides *how many of them actually are*. A rerank
+/// budget of 200 buys nothing if only 50 candidates ever entered the heap.
+///
+/// The receipt is `testing/evidence/widths.json`.
+pub const DEFAULT_CANDIDATES: usize = 50;
 
 /// Default rerank width — the declared exact-vector fetch budget.
+///
+/// Derived jointly with [`DEFAULT_CANDIDATES`], and **the binding constraint is not
+/// recall**: on the golden corpus every point in the grid clears the tail floors, because
+/// PQ's top-10 already contains the true top-10. Left there, the sweep would have chosen
+/// `rerank = 10` — the hard floor, since you cannot return ten hits from fewer than ten
+/// reranked rows — and that would be overfitting to a synthetic corpus with unusually
+/// well-separated motifs.
+///
+/// It would also quietly break pagination. **The paginated result set *is* the rerank
+/// survivor set** (`docs/QUERY-CONTRACT.md` §4), so a rerank width of 10 with a page size
+/// of 10 makes the first page the entire result and the cursor decorative. So the
+/// derivation carries a *policy* bound — `MIN_PAGEABLE_ROWS = 50`, five pages at the
+/// default page size — and that bound is what actually selects the value.
+///
+/// Rerank is the expensive control: an exact vector is ~32x a coded row, so one rerank
+/// fetch costs 32 rows of scanning. The candidate heap costs memory, not I/O.
 pub const DEFAULT_RERANK: usize = 50;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -62,6 +86,14 @@ pub struct Query {
     /// If set, cluster the rerank survivors into this many semantic groups.
     pub group_k: Option<usize>,
 
+    /// A row predicate, evaluated in the fused scan mask.
+    ///
+    /// Lives in `prism-types`, not in the SQL crate, so the **direct API can build exactly
+    /// what SQL compiles to**. Two filter languages that are supposed to agree is precisely
+    /// the bug the "same door" rule exists to prevent.
+    #[serde(default)]
+    pub predicate: Option<crate::predicate::Predicate>,
+
     /// Which embedding space to search, as `model_id:model_version`.
     ///
     /// Only needed when a store holds parts from more than one space — mid
@@ -83,6 +115,7 @@ impl Default for Query {
             candidates: DEFAULT_CANDIDATES,
             rerank: DEFAULT_RERANK,
             group_k: None,
+            predicate: None,
             space: None,
         }
     }

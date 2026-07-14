@@ -21,6 +21,7 @@ dependencies = [
  "prism-engine",
  "prism-part",
  "prism-quantizer",
+ "prism-sql",
  "prism-types",
  "serde",
  "serde_json",
@@ -32,6 +33,7 @@ version = "0.0.1"
 dependencies = [
  "prism-part",
  "prism-quantizer",
+ "prism-sql",
  "prism-types",
  "serde",
  "serde_json",
@@ -49,6 +51,14 @@ dependencies = [
 
 [[package]]
 name = "prism-quantizer"
+version = "0.0.1"
+dependencies = [
+ "prism-types",
+ "serde",
+]
+
+[[package]]
+name = "prism-sql"
 version = "0.0.1"
 dependencies = [
  "prism-types",

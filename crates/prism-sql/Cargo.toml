@@ -1,0 +1,12 @@
+[package]
+name = "prism-sql"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "PrismDB's SQL surface: lexer, parser, binder. Compiles to the same Query the direct API takes."
+
+[dependencies]
+prism-types = { workspace = true }
+serde = { workspace = true }

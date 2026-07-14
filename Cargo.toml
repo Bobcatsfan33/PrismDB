@@ -4,6 +4,7 @@ members = [
     "crates/prism-types",
     "crates/prism-quantizer",
     "crates/prism-part",
+    "crates/prism-sql",
     "crates/prism-engine",
     "crates/prism-cli",
 ]
@@ -28,6 +29,7 @@ serde_json = "1"
 prism-types = { path = "crates/prism-types" }
 prism-quantizer = { path = "crates/prism-quantizer" }
 prism-part = { path = "crates/prism-part" }
+prism-sql = { path = "crates/prism-sql" }
 prism-engine = { path = "crates/prism-engine" }
 
 [profile.release]
