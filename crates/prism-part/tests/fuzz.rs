@@ -51,6 +51,7 @@ fn build_part(root: &Path, rows: usize) -> PathBuf {
             nlist: 4,
             pq_m: PQ_M,
             seed: 1,
+            block_size: prism_part::format::DEFAULT_BLOCK_SIZE,
         },
     )
     .unwrap();
@@ -62,6 +63,11 @@ fn build_part(root: &Path, rows: usize) -> PathBuf {
             prism_types::validate_and_normalize(&mut v).unwrap();
             RowIn {
                 event: Event {
+                    observed_time: 1_000 + i as i64,
+                    trace_id: String::new(),
+                    span_id: String::new(),
+                    attributes: Default::default(),
+                    idempotency_key: None,
                     event_id: format!("e{i:06}"),
                     tenant_id: format!("t{}", i % 3),
                     event_time: 1_000 + i as i64,
@@ -85,6 +91,7 @@ fn build_part(root: &Path, rows: usize) -> PathBuf {
         "1",
         DIM,
         PQ_M,
+        prism_part::format::DEFAULT_BLOCK_SIZE,
         rows,
         1_000,
     )

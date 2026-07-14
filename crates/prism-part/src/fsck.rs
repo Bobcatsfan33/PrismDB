@@ -96,7 +96,7 @@ pub fn fsck_part(dir: &Path) -> FsckReport {
                     // Read exactly this block and check its frame and its bytes.
                     match reader.read_range(
                         &c.name,
-                        (i as u64) * crate::format::BLOCK_SIZE as u64,
+                        (i as u64) * c.storage.block_size() as u64,
                         b.payload_len as usize,
                     ) {
                         Ok(_) => blocks_checked += 1,

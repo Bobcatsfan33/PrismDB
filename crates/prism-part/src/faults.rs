@@ -24,6 +24,19 @@ pub const KILL_POINTS: &[&str] = &[
     "gc.after_first_unlink",
     // A merge wrote its output part but has not committed the new snapshot.
     "merge.after_part_before_commit",
+    // --- S2: the admission path ---
+    //
+    // The durable admission log is appended but not yet fsynced. Nothing has been
+    // acked, so nothing may be lost.
+    "wal.after_append_before_fsync",
+    // **The crash that matters most.** The batch is acked (it is in the WAL), the
+    // GPU time has been spent, and the events exist nowhere durable but the log.
+    // Recovery must replay them -- exactly once, with their semantic columns.
+    "ingest.after_embed_before_part",
+    // Published and visible, but the source offset has not been advanced. The
+    // source will re-deliver; idempotency must recognise every one as a replay.
+    // Offsets may lag reality. They must never lead it.
+    "ingest.after_publish_before_offset_commit",
 ];
 
 /// Abort if the process was asked to die here.

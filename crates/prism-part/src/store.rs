@@ -38,6 +38,18 @@ pub struct StoreConfig {
     pub pq_m: usize,
     /// Seed for every deterministic step, so a store is reproducible.
     pub seed: u64,
+
+    /// Logical bytes per column block.
+    ///
+    /// A *tuned* default (charter amendment C-1), derived in
+    /// `testing/evidence/block-size.json` — not a law. It is stored per column in
+    /// every part, so a store built at one block size stays readable forever.
+    #[serde(default = "default_block_size")]
+    pub block_size: u32,
+}
+
+fn default_block_size() -> u32 {
+    crate::format::DEFAULT_BLOCK_SIZE
 }
 
 impl StoreConfig {
@@ -53,6 +65,12 @@ impl StoreConfig {
         }
         if self.nlist == 0 {
             return Err(PrismError::Invalid("nlist must be positive".into()));
+        }
+        if self.block_size == 0 || !self.block_size.is_power_of_two() {
+            return Err(PrismError::Invalid(format!(
+                "block_size {} is not a positive power of two",
+                self.block_size
+            )));
         }
         Ok(())
     }

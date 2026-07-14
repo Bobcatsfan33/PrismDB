@@ -22,15 +22,19 @@
 
 use crate::faults;
 use crate::format::{
-    self, BlockRef, Header, RerankDescriptor, BLOCK_SIZE, CODEC_RAW, FEATURE_BLOCK_FRAMING,
-    FORMAT_VERSION, FRAME_HEADER_BYTES,
+    self, BlockRef, Extension, Header, RerankDescriptor, BLOCK_SIZE, CODEC_RAW, FEATURE_ATTRIBUTES,
+    FEATURE_BLOCK_FRAMING, FEATURE_TRACE_CONTEXT, FORMAT_VERSION, FRAME_HEADER_BYTES,
+    RESERVED_WORDS, SUPPORTED_EXTENSIONS,
 };
 use crate::io;
 use crate::legacy_v1;
+use prism_types::attributes::Attributes;
 use prism_types::error::{PrismError, Result};
 use prism_types::event::Event;
 use prism_types::hash::{content_id, crc32};
+use prism_types::limits::MAX_ATTRIBUTE_KEY_CARDINALITY;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
@@ -64,10 +68,18 @@ pub enum ColumnStorage {
     /// v1: the file *is* the logical stream, with one checksum over all of it.
     /// One flipped byte condemns the whole column.
     Unframed { bytes: usize, crc32: u32 },
-    /// v2: checksummed blocks. One flipped byte condemns one block, and the
+    /// v2+: checksummed blocks. One flipped byte condemns one block, and the
     /// error names it.
+    ///
+    /// `block_size` is stored per column, not assumed from a global constant. That
+    /// is what makes the constant a *default* rather than a law: a part written at
+    /// one block size stays readable forever, whatever the default later becomes —
+    /// and it is what let the block size be *derived from measurement* at all
+    /// (charter amendment C-1), because a store could actually be built at each
+    /// candidate size and queried.
     Framed {
         logical_bytes: u64,
+        block_size: u32,
         blocks: Vec<BlockRef>,
     },
 }
@@ -77,6 +89,13 @@ impl ColumnStorage {
         match self {
             ColumnStorage::Unframed { bytes, .. } => *bytes as u64,
             ColumnStorage::Framed { logical_bytes, .. } => *logical_bytes,
+        }
+    }
+
+    pub fn block_size(&self) -> u32 {
+        match self {
+            ColumnStorage::Unframed { .. } => BLOCK_SIZE,
+            ColumnStorage::Framed { block_size, .. } => *block_size,
         }
     }
 }
@@ -125,6 +144,36 @@ pub struct PartManifest {
     pub centroid_ranges: Vec<CentroidRange>,
     pub columns: Vec<ColumnMeta>,
     pub created_at_ms: i64,
+
+    /// The features this part actually uses. Carried in the header, mirrored here
+    /// so a reader above the format layer can ask what a part has without
+    /// re-parsing bytes.
+    #[serde(default)]
+    pub feature_flags: u64,
+
+    /// **The bounded attribute key dictionary** (S2, directive 1).
+    ///
+    /// Keys are dictionary-encoded, and the dictionary lives in the *manifest* —
+    /// not in a column — for one reason: it makes "does this part contain any row
+    /// with key X?" answerable without opening a single column file. That is the
+    /// same trick the tenant list and the zone maps play, and it is why attribute
+    /// pruning will be free when S4 comes to build it.
+    ///
+    /// Bounded at [`MAX_ATTRIBUTE_KEY_CARDINALITY`]. A part that exceeds it is
+    /// refused: an unbounded dictionary carried in every manifest is exactly how a
+    /// columnar format dies.
+    #[serde(default)]
+    pub attribute_keys: Vec<String>,
+
+    /// TLV extensions (directive 2). The mechanism ships before its first user so
+    /// that the first user is not also a format break.
+    #[serde(default)]
+    pub extensions: Vec<Extension>,
+
+    /// Reserved fixed words. Must be zero. A future fixed-width field lands here
+    /// guarded by a feature bit, without a version bump.
+    #[serde(default)]
+    pub reserved: [u64; RESERVED_WORDS],
 }
 
 impl PartManifest {
@@ -160,6 +209,24 @@ impl PartManifest {
 
     pub fn bytes_per_vector(&self) -> Result<usize> {
         self.rerank.bytes_per_vector(self.dim)
+    }
+
+    /// Does this part carry this column at all?
+    ///
+    /// A v1 or v2 part has no `observed_time`, no trace context and no attributes,
+    /// because those columns did not exist when it was written. That is not
+    /// corruption — it is history, and a reader that cannot tell the difference
+    /// will condemn perfectly good data.
+    pub fn has_column(&self, name: &str) -> bool {
+        self.columns.iter().any(|c| c.name == name)
+    }
+
+    pub fn has_attributes(&self) -> bool {
+        self.feature_flags & FEATURE_ATTRIBUTES != 0 && self.has_column("attributes.data")
+    }
+
+    pub fn has_trace_context(&self) -> bool {
+        self.feature_flags & FEATURE_TRACE_CONTEXT != 0 && self.has_column("trace_id.data")
     }
 
     // --- binary encoding (v2) ---
@@ -208,9 +275,11 @@ impl PartManifest {
             match &c.storage {
                 ColumnStorage::Framed {
                     logical_bytes,
+                    block_size,
                     blocks,
                 } => {
                     b.u64(*logical_bytes);
+                    b.u32(*block_size);
                     b.len(blocks.len());
                     for blk in blocks {
                         b.u64(blk.file_offset);
@@ -220,17 +289,33 @@ impl PartManifest {
                 }
                 ColumnStorage::Unframed { .. } => {
                     return Err(PrismError::Invariant(
-                        "refusing to write an unframed column: v2 parts are always framed".into(),
+                        "refusing to write an unframed column: binary parts are always framed"
+                            .into(),
                     ));
                 }
             }
+        }
+
+        // --- v3 additions ---
+        b.len(self.attribute_keys.len());
+        for k in &self.attribute_keys {
+            b.string(k);
+        }
+        for w in &self.reserved {
+            b.u64(*w);
+        }
+        b.len(self.extensions.len());
+        for e in &self.extensions {
+            b.u16(e.id);
+            b.len(e.bytes.len());
+            b.buf.extend_from_slice(&e.bytes);
         }
 
         let body = b.buf;
         let header = Header {
             format_version: FORMAT_VERSION,
             byte_order: format::BYTE_ORDER_LITTLE,
-            feature_flags: FEATURE_BLOCK_FRAMING,
+            feature_flags: self.feature_flags,
             body_len: body.len() as u32,
             body_crc32: crc32(&body),
         };
@@ -239,10 +324,18 @@ impl PartManifest {
         Ok(out)
     }
 
-    /// Decode a v2 manifest. Every length is checked against the bytes present
-    /// before anything is reserved (see `format::Cursor`).
+    /// Decode a binary manifest, dispatching on the declared version.
+    ///
+    /// Every length is checked against the bytes present before anything is
+    /// reserved (see `format::Cursor`). v2 and v3 share a header and diverge in the
+    /// body — which is precisely why the header is parsed, and its version and
+    /// feature bits believed, *before* a single body byte is.
     pub fn decode(bytes: &[u8]) -> Result<PartManifest> {
-        let (_header, body) = format::split_manifest(bytes)?;
+        let (header, body) = format::split_manifest(bytes)?;
+        Self::decode_body(&header, body)
+    }
+
+    fn decode_body(header: &Header, body: &[u8]) -> Result<PartManifest> {
         let mut c = format::Cursor::new(body);
 
         let part_id = c.string()?;
@@ -295,6 +388,18 @@ impl PartManifest {
             let file = c.string()?;
             let codec_id = c.u16()?;
             let logical_bytes = c.u64()?;
+            // v2 had no per-column block size: every v2 column is BLOCK_SIZE.
+            let block_size = if header.format_version >= 3 {
+                c.u32()?
+            } else {
+                BLOCK_SIZE
+            };
+            if block_size == 0 || !block_size.is_power_of_two() {
+                return Err(PrismError::Corrupt(format!(
+                    "column `{name}` declares a block size of {block_size}, which is not a \
+                     positive power of two"
+                )));
+            }
             // A block ref is 8+4+4 = 16 bytes.
             let n_blocks = c.read_len(16, "blocks")?;
             let mut blocks = Vec::with_capacity(n_blocks);
@@ -311,13 +416,74 @@ impl PartManifest {
                 codec_id,
                 storage: ColumnStorage::Framed {
                     logical_bytes,
+                    block_size,
                     blocks,
                 },
             });
         }
 
+        // --- v3 additions. A v2 part simply does not carry them. ---
+        let mut attribute_keys = Vec::new();
+        let mut reserved = [0u64; RESERVED_WORDS];
+        let mut extensions: Vec<Extension> = Vec::new();
+
+        if header.format_version >= 3 {
+            let n_keys = c.read_len(4, "attribute keys")?;
+            if n_keys > MAX_ATTRIBUTE_KEY_CARDINALITY {
+                return Err(PrismError::Corrupt(format!(
+                    "part declares {n_keys} attribute keys, over the {MAX_ATTRIBUTE_KEY_CARDINALITY} \
+                     cardinality bound; an unbounded key dictionary in every manifest is how a \
+                     columnar format dies"
+                )));
+            }
+            attribute_keys = Vec::with_capacity(n_keys);
+            for _ in 0..n_keys {
+                attribute_keys.push(c.string()?);
+            }
+
+            for w in reserved.iter_mut() {
+                *w = c.u64()?;
+            }
+            // A non-zero reserved word means a writer put something here that this
+            // build cannot interpret. Refuse rather than ignore: ignoring is how a
+            // reader silently drops a field that changed what the data means.
+            if reserved.iter().any(|w| *w != 0) {
+                return Err(PrismError::Corrupt(
+                    "part sets a reserved manifest word this build does not understand".into(),
+                ));
+            }
+
+            let n_ext = c.read_len(6, "extensions")?;
+            for _ in 0..n_ext {
+                let id = c.u16()?;
+                let len = c.read_len(1, "extension bytes")?;
+                let mut bytes = vec![0u8; 0];
+                bytes.reserve_exact(len);
+                for _ in 0..len {
+                    bytes.push(c.u8()?);
+                }
+                let ext = Extension { id, bytes };
+
+                // The required bit is the whole point of the TLV scheme: a reader
+                // that does not know a *required* extension must refuse the part,
+                // and may safely skip an optional one.
+                if ext.is_required() && !SUPPORTED_EXTENSIONS.contains(&id) {
+                    return Err(PrismError::Corrupt(format!(
+                        "part carries required extension {id:#06x}, which this build does not \
+                         implement; refusing rather than reading it as if the extension were not \
+                         there"
+                    )));
+                }
+                extensions.push(ext);
+            }
+        }
+
         Ok(PartManifest {
-            format_version: FORMAT_VERSION,
+            format_version: header.format_version,
+            feature_flags: header.feature_flags,
+            attribute_keys,
+            extensions,
+            reserved,
             part_id,
             generation_id,
             model_id,
@@ -366,9 +532,11 @@ impl PartManifest {
             }
             if let ColumnStorage::Framed {
                 logical_bytes,
+                block_size,
                 blocks,
             } = &c.storage
             {
+                let bs = *block_size;
                 // The block directory must actually cover the logical stream —
                 // no gaps, no overlaps, no lies about how much data is here.
                 let covered: u64 = blocks.iter().map(|b| b.payload_len as u64).sum();
@@ -382,7 +550,7 @@ impl PartManifest {
                 let expected_blocks = if *logical_bytes == 0 {
                     1
                 } else {
-                    logical_bytes.div_ceil(BLOCK_SIZE as u64) as usize
+                    logical_bytes.div_ceil(bs as u64) as usize
                 };
                 if blocks.len() != expected_blocks {
                     return Err(PrismError::Corrupt(format!(
@@ -395,16 +563,16 @@ impl PartManifest {
                 }
                 for (i, b) in blocks.iter().enumerate() {
                     let is_last = i + 1 == blocks.len();
-                    if !is_last && b.payload_len != BLOCK_SIZE {
+                    if !is_last && b.payload_len != bs {
                         return Err(PrismError::Corrupt(format!(
                             "part {} column `{}` block {i} is {} bytes; only the last block \
                              may be short",
                             self.part_id, c.name, b.payload_len
                         )));
                     }
-                    if b.payload_len > BLOCK_SIZE {
+                    if b.payload_len > bs {
                         return Err(PrismError::Corrupt(format!(
-                            "part {} column `{}` block {i} claims {} bytes, over the {BLOCK_SIZE} \
+                            "part {} column `{}` block {i} claims {} bytes, over the {bs}-byte \
                              block size",
                             self.part_id, c.name, b.payload_len
                         )));
@@ -436,6 +604,16 @@ impl PartManifest {
                 ))
             })
         };
+        if self.attribute_keys.len() > MAX_ATTRIBUTE_KEY_CARDINALITY {
+            return Err(PrismError::Corrupt(format!(
+                "part {} carries {} attribute keys, over the {MAX_ATTRIBUTE_KEY_CARDINALITY} bound",
+                self.part_id,
+                self.attribute_keys.len()
+            )));
+        }
+        if self.has_column("observed_time") {
+            expect("observed_time", checked(rows, 8, "observed times")?)?;
+        }
         expect("pq_codes", checked(rows, self.pq_m as u64, "pq codes")?)?;
         expect(
             "rerank_vectors",
@@ -562,9 +740,15 @@ impl PartWriter {
         model_version: &str,
         dim: usize,
         pq_m: usize,
+        block_size: u32,
         mut rows: Vec<RowIn>,
         now_ms: i64,
     ) -> Result<PartManifest> {
+        if block_size == 0 || !block_size.is_power_of_two() {
+            return Err(PrismError::Invalid(format!(
+                "block size {block_size} is not a positive power of two"
+            )));
+        }
         if rows.is_empty() {
             return Err(PrismError::Invalid(
                 "refusing to write an empty part".into(),
@@ -605,11 +789,16 @@ impl PartWriter {
         let mut event_names = Vec::with_capacity(row_count);
         let mut bodies = Vec::with_capacity(row_count);
         let mut times = Vec::with_capacity(row_count);
+        let mut observed = Vec::with_capacity(row_count);
+        let mut trace_ids = Vec::with_capacity(row_count);
+        let mut span_ids = Vec::with_capacity(row_count);
+        let mut idem_keys = Vec::with_capacity(row_count);
         let mut costs = Vec::with_capacity(row_count);
         let mut errors: Vec<u8> = Vec::with_capacity(row_count);
         let mut centroids: Vec<u32> = Vec::with_capacity(row_count);
         let mut codes: Vec<u8> = Vec::with_capacity(row_count * pq_m);
         let mut rerank_bytes: Vec<u8> = Vec::with_capacity(row_count * bpv);
+        let mut attr_rows: Vec<Attributes> = Vec::with_capacity(row_count);
 
         for r in &rows {
             event_ids.push(r.event.event_id.clone());
@@ -617,12 +806,39 @@ impl PartWriter {
             event_names.push(r.event.event_name.clone());
             bodies.push(r.event.body.clone());
             times.push(r.event.event_time);
+            observed.push(r.event.observed_time);
+            trace_ids.push(r.event.trace_id.clone());
+            span_ids.push(r.event.span_id.clone());
+            idem_keys.push(r.event.idempotency_key.clone().unwrap_or_default());
             costs.push(r.event.cost);
             errors.push(u8::from(r.event.error));
             centroids.push(r.centroid);
             codes.extend_from_slice(&r.code);
             rerank_bytes.extend_from_slice(&rerank.encode_vector(&r.vector)?);
+            attr_rows.push(r.event.attributes.clone());
         }
+
+        // --- the bounded attribute key dictionary (directive 1) ---
+        //
+        // Built from the rows actually present, so a part's dictionary is exactly
+        // the keys it uses and nothing else. The cardinality bound is enforced at
+        // admission, long before here; this is the backstop that makes it a
+        // property of the *format* and not merely of the ingest path, because a
+        // part written by any other code path must obey it too.
+        let key_set: BTreeSet<String> = attr_rows.iter().flat_map(|a| a.keys().cloned()).collect();
+        if key_set.len() > MAX_ATTRIBUTE_KEY_CARDINALITY {
+            return Err(PrismError::Invariant(format!(
+                "part would carry {} distinct attribute keys, over the \
+                 {MAX_ATTRIBUTE_KEY_CARDINALITY} cardinality bound",
+                key_set.len()
+            )));
+        }
+        let attribute_keys: Vec<String> = key_set.into_iter().collect();
+        let dict: BTreeMap<String, u32> = attribute_keys
+            .iter()
+            .enumerate()
+            .map(|(i, k)| (k.clone(), i as u32))
+            .collect();
 
         // --- persisted centroid marks ---
         let mut ranges: Vec<CentroidRange> = Vec::new();
@@ -671,11 +887,21 @@ impl PartWriter {
         let (nam_dat, nam_off) = io::encode_strings(&event_names);
         let (bod_dat, bod_off) = io::encode_strings(&bodies);
 
+        let (tr_dat, tr_off) = io::encode_strings(&trace_ids);
+        let (sp_dat, sp_off) = io::encode_strings(&span_ids);
+        let (ik_dat, ik_off) = io::encode_strings(&idem_keys);
+        let (attr_dat, attr_off) = io::encode_attributes(&attr_rows, &dict)?;
+
         let logical: Vec<(&str, &str, Vec<u8>)> = vec![
             ("pq_codes", "pq.codes", codes),
             ("rerank_vectors", "rerank.vec", rerank_bytes),
             ("centroid", "centroid.u32", io::encode_u32(&centroids)),
             ("event_time", "event_time.i64", io::encode_i64(&times)),
+            (
+                "observed_time",
+                "observed_time.i64",
+                io::encode_i64(&observed),
+            ),
             ("cost", "cost.f64", io::encode_f64(&costs)),
             ("error", "error.u8", errors),
             ("event_id.data", "event_id.dat", eid_dat),
@@ -686,19 +912,28 @@ impl PartWriter {
             ("event_name.offsets", "event_name.off", nam_off),
             ("body.data", "body.dat", bod_dat),
             ("body.offsets", "body.off", bod_off),
+            ("trace_id.data", "trace_id.dat", tr_dat),
+            ("trace_id.offsets", "trace_id.off", tr_off),
+            ("span_id.data", "span_id.dat", sp_dat),
+            ("span_id.offsets", "span_id.off", sp_off),
+            ("idempotency_key.data", "idem.dat", ik_dat),
+            ("idempotency_key.offsets", "idem.off", ik_off),
+            ("attributes.data", "attrs.dat", attr_dat),
+            ("attributes.offsets", "attrs.off", attr_off),
         ];
 
         // --- frame each column into checksummed blocks ---
         let mut framed: Vec<(&str, Vec<u8>)> = Vec::with_capacity(logical.len());
         let mut columns: Vec<ColumnMeta> = Vec::with_capacity(logical.len());
         for (name, file, bytes) in &logical {
-            let (file_bytes, blocks) = format::frame_column(bytes);
+            let (file_bytes, blocks) = format::frame_column(bytes, block_size);
             columns.push(ColumnMeta {
                 name: (*name).to_string(),
                 file: (*file).to_string(),
                 codec_id: CODEC_RAW,
                 storage: ColumnStorage::Framed {
                     logical_bytes: bytes.len() as u64,
+                    block_size,
                     blocks,
                 },
             });
@@ -727,6 +962,10 @@ impl PartWriter {
 
         let manifest = PartManifest {
             format_version: FORMAT_VERSION,
+            feature_flags: FEATURE_BLOCK_FRAMING | FEATURE_ATTRIBUTES | FEATURE_TRACE_CONTEXT,
+            attribute_keys,
+            extensions: Vec::new(),
+            reserved: [0u64; RESERVED_WORDS],
             part_id: part_id.clone(),
             generation_id: generation_id.to_string(),
             model_id: model_id.to_string(),
@@ -798,6 +1037,13 @@ impl PartWriter {
 pub struct PartReader {
     pub manifest: PartManifest,
     dir: PathBuf,
+    /// Bytes actually pulled off the disk by this reader.
+    ///
+    /// Distinct from the *logical* bytes a plan asked for, and the gap between them
+    /// is the block layer's over-read: a 300-byte centroid range living inside a
+    /// 64 KiB block costs 64 KiB. That gap is invisible to every logical counter,
+    /// it is what the disk actually charges, and it is what decides the block size.
+    io_bytes: std::cell::Cell<usize>,
 }
 
 impl PartReader {
@@ -827,7 +1073,15 @@ impl PartReader {
         Ok(PartReader {
             manifest,
             dir: dir.to_path_buf(),
+            io_bytes: std::cell::Cell::new(0),
         })
+    }
+
+    /// Bytes this reader has physically read. Reset per part-open, and parts are
+    /// opened per query, so summing this across a query's readers gives the query's
+    /// true I/O.
+    pub fn io_bytes(&self) -> usize {
+        self.io_bytes.get()
     }
 
     pub fn is_legacy(&self) -> bool {
@@ -866,6 +1120,7 @@ impl PartReader {
         match &c.storage {
             ColumnStorage::Unframed { bytes, crc32: want } => {
                 let all = io::read_file(&self.dir.join(&c.file))?;
+                self.io_bytes.set(self.io_bytes.get() + all.len());
                 if all.len() != *bytes {
                     return Err(PrismError::Corrupt(format!(
                         "part {} column `{column}` is {} bytes on disk, manifest says {bytes}",
@@ -883,8 +1138,11 @@ impl PartReader {
                 }
                 Ok(all[offset as usize..end as usize].to_vec())
             }
-            ColumnStorage::Framed { blocks, .. } => {
-                let (first, last) = format::blocks_for_range(offset, len);
+            ColumnStorage::Framed {
+                blocks, block_size, ..
+            } => {
+                let bs = *block_size;
+                let (first, last) = format::blocks_for_range(offset, len, bs);
                 if last >= blocks.len() {
                     return Err(PrismError::Corrupt(format!(
                         "part {} column `{column}`: range needs block {last}, but the column has {}",
@@ -923,10 +1181,21 @@ impl PartReader {
                         b.file_offset,
                         FRAME_HEADER_BYTES + b.payload_len as usize,
                     )?;
-                    let payload = format::read_block(&raw, i, b, column, &self.manifest.part_id)?;
+                    // The whole block is read, header and all, whatever slice of it
+                    // the caller wanted. This is the over-read, and this is where it
+                    // becomes a number.
+                    self.io_bytes.set(self.io_bytes.get() + raw.len());
+                    let payload =
+                        format::read_block(&raw, i, b, column, &self.manifest.part_id, bs)?;
 
                     // Slice the requested window out of this block.
-                    let block_start = (i as u64) * BLOCK_SIZE as u64;
+                    //
+                    // `bs`, not the global default. This line read `BLOCK_SIZE` until
+                    // the block size became a per-column value, and it was silently
+                    // correct only for as long as every column happened to be 64 KiB.
+                    // The first store built at any other size returned whole blocks
+                    // where a caller had asked for 256 bytes.
+                    let block_start = (i as u64) * bs as u64;
                     let from = offset.saturating_sub(block_start) as usize;
                     let to = ((end - block_start) as usize).min(payload.len());
                     if from < payload.len() {
@@ -1026,6 +1295,35 @@ impl PartReader {
         let (nam_d, nam_o) = load("event_name")?;
         let (bod_d, bod_o) = load("body")?;
 
+        // --- columns that only exist from v3 onward ---
+        //
+        // A v1/v2 part does not have these. It is not corrupt; it is old. Its
+        // observed_time is unknowable, so we say so by mirroring event_time rather
+        // than inventing a number — and its attributes are empty because it had
+        // none, not because we dropped them.
+        let observed = if self.manifest.has_column("observed_time") {
+            io::decode_i64(&self.read_column_checked("observed_time")?)
+        } else {
+            times.clone()
+        };
+        let trace = if self.manifest.has_trace_context() {
+            Some((load("trace_id")?, load("span_id")?))
+        } else {
+            None
+        };
+        let idem = if self.manifest.has_column("idempotency_key.data") {
+            Some(load("idempotency_key")?)
+        } else {
+            None
+        };
+        let attrs = if self.manifest.has_attributes() {
+            let d = self.read_column_checked("attributes.data")?;
+            let o = io::string_offsets(&self.read_column_checked("attributes.offsets")?, n)?;
+            Some((d, o))
+        } else {
+            None
+        };
+
         let mut out = Vec::with_capacity(rows.len());
         for &r in rows {
             if r >= n {
@@ -1034,14 +1332,44 @@ impl PartReader {
                     self.manifest.part_id
                 )));
             }
+            let (trace_id, span_id) = match &trace {
+                Some(((td, to), (sd, so))) => (
+                    io::string_at(td, to, r, n)?.to_string(),
+                    io::string_at(sd, so, r, n)?.to_string(),
+                ),
+                None => (String::new(), String::new()),
+            };
+            let idempotency_key = match &idem {
+                Some((d, o)) => {
+                    let k = io::string_at(d, o, r, n)?;
+                    if k.is_empty() {
+                        None
+                    } else {
+                        Some(k.to_string())
+                    }
+                }
+                None => None,
+            };
+            let attributes = match &attrs {
+                Some((d, o)) => {
+                    io::decode_attributes_at(d, o, r, n, &self.manifest.attribute_keys)?
+                }
+                None => Attributes::new(),
+            };
+
             out.push(Event {
                 event_id: io::string_at(&eid_d, &eid_o, r, n)?.to_string(),
                 tenant_id: io::string_at(&tid_d, &tid_o, r, n)?.to_string(),
                 event_time: times[r],
+                observed_time: observed[r],
                 event_name: io::string_at(&nam_d, &nam_o, r, n)?.to_string(),
                 cost: costs[r],
                 error: errors[r] == 1,
                 body: io::string_at(&bod_d, &bod_o, r, n)?.to_string(),
+                trace_id,
+                span_id,
+                attributes,
+                idempotency_key,
             });
         }
         Ok(out)
@@ -1055,9 +1383,6 @@ impl PartReader {
 
         let codes = self.read_column_checked("pq_codes")?;
         let centroids = io::decode_u32(&self.read_column_checked("centroid")?);
-        let times = io::decode_i64(&self.read_column_checked("event_time")?);
-        let costs = io::decode_f64(&self.read_column_checked("cost")?);
-        let errors = self.read_column_checked("error")?;
 
         let bpv = m.bytes_per_vector()?;
         let raw = self.read_column_checked("rerank_vectors")?;
@@ -1069,27 +1394,11 @@ impl PartReader {
             );
         }
 
-        let load_str = |base: &str| -> Result<Vec<String>> {
-            let d = self.read_column_checked(&format!("{base}.data"))?;
-            let o = self.read_column_checked(&format!("{base}.offsets"))?;
-            io::decode_strings(&d, &o, n)
-        };
-        let event_ids = load_str("event_id")?;
-        let tenant_ids = load_str("tenant_id")?;
-        let event_names = load_str("event_name")?;
-        let bodies = load_str("body")?;
-
-        let events = (0..n)
-            .map(|i| Event {
-                event_id: event_ids[i].clone(),
-                tenant_id: tenant_ids[i].clone(),
-                event_time: times[i],
-                event_name: event_names[i].clone(),
-                cost: costs[i],
-                error: errors[i] == 1,
-                body: bodies[i].clone(),
-            })
-            .collect();
+        // One materialization path, so the legacy fallbacks (a v1/v2 part has no
+        // observed_time, no trace context, no attributes) are written once and
+        // cannot drift between the two readers.
+        let all_rows: Vec<usize> = (0..n).collect();
+        let events = self.read_events_for_rows(&all_rows)?;
 
         Ok(PartRows {
             events,

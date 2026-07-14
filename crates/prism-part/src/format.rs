@@ -24,17 +24,66 @@ use serde::{Deserialize, Serialize};
 /// `PRSMPART`. If these eight bytes are not first, this is not a part.
 pub const MAGIC: &[u8; 8] = b"PRSMPART";
 
-/// Bumped whenever stored bytes change meaning. Every released version keeps a
+/// Bumped whenever the *core row shape* changes. Every released version keeps a
 /// fixture in `testing/compat/`, and the reader dispatches on this.
-pub const FORMAT_VERSION: u32 = 2;
+///
+/// **v3 is designed to be the last cheap bump.** The compat corpus grows with
+/// every major version, and each one is a decoder we carry forever — so v3 adds
+/// two mechanisms whose whole job is to make a v4 unnecessary:
+///
+/// 1. **Feature-flag bits** ([`SUPPORTED_FEATURES`]) for additions that change
+///    what stored bytes *mean*. An older reader refuses a bit it does not know,
+///    rather than misreading the part — which is the only thing a version bump was
+///    ever really buying.
+/// 2. **A TLV extension section** ([`Extension`]) for additions that add *new*
+///    metadata without changing the meaning of what is already there. Extensions
+///    carry a required/optional bit, so a reader knows whether it may skip one.
+///
+/// S3's typed columns and S4's partitioning metadata are therefore *flagged
+/// extensions on v3*, not v4 and v5.
+pub const FORMAT_VERSION: u32 = 3;
 
-/// The format this build still reads, but no longer writes.
+/// Binary formats this build can still read. v1 is JSON and handled separately.
+pub const SUPPORTED_BINARY_VERSIONS: &[u32] = &[2, 3];
+
+/// The JSON-manifest format S0 wrote.
 pub const LEGACY_FORMAT_VERSION: u32 = 1;
 
 pub const BYTE_ORDER_LITTLE: u8 = 0;
 
-/// Logical bytes per block. Damage is localized to this granularity, and a
-/// ranged read rounds out to it.
+/// The **default** logical bytes per block, used when a store does not say
+/// otherwise.
+///
+/// A *tuned* constant under charter amendment C-1: it is derived from measurement,
+/// and its receipt is `testing/evidence/block-size.json`. The trade-off it sits in
+/// the middle of is real and two-sided:
+///
+/// * **Bigger blocks** waste bytes on a small ranged read — asking for a 300-byte
+///   centroid range from a 1 MiB block reads 1 MiB. Read amplification.
+/// * **Smaller blocks** grow the block directory in *every manifest*, which every
+///   reader pays on every open, and add a 24-byte frame header per block.
+///
+/// The block size is stored per column in the manifest, so this is a default and
+/// not a law: a part written under one block size is readable forever, whatever
+/// this constant later becomes.
+///
+/// **It was 64 KiB in S1, and 64 KiB was wrong.** It had been chosen because 64 KiB
+/// is what people choose. The derivation (`testing/evidence/block-size.json`) shows
+/// it cost a **247x read amplification** on the golden query set — a 300-byte
+/// centroid range and a 256-byte rerank vector were each dragging a 64 KiB block off
+/// the disk behind them. At 4 KiB the same queries move **5.6x fewer bytes** and run
+/// **4.4x faster** at p50.
+///
+/// The rule is constrained, not naive: minimise bytes physically read, *subject to*
+/// the manifest block directory staying under 4 bytes per row. Without the
+/// constraint the sweep collapses onto its smallest candidate — but the directory is
+/// read in full on every part open, including the opens that prune the part away, so
+/// 512-byte blocks would give a billion-row part a ~16 GB directory that every reader
+/// must load before it can decide the part is irrelevant.
+pub const DEFAULT_BLOCK_SIZE: u32 = 4 * 1024;
+
+/// Retained as the v2 block size: v2 parts have no per-column block size field, so
+/// they are all this, forever.
 pub const BLOCK_SIZE: u32 = 64 * 1024;
 
 /// `PBLK` — the frame marker at the head of every block.
@@ -50,11 +99,68 @@ pub const FRAME_HEADER_BYTES: usize = 4 + 4 + 8 + 4 + 4;
 // the meaning of stored bytes and be *certain* an older reader will not silently
 // misread it.
 
-/// Column files are block-framed (always set in v2).
+/// Column files are block-framed (set by every v2 and v3 part).
 pub const FEATURE_BLOCK_FRAMING: u64 = 1 << 0;
 
+/// The part carries bounded typed attributes and a partition key dictionary (S2).
+pub const FEATURE_ATTRIBUTES: u64 = 1 << 1;
+
+/// The part carries `observed_time` and W3C trace context (S2).
+pub const FEATURE_TRACE_CONTEXT: u64 = 1 << 2;
+
+// --- reserved, and deliberately unimplemented --------------------------------
+//
+// These are declared so that the *number* is nailed down now and two sprints
+// cannot quietly claim the same bit. They are NOT in SUPPORTED_FEATURES: a part
+// that sets one is refused by this build, which is exactly right — we cannot read
+// it, and guessing would be worse than failing.
+
+/// S3/S4: hot attributes promoted to typed top-level columns (issue #2).
+pub const FEATURE_PROMOTED_COLUMNS: u64 = 1 << 3;
+/// S4: outer-partition metadata (tenant-bucket x time-window x generation).
+pub const FEATURE_PARTITION_META: u64 = 1 << 4;
+/// S4: dictionary / delta / general column compression.
+pub const FEATURE_COLUMN_COMPRESSION: u64 = 1 << 5;
+/// S14: envelope encryption key id.
+pub const FEATURE_ENCRYPTION: u64 = 1 << 6;
+
 /// Every feature this build understands. Anything outside this mask is refused.
-pub const SUPPORTED_FEATURES: u64 = FEATURE_BLOCK_FRAMING;
+pub const SUPPORTED_FEATURES: u64 =
+    FEATURE_BLOCK_FRAMING | FEATURE_ATTRIBUTES | FEATURE_TRACE_CONTEXT;
+
+// --- TLV extensions -----------------------------------------------------------
+
+/// An extension id with this bit set is **required**: a reader that does not know
+/// it must refuse the part. Without the bit, the extension is optional metadata
+/// and an old reader may skip it.
+///
+/// This is what lets a future sprint add manifest metadata without a version bump
+/// *and* without the risk that an old reader silently ignores something essential.
+pub const EXT_REQUIRED: u16 = 0x8000;
+
+/// A manifest extension: a typed, length-prefixed blob the core layout knows
+/// nothing about.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Extension {
+    pub id: u16,
+    pub bytes: Vec<u8>,
+}
+
+impl Extension {
+    pub fn is_required(&self) -> bool {
+        self.id & EXT_REQUIRED != 0
+    }
+}
+
+/// Extension ids this build understands. Empty today — the mechanism ships before
+/// its first user, on purpose, so that the first user is not also a format break.
+pub const SUPPORTED_EXTENSIONS: &[u16] = &[];
+
+/// Fixed reserved manifest words. Must be zero; a non-zero value means a writer
+/// put something there that this build cannot interpret, and we refuse rather
+/// than ignore it. A cheap slot for a future fixed-width field, guarded by a
+/// feature bit.
+pub const RESERVED_WORDS: usize = 4;
 
 // --- codec ids ---------------------------------------------------------------
 
@@ -409,9 +515,10 @@ impl Header {
         let body_len = c.u32()?;
         let body_crc32 = c.u32()?;
 
-        if format_version != FORMAT_VERSION {
+        if !SUPPORTED_BINARY_VERSIONS.contains(&format_version) {
             return Err(PrismError::Corrupt(format!(
-                "part is format version {format_version}, this build writes version {FORMAT_VERSION}"
+                "part is format version {format_version}; this build writes version \
+                 {FORMAT_VERSION} and reads {SUPPORTED_BINARY_VERSIONS:?}"
             )));
         }
         if byte_order != BYTE_ORDER_LITTLE {
@@ -428,7 +535,7 @@ impl Header {
         }
         if feature_flags & FEATURE_BLOCK_FRAMING == 0 {
             return Err(PrismError::Corrupt(
-                "a v2 part must declare block framing".into(),
+                "a binary part must declare block framing".into(),
             ));
         }
 
@@ -479,8 +586,8 @@ pub struct BlockRef {
 }
 
 /// Frame one logical byte stream into checksummed blocks.
-pub fn frame_column(logical: &[u8]) -> (Vec<u8>, Vec<BlockRef>) {
-    let bs = BLOCK_SIZE as usize;
+pub fn frame_column(logical: &[u8], block_size: u32) -> (Vec<u8>, Vec<BlockRef>) {
+    let bs = block_size as usize;
     let mut file = Vec::with_capacity(logical.len() + FRAME_HEADER_BYTES);
     let mut refs = Vec::new();
 
@@ -519,12 +626,14 @@ pub fn frame_column(logical: &[u8]) -> (Vec<u8>, Vec<BlockRef>) {
 /// frame itself says, and then against the bytes. A block that passes this is a
 /// block whose payload is exactly what was written; a block that fails names
 /// itself, so damage is attributable to 64 KiB rather than to a column.
+#[allow(clippy::too_many_arguments)]
 pub fn read_block<'a>(
     raw: &'a [u8],
     index: usize,
     expect: &BlockRef,
     column: &str,
     part_id: &str,
+    block_size: u32,
 ) -> Result<&'a [u8]> {
     let mut c = Cursor::new(raw);
     let magic = c.u32()?;
@@ -540,7 +649,7 @@ pub fn read_block<'a>(
         )));
     }
     let logical_offset = c.u64()?;
-    let expected_offset = (index as u64) * (BLOCK_SIZE as u64);
+    let expected_offset = (index as u64) * (block_size as u64);
     if logical_offset != expected_offset {
         return Err(PrismError::Corrupt(format!(
             "part {part_id} column `{column}` block {index}: frame claims logical offset \
@@ -588,13 +697,14 @@ pub fn read_block<'a>(
 }
 
 /// Which blocks cover a logical byte range.
-pub fn blocks_for_range(offset: u64, len: usize) -> (usize, usize) {
+pub fn blocks_for_range(offset: u64, len: usize, block_size: u32) -> (usize, usize) {
+    let bs = block_size as u64;
     if len == 0 {
-        let b = (offset / BLOCK_SIZE as u64) as usize;
+        let b = (offset / bs) as usize;
         return (b, b);
     }
-    let first = (offset / BLOCK_SIZE as u64) as usize;
-    let last = ((offset + len as u64 - 1) / BLOCK_SIZE as u64) as usize;
+    let first = (offset / bs) as usize;
+    let last = ((offset + len as u64 - 1) / bs) as usize;
     (first, last)
 }
 
@@ -739,12 +849,12 @@ mod tests {
             3 * BLOCK_SIZE as usize + 7,
         ] {
             let logical: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
-            let (file, refs) = frame_column(&logical);
+            let (file, refs) = frame_column(&logical, BLOCK_SIZE);
 
             let mut rebuilt = Vec::new();
             for (i, r) in refs.iter().enumerate() {
                 let raw = &file[r.file_offset as usize..];
-                let payload = read_block(raw, i, r, "test", "p").unwrap();
+                let payload = read_block(raw, i, r, "test", "p", BLOCK_SIZE).unwrap();
                 rebuilt.extend_from_slice(payload);
             }
             assert_eq!(rebuilt, logical, "round trip failed at len {len}");
@@ -756,7 +866,7 @@ mod tests {
         let logical: Vec<u8> = (0..(3 * BLOCK_SIZE as usize))
             .map(|i| (i % 251) as u8)
             .collect();
-        let (mut file, refs) = frame_column(&logical);
+        let (mut file, refs) = frame_column(&logical, BLOCK_SIZE);
 
         // Damage a byte inside block 1's payload.
         let target = refs[1].file_offset as usize + FRAME_HEADER_BYTES + 10;
@@ -766,13 +876,13 @@ mod tests {
         for i in [0usize, 2] {
             let raw = &file[refs[i].file_offset as usize..];
             assert!(
-                read_block(raw, i, &refs[i], "col", "p").is_ok(),
+                read_block(raw, i, &refs[i], "col", "p", BLOCK_SIZE).is_ok(),
                 "block {i} was collateral damage"
             );
         }
         // Block 1 is condemned, and says so.
         let raw = &file[refs[1].file_offset as usize..];
-        let e = read_block(raw, 1, &refs[1], "col", "p").unwrap_err();
+        let e = read_block(raw, 1, &refs[1], "col", "p", BLOCK_SIZE).unwrap_err();
         let m = e.to_string();
         assert!(m.contains("block 1"), "{m}");
         assert!(m.contains("failed checksum"), "{m}");
@@ -781,20 +891,21 @@ mod tests {
     #[test]
     fn a_block_that_lies_about_its_index_is_rejected() {
         let logical = vec![7u8; 100];
-        let (mut file, refs) = frame_column(&logical);
+        let (mut file, refs) = frame_column(&logical, BLOCK_SIZE);
         file[4] = 9; // block_index field
-        let e = read_block(&file, 0, &refs[0], "col", "p").unwrap_err();
+        let e = read_block(&file, 0, &refs[0], "col", "p", BLOCK_SIZE).unwrap_err();
         assert!(e.to_string().contains("is block 9"), "{e}");
     }
 
     #[test]
     fn block_range_math_is_right() {
-        assert_eq!(blocks_for_range(0, 1), (0, 0));
-        assert_eq!(blocks_for_range(0, BLOCK_SIZE as usize), (0, 0));
-        assert_eq!(blocks_for_range(0, BLOCK_SIZE as usize + 1), (0, 1));
-        assert_eq!(blocks_for_range(BLOCK_SIZE as u64, 1), (1, 1));
-        assert_eq!(blocks_for_range(BLOCK_SIZE as u64 - 1, 2), (0, 1));
-        assert_eq!(blocks_for_range(100, 0), (0, 0));
+        let b = BLOCK_SIZE;
+        assert_eq!(blocks_for_range(0, 1, b), (0, 0));
+        assert_eq!(blocks_for_range(0, b as usize, b), (0, 0));
+        assert_eq!(blocks_for_range(0, b as usize + 1, b), (0, 1));
+        assert_eq!(blocks_for_range(b as u64, 1, b), (1, 1));
+        assert_eq!(blocks_for_range(b as u64 - 1, 2, b), (0, 1));
+        assert_eq!(blocks_for_range(100, 0, b), (0, 0));
     }
 
     #[test]

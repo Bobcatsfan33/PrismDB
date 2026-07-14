@@ -208,6 +208,118 @@ pub fn decode_strings(data: &[u8], offsets: &[u8], row_count: usize) -> Result<V
     Ok(out)
 }
 
+// --- attributes ---------------------------------------------------------------
+//
+// Keys are dictionary-encoded against the part's bounded key dictionary; values
+// carry a type tag. Rows are variable-length, so the layout is the same
+// data-blob + offsets pair the string columns use.
+//
+// Per row:  n:u32, then n x ( key_id:u32, type:u8, value )
+//   Str    -> len:u32 + bytes
+//   Int    -> i64
+//   Double -> f64 bits
+//   Bool   -> u8
+
+use prism_types::attributes::{
+    AttrValue, Attributes, ATTR_TYPE_BOOL, ATTR_TYPE_DOUBLE, ATTR_TYPE_INT, ATTR_TYPE_STR,
+};
+use std::collections::BTreeMap;
+
+pub fn encode_attributes(
+    rows: &[Attributes],
+    dict: &BTreeMap<String, u32>,
+) -> Result<(Vec<u8>, Vec<u8>)> {
+    use prism_types::error::PrismError;
+
+    let mut data: Vec<u8> = Vec::new();
+    let mut offsets: Vec<i64> = Vec::with_capacity(rows.len() + 1);
+    offsets.push(0);
+
+    for attrs in rows {
+        data.extend_from_slice(&(attrs.len() as u32).to_le_bytes());
+        for (k, v) in attrs {
+            let id = dict.get(k).ok_or_else(|| {
+                PrismError::Invariant(format!(
+                    "attribute key `{k}` is not in the part's key dictionary; the dictionary is \
+                     built from the rows being written, so this is a writer bug"
+                ))
+            })?;
+            data.extend_from_slice(&id.to_le_bytes());
+            data.push(v.type_tag());
+            match v {
+                AttrValue::Str(s) => {
+                    data.extend_from_slice(&(s.len() as u32).to_le_bytes());
+                    data.extend_from_slice(s.as_bytes());
+                }
+                AttrValue::Int(i) => data.extend_from_slice(&i.to_le_bytes()),
+                AttrValue::Double(d) => data.extend_from_slice(&d.to_bits().to_le_bytes()),
+                AttrValue::Bool(b) => data.push(u8::from(*b)),
+            }
+        }
+        offsets.push(data.len() as i64);
+    }
+    Ok((data, encode_i64(&offsets)))
+}
+
+/// Decode one row's attributes. Every length is validated against the bytes
+/// actually present before it is used, and every key id against the dictionary —
+/// a corrupt part must not be able to index out of either.
+pub fn decode_attributes_at(
+    data: &[u8],
+    offs: &[i64],
+    row: usize,
+    row_count: usize,
+    keys: &[String],
+) -> Result<Attributes> {
+    use prism_types::error::PrismError;
+
+    if row >= row_count || row + 1 >= offs.len() {
+        return Err(PrismError::Corrupt(format!(
+            "attribute row {row} is out of range ({row_count} rows)"
+        )));
+    }
+    let (start, end) = (offs[row], offs[row + 1]);
+    if start < 0 || end < start || end as usize > data.len() {
+        return Err(PrismError::Corrupt(format!(
+            "attribute offset pair ({start}, {end}) is outside a {}-byte blob",
+            data.len()
+        )));
+    }
+    let buf = &data[start as usize..end as usize];
+    let mut c = crate::format::Cursor::new(buf);
+
+    // An attribute count is at least 4+1 bytes on the wire; the bound is what
+    // stops a corrupt row claiming four billion attributes.
+    let n = c.read_len(5, "attributes")?;
+    let mut out = Attributes::new();
+    for _ in 0..n {
+        let id = c.u32()? as usize;
+        let key = keys.get(id).ok_or_else(|| {
+            PrismError::Corrupt(format!(
+                "attribute key id {id} is not in the part's {}-key dictionary",
+                keys.len()
+            ))
+        })?;
+        let tag = c.u8()?;
+        let value = match tag {
+            ATTR_TYPE_STR => {
+                let s = c.string()?;
+                AttrValue::Str(s)
+            }
+            ATTR_TYPE_INT => AttrValue::Int(c.i64()?),
+            ATTR_TYPE_DOUBLE => AttrValue::Double(c.f64()?),
+            ATTR_TYPE_BOOL => AttrValue::Bool(c.u8()? != 0),
+            other => {
+                return Err(PrismError::Corrupt(format!(
+                    "attribute `{key}` has type tag {other}, which this build cannot decode"
+                )))
+            }
+        };
+        out.insert(key.clone(), value);
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -124,6 +124,13 @@ pub fn decode(bytes: &[u8]) -> Result<PartManifest> {
 
     Ok(PartManifest {
         format_version: crate::format::LEGACY_FORMAT_VERSION,
+        // v1 predates every feature bit, the attribute dictionary and the TLV
+        // extension section. It has none of them, and saying so explicitly is what
+        // lets every reader above this line stop caring which format it came from.
+        feature_flags: crate::format::FEATURE_BLOCK_FRAMING,
+        attribute_keys: Vec::new(),
+        extensions: Vec::new(),
+        reserved: [0u64; crate::format::RESERVED_WORDS],
         part_id: m.part_id,
         generation_id: m.generation_id,
         model_id: m.model_id,
