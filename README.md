@@ -67,7 +67,7 @@ prism fsck --path ./demo
 
 ## Status
 
-**Executable reference core under active development.** Sprints **S0 and S1** of eighteen are complete: a dependency-light, single-node vertical slice that really ingests, really prunes, really scans compressed codes, really re-ranks exactly, and really answers — on a hardened, versioned, self-describing storage format. See [docs/PRISM.md](docs/PRISM.md) for the architecture and the full sprint roadmap, and [docs/PROGRESS.md](docs/PROGRESS.md) for exactly what is proven so far and by which test.
+**Executable reference core under active development.** Sprints **S0, S1 and S2** of eighteen are complete: a dependency-light, single-node vertical slice that really ingests, really prunes, really scans compressed codes, really re-ranks exactly, and really answers — on a hardened, versioned, self-describing storage format, behind an admission boundary with exactly-once replay semantics. See [docs/PRISM.md](docs/PRISM.md) for the architecture and the full sprint roadmap, [docs/INGESTION-CONTRACT.md](docs/INGESTION-CONTRACT.md) for what an acknowledgement actually promises, and [docs/PROGRESS.md](docs/PROGRESS.md) for exactly what is proven so far and by which test.
 
 **What works today**
 
@@ -79,6 +79,9 @@ prism fsck --path ./demo
 - **Old formats still open, and merge migrates them forward.** The v1 parts committed on day one still open, still verify, and still answer — and a merge rewrites them into v2 without ever touching the original bytes.
 - Immutable content-addressed generations; a query spanning two embedding spaces is **refused**, not silently merged (scores from different spaces are not comparable).
 - Merge with a documented duplicate policy, re-embed migration, catalog-only rollback, and explicit GC that provably never touches a referenced part.
+- **An acknowledgement is a promise, and it is kept.** An acked event *will* become queryable — even if the process dies immediately afterwards, mid-embedding, before a single byte of its part is durable. It comes back **exactly once, with its embedding**, out of a durable admission log. Replays are recognised and suppressed; a reused id with *different* content is refused rather than silently rewriting history. Source offsets are advanced only *after* publication: they may lag reality, they may never lead it.
+- **One tenant cannot starve another.** Quotas are enforced before a single GPU cycle is spent, and admission is round-robin across tenants — so a quiet tenant's latency does not change when a loud one gets a thousand times louder. That, not "the big tenant was throttled", is what the quiet tenant actually notices.
+- **Attributes are bounded before they exist.** Caps on keys, key length, value length and total bytes — and, the only one that bounds the *shape* of the data rather than the size of an event, a bounded attribute-key dictionary per partition. A tenant emitting a uuid as an attribute *key* is refused and told why, rather than being quietly absorbed until the format dies of it.
 - **Crash consistency, measured.** The writer is killed at every durability boundary, and then at 10,000 randomly chosen ones, and the store always opens to the old snapshot or the new one — never a hybrid.
 - A recall contract measured against an exact brute-force oracle on a committed golden corpus — **reported with its tail**, not just its mean — and a machine-generated [`baselines.json`](baselines.json).
 
@@ -91,8 +94,12 @@ prism fsck --path ./demo
 - Semantic grouping clusters the re-rank survivors. Grouping an arbitrarily large *filtered set* — the flagship aggregate — is S9.
 - Tenant isolation is a filter fused into the scan, not yet a physical partition boundary (S4).
 - The probe count is fixed per query. Scaling it when a query sits on a cluster boundary is [issue #1](https://github.com/Bobcatsfan33/PrismDB/issues/1), targeted at S6.
+- **No network listener and no Kafka client.** The OTel GenAI *mapping* is real and tested (pinned to a semantic-convention version, because the conventions are still moving); the `Source` abstraction has exactly Kafka's offset semantics and the file-backed source implements them, so invariant 7 is tested through real process deaths. The server is S14. The gate here was the semantics, not the transport.
+- Attributes are a bounded map. Promoting hot ones to typed columns with their own zone maps is [issue #2](https://github.com/Bobcatsfan33/PrismDB/issues/2), targeted at S4 — promotion only pays once the block-skipping machinery it depends on exists.
 
 **Numbers.** There are none in this README on purpose. Every performance claim PrismDB makes must be backed by a committed, reproducible benchmark artifact, and a roofline must be labelled a roofline. Run `prism bench --out baselines.json` and read what your own hardware says.
+
+**And no tuned constant without evidence.** Every constant that steers behaviour is in a [committed ledger](testing/evidence/registry.json), classified: a *tuned* constant owes a benchmark artifact, the key inside it that **is** the value, and the rule by which that rule chose it — and a test asserts, in both directions, that the code and the ledger still agree. A *policy* constant owes a written argument instead, because some questions measurement cannot answer. The first thing that rule caught was our own: the block size had been set to 64 KiB in S1 because 64 KiB is what people set it to, and measuring it showed a **247× read amplification**. The derived answer is 4 KiB, and queries got 2.2× faster.
 
 **One number we will show you anyway, because it is a warning and not a boast.** With one centroid probed, PrismDB answers *topic* queries — aimed at the middle of a cluster — with a mean recall of 1.000. Across the whole golden set the mean is 0.904, which sounds like a good day. It is not: five of those queries return **nothing at all**. Their neighbours sat on a boundary between two clusters and we only looked in one. That is why every recall report here carries `min`, `p1`, `p5` and a count of queries that came back empty; why the golden corpus deliberately asks questions that straddle boundaries; and why the default probe count is *derived* from that tail with a [committed receipt](testing/golden/nprobe-provenance.json) rather than picked because it looked reasonable.
 

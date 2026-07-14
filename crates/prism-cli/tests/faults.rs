@@ -400,6 +400,9 @@ fn every_declared_kill_point_is_reachable() {
     // A kill point nobody ever fires is a kill point that is lying about being
     // tested. Every point in KILL_POINTS must be exercised by some test above;
     // this asserts the list and the coverage have not drifted apart.
+    // S0/S1 storage boundaries are driven above; the three S2 admission boundaries
+    // are driven by `tests/ingestion.rs`, which is where the ack/publish/offset
+    // ordering they exist to test actually lives.
     let covered = [
         "part.after_write_before_fsync",
         "part.after_fsync_before_rename",
@@ -408,6 +411,9 @@ fn every_declared_kill_point_is_reachable() {
         "current.after_rename",
         "gc.after_first_unlink",
         "merge.after_part_before_commit",
+        "wal.after_append_before_fsync",
+        "ingest.after_embed_before_part",
+        "ingest.after_publish_before_offset_commit",
     ];
     for p in KILL_POINTS {
         assert!(

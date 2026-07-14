@@ -39,6 +39,33 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --release -p prism-part --test fuzz -- --nocapture
 
+  block-size-provenance:
+    name: the default block size still holds on a fresh sweep
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release
+      # Re-derive BLOCK_SIZE from scratch (a real store built at each candidate size,
+      # the real golden query set run against it) and confirm the committed receipt
+      # still reproduces. Charter C-1: a default that quietly stops being justified by
+      # its own evidence is exactly the magic constant the charter forbids.
+      - name: re-derive and compare
+        run: |
+          set -euxo pipefail
+          ./target/release/prism evidence block-size --out /tmp/bs.json >/dev/null
+          python3 - <<'PY'
+          import json
+          fresh = json.load(open("/tmp/bs.json"))
+          committed = json.load(open("testing/evidence/block-size.json"))
+          print(f"fresh sweep chose {fresh['chosen_block_size']}, "
+                f"committed receipt says {committed['chosen_block_size']}")
+          assert fresh["chosen_block_size"] == committed["chosen_block_size"],               "the committed block-size provenance no longer reproduces; re-derive it"
+          print("the default is still justified by its own evidence.")
+          PY
+
   nprobe-provenance:
     name: the default nprobe still holds on a fresh sweep
     runs-on: ubuntu-latest

@@ -6,8 +6,8 @@ Sprint gates from [PRISM.md](PRISM.md) Part IV. **A sprint is done when its gate
 |---|---|---|---|
 | **S0** | Executable reference slice + oracle harness | clean checkout passes CI; baselines checked in; README quickstart runs | ✅ **complete** |
 | **S1** | Part format + recovery hardening | 10,000 randomized kill/reopen runs → old-or-new, never hybrid; all compat fixtures open, all corrupt fixtures rejected specifically; no untrusted length allocates unbounded | ✅ **complete** |
-| S2 | Production ingestion + OTel GenAI schema | replaying acknowledged input loses no rows; offsets never advance pre-publication; one tenant cannot starve another | ⬜ **next** |
-| S3 | Minimal SQL + scalar analytics | scalar-subset parity against an oracle; hybrid smoke queries identical through SQL | ⬜ |
+| **S2** | Production ingestion + OTel GenAI schema | replaying acknowledged input loses no rows; offsets never advance pre-publication; one tenant cannot starve another | ✅ **complete** |
+| S3 | Minimal SQL + scalar analytics | scalar-subset parity against an oracle; hybrid smoke queries identical through SQL | ⬜ **next** |
 | S4 | Hybrid partitioning + typed columns + data skipping | selective benchmarks read only eligible partitions; cross-tenant reads impossible even with malformed metadata | ⬜ |
 | S5 | Immutable generations | queries available throughout a two-generation migration; rollback is catalog-only; no part decodes with the wrong codebook | ⬜ |
 | S6 | CPU scan engine | bit/epsilon equivalence to the scalar oracle; zero heap allocation in the block loop | ⬜ |
@@ -190,16 +190,107 @@ Adaptive per-query probing — scaling the probe count when the centroid margins
 
 ---
 
-## S2 — next
+## S2 — complete
 
-**Production ingestion + the OTel GenAI schema.** From PRISM.md Part IV:
+**Gate:** *replaying acknowledged input → no missing rows, documented duplicate behavior; offsets never advance pre-publication; one tenant cannot exceed quota or starve others.*
 
-- OTLP ingestion mapping the GenAI semantic conventions into the §9 event model, plus a native streaming API and a Kafka source.
-- Tenant auth, quotas, idempotency keys, and the duplicate policy (already documented and tested — [D-012](DECISIONS.md) — but not yet enforced at an admission boundary).
-- A durable admission log, or a synchronous commit before ack. **Offsets must never advance before publication** (invariant 7).
-- Batching by (tenant partition, model version) with backpressure; dead-lettering for schema *and* embedding failures (the embedding half already exists).
-- A default `traces` schema in the box — *what gets embedded is a product decision, and the contract says to decide it deliberately.*
+The architect's instruction was to **write the contract before the code**, because the risk in this sprint was never the schema — it was the duplicate/replay semantics. [**docs/INGESTION-CONTRACT.md**](INGESTION-CONTRACT.md) is that contract, and every test in `crates/prism-cli/tests/ingestion.rs` asserts a clause of it. Where the contract and the code disagree, the contract is right and the code is a bug.
 
-**Gate:** replaying acknowledged input produces no missing rows and documented duplicate behavior; offsets never advance pre-publication; one tenant cannot exceed quota or starve others.
+### 1. Duplicate behavior, documented and enforced
 
-**Carry into S2:** the event model is still the S0 slice (`event_id, tenant_id, event_time, event_name, cost, error, body`). S2 adds `observed_time`, `attributes`, `trace_id`/`span_id` and promoted attribute columns — and that is a **format change**, so it lands as v3 with a v2 fixture kept behind it, exactly as v1 is kept now.
+Three outcomes, and the distinction between the second and third is the whole point:
+
+| key | content hash | verdict | why |
+|---|---|---|---|
+| new | — | **admit** | it is a new event |
+| seen | **same** | **replay** — ack it, store nothing | the producer retried after an ack they never saw. They did **exactly the right thing**; punishing them for it is how you teach producers to drop data on error. |
+| seen | **different** | **conflict** — dead-letter it | an id that was supposed to identify one event now identifies two. Last-write-wins is the seductive option and it is *wrong*: it silently rewrites history under a reused id, and makes behaviour depend on arrival order, which no producer controls. |
+
+The honest limit is stated rather than hidden: the index is bounded (7 days of event time, hard-capped). Beyond it a replay is admitted as a new event and becomes a duplicate **row**, which merge reconciles by last-write-wins on `event_time` ([D-012](DECISIONS.md)). **Two mechanisms, one seam, and the seam is documented.**
+
+### 2. Offsets may lag. They must never lead.
+
+```text
+  poll source                         offset stays at 100
+    → admission (fairness, caps, cardinality, skew, quota)
+    → idempotency (new? replay? conflict?)
+    → WAL append + fsync         ←──  ACK. The events are now guaranteed.
+    → embed
+    → write immutable part
+    → catalog commit             ←──  the events are now VISIBLE
+    → record idempotency keys         (invariant 7: with-or-after publication)
+    → mark the WAL record applied
+    → advance the source offset       offset = 200
+```
+
+**An ack means durable. It does not mean visible.** Three new kill points drive real process deaths through this sequence in CI:
+
+- **`ingest.after_embed_before_part`** — *the crash the architect named.* The batch is acked, the GPU time is spent, and the events exist nowhere but the log. Recovery brings them back **exactly once, with their embeddings** — the test asserts all twelve are semantically queryable afterwards, not merely present. An event restored without its vector would never match a semantic query, for reasons nobody could reconstruct later.
+- **`wal.after_append_before_fsync`** — nothing was acked, so nothing may be lost. The source still owns the events and re-delivers them.
+- **`ingest.after_publish_before_offset_commit`** — the data *is* published and the offset lagged. The source re-delivers all eight; idempotency recognises all eight as replays; nothing is duplicated. Lagging costs a redundant poll. **Leading would lose data permanently, which is why the offset is committed last.**
+
+### 3. Quota *and* starvation — they are different failures
+
+A quota stops a tenant exceeding their share. It does nothing about the tenant who is comfortably *within* quota and simply loud: 10,000 of their events arrive, and the quiet tenant's single event sits behind all of them.
+
+So admission is **round-robin across tenants**, and the test is not "the big tenant was throttled" — it is **"the quiet tenant's position did not change when the loud tenant got 1,000× louder"**, which is the thing the quiet tenant actually notices.
+
+### 4. Attributes, bounded before they existed
+
+> *"`attributes` is where formats go to die — bound it before it exists."*
+
+| limit | default | dead-letter reason |
+|---|---|---|
+| keys per event | 64 | `too_many_attribute_keys` |
+| key length | 128 B | `attribute_key_too_long` |
+| value length | 4 KiB | `attribute_value_too_long` |
+| total attribute bytes | 16 KiB | `attributes_too_large` |
+| **distinct keys per partition** | **512** | `attribute_key_cardinality_exceeded` |
+
+**The last one is the only one that bounds the *shape* of the data.** The first four bound the size of one event; a tenant emitting `user_id_<uuid>` as an attribute **key** would grow a key dictionary the size of their traffic, carried in every manifest, forever. That is how a columnar format dies — not with one huge event, but with ten million tiny ones each introducing a column nobody will ever query.
+
+So keys are a **bounded dictionary per partition**, held in the *manifest* (so "does this part contain key X?" is answerable without opening a column). A full dictionary **refuses** a novel key — and the dead-letter tells the tenant, in terms they can act on, that this is an instrumentation bug. A refused event **never widens the dictionary**, or a producer could exhaust a partition's budget with events that were never even stored.
+
+Promotion of hot attributes to typed columns is [**issue #2**](https://github.com/Bobcatsfan33/PrismDB/issues/2), targeted at S4 — deliberately not built here, because promotion only pays once the block-skipping machinery it depends on exists.
+
+### 5. Format v3 — designed to be the last cheap bump
+
+Reserved feature bits (`PROMOTED_COLUMNS`, `PARTITION_META`, `COLUMN_COMPRESSION`, `ENCRYPTION`) with their numbers nailed down and all of them **refused** by this build; a **TLV extension section** with a required/optional bit, shipped with zero extensions defined so the first user is not also a format break; and four reserved manifest words that must be zero and are *refused*, not ignored, if they are not. S3's typed columns and S4's partitioning metadata land as **flagged extensions on v3**.
+
+**Three released formats now open**: v1 (JSON manifest, S0), v2 (binary, S1), v3 (S2). v1 and v2 are committed *bytes* and are never regenerated — their whole value is that nothing since has touched them.
+
+### 6. The charter amendment, and what it caught immediately
+
+**C-1: no tuned constant without committed evidence and a test that binds them.** The ledger is `testing/evidence/registry.json`; the test checks it against the code **in both directions**, so a constant cannot drift from its receipt and a new one cannot be added without one. Two kinds, and the distinction is abuse-proof by design: `tuned` owes **evidence** (a file, a key, a rule), `policy` owes a **rationale** that points at prose the test verifies exists.
+
+**The first thing it caught was ours.** `BLOCK_SIZE = 64 KiB` had been chosen in S1 because 64 KiB is what people choose. Deriving it required making it variable — and the measurement was brutal:
+
+| block size | bytes read | read amplification | p50 |
+|---|---|---|---|
+| **4 KiB** *(derived)* | **69.2 MB** | **44.1×** | **6.8 ms** |
+| **64 KiB** *(the S1 guess)* | 387.6 MB | **247.1×** | 29.7 ms |
+
+A 300-byte centroid range and a 256-byte rerank vector had each been dragging a 64 KiB block off the disk. End to end, `prism bench` p50 fell **44.5 ms → 20.2 ms** and the scan rate doubled.
+
+Making the constant variable also exposed a **latent bug**: `read_range` computed a block's logical offset from the *global constant* instead of the column's actual block size — silently correct for exactly as long as every column happened to be 64 KiB. Deriving a constant found a bug that assuming it had hidden.
+
+### 7. A near-miss worth recording
+
+Adding attributes to the corpus generator consumed extra PRNG draws, which shifted the stream and **silently changed the committed golden corpus**. `make-fixtures` regenerates the corpus *and* its expected answers — so the drift check would have gone on passing **by construction while testing nothing**, and S1's recall-tail finding would have quietly evaporated with it. The S2 fields now draw from a separate stream, and `testing/golden/corpus.tsv` is **byte-identical to S1's**. A golden corpus that moves is not a golden corpus. ([D-023](DECISIONS.md))
+
+### What S2 does not build
+
+Named so nobody mistakes silence for completeness: **no network listener** (the OTLP *mapping* is real and tested; the server is S14) and **no Kafka client** (the `Source` trait has exactly Kafka's offset semantics and the file source implements them, so invariant 7 is tested through real process deaths). The gate is about semantics. The transport is a later sprint's problem. ([D-024](DECISIONS.md))
+
+---
+
+## S3 — next
+
+**Minimal SQL + scalar analytics.** pgwire + CLI; projections, filters, `LIMIT`, scalar aggregates and `GROUP BY`; vectorized scan with zone-map pruning; the `embedding ≈≈ 'text'` top-k predicate wired to the existing pipeline.
+
+**Gate:** parity against an oracle on the scalar subset; hybrid smoke queries return slice-identical results through SQL; a design partner can be demoed.
+
+**Carry into S3:**
+- **Pagination semantics.** S3 ships SQL syntax to design partners; S8 defines null/tie/ordering/pagination semantics five sprints later. Stable pagination over an approximate scan with a tunable `nprobe` across a moving snapshot is genuinely hard. Pin snapshot-pinned cursors and the `event_id` tiebreak ([D-008](DECISIONS.md)) **in S3**, or the partners demoed to will be broken by S8.
+- **Typed columns land as a flagged extension on v3**, not v4 ([D-020](DECISIONS.md)). The feature bit is already reserved.
+- **`DEFAULT_CANDIDATES` and `DEFAULT_RERANK` are still `policy`,** and they should not be forever — they are empirical questions wearing a policy hat. They owe a derivation once S6 publishes real kernel cost curves. The ledger says so, in writing.

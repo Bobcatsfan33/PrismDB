@@ -147,6 +147,8 @@ def parse(buf):
         at_codec = r.pos
         codec = r.u16()
         logical = r.u64()
+        # v3: per-column block size. v2 had none (every column was 64 KiB).
+        block_size = r.u32() if h["version"] >= 3 else 65536
         n_blocks = r.u32()
         blocks = []
         for _ in range(n_blocks):
@@ -160,10 +162,28 @@ def parse(buf):
                 "codec": codec,
                 "at_codec": at_codec,
                 "logical_bytes": logical,
+                "block_size": block_size,
                 "blocks": blocks,
             }
         )
     out["columns"] = cols
+
+    # --- v3 additions ---
+    if h["version"] >= 3:
+        out["at"]["n_attribute_keys"] = r.pos
+        n_keys = r.u32()
+        out["attribute_keys"] = [r.string() for _ in range(n_keys)]
+        out["at"]["reserved"] = r.pos
+        out["reserved"] = [r.u64() for _ in range(4)]
+        out["at"]["n_extensions"] = r.pos
+        n_ext = r.u32()
+        exts = []
+        for _ in range(n_ext):
+            eid = r.u16()
+            elen = r.u32()
+            exts.append({"id": eid, "bytes": r.take(elen)})
+        out["extensions"] = exts
+
     assert r.pos == len(body), f"trailing bytes in body: {r.pos} != {len(body)}"
     return out
 

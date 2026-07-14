@@ -4,6 +4,34 @@ Judgment calls made where [PRISM.md](PRISM.md) is silent. The rule: **where the 
 
 ---
 
+# Charter amendments
+
+These extend [PRISM.md](PRISM.md) Part II §7 and carry the same weight. A change that violates one is rejected however good it is otherwise.
+
+## C-1 — No tuned constant without committed evidence and a test that binds them
+**S2. Architect's standing rule.** Generalizes the `DEFAULT_NPROBE` pattern from S1 ([D-017](#d-017--the-default-nprobe-is-derived-from-the-tail-and-carries-a-receipt)).
+
+PRISM.md Part I §5.3 already forbids magic constants in *defaults and docs*. This makes it a mechanism instead of an intention:
+
+> **Every tuned constant must be pinned to committed benchmark evidence, with a test asserting the constant still matches that evidence.**
+
+The machinery:
+
+- `crates/prism-engine/src/tuning.rs` enumerates every constant that steers behaviour, and classifies each one.
+- `testing/evidence/registry.json` is the committed ledger: name, value, kind, and — for a tuned constant — the evidence file, the exact key inside it that justifies the value, and the **rule** by which that key was chosen.
+- `every_tuned_constant_matches_its_committed_evidence` asserts, **in both directions**, that the registry and the code agree; that every `tuned` constant's evidence file exists; and that the value in the code equals the value the evidence chose. A constant cannot drift from its receipt, and a new constant cannot be added without landing in the ledger.
+
+**Two kinds, and the distinction is load-bearing:**
+
+- **`tuned`** — the value was *derived from measurement*, and a different measurement would have produced a different value. It owes evidence. `DEFAULT_NPROBE` and `BLOCK_SIZE` are tuned.
+- **`policy`** — the value is a *deliberate choice about behaviour*, not an empirical optimum. A cap of 64 attribute keys is not "the measured best number of attribute keys"; it is a decision about what we are willing to accept. It owes a **rationale**, pointed at a section of a document, and the test enforces that the pointer resolves.
+
+The distinction exists to be *abused-proof*: without it, every inconvenient constant gets reclassified as policy to escape the evidence requirement. So `policy` still has to point at prose that argues for it, and prose is reviewable.
+
+**The first thing this rule caught was our own.** `BLOCK_SIZE = 64 KiB` was picked in S1 because 64 KiB is what people pick. Under C-1 it had to be derived or it had to go — see [D-019](#d-019--block_size-is-64-kib-because-it-was-measured-not-because-it-is-traditional).
+
+---
+
 ## D-001 — `docs/PRISM.md` is the canonical v2 text — *verified*
 **S0, closed in S1.** The build instruction said to copy `06-prism-overview-and-roadmap-v2.md` from the working directory; no such file existed anywhere on the machine, so `docs/PRISM.md` was written from the v2 text supplied inline, and this entry flagged the risk.
 
@@ -135,3 +163,54 @@ The golden set now has three classes, and reports recall for each separately:
 At `nprobe=1` the classes diverge completely: **topic queries score a flawless mean of 1.000 with zero failures, while cluster-boundary queries fail outright on 5 of 56.** A benchmark that asked only topic questions would have measured recall 1.000 and concluded that a single probe was enough. That is the whole argument for the boundary class, and it is why `min`, `p1`, `p5`, `zero_recall_queries` and the five worst queries *by name* are now in every recall report.
 
 Adaptive per-query probing — scaling the probe count when the centroid distance margins are tight, which is precisely the boundary case — is [issue #1](https://github.com/Bobcatsfan33/PrismDB/issues/1), targeted at S6. It is deliberately **not** built in S1: it is a planner decision that must be costed against real kernel curves, and those do not exist until the CPU scan engine publishes them.
+
+## D-020 — Format v3, and the mechanisms that should make it the last cheap bump
+**S2. Architect's directive 2.** The compat corpus grows with every major version, and each one is a decoder we carry forever. v1 (JSON manifest) and v2 (binary manifest, block framing) are both still read. v3 must not start a habit.
+
+So v3 ships **two mechanisms whose entire job is to make a v4 unnecessary**:
+
+- **Feature-flag bits** for additions that change what stored bytes *mean*. An older reader refuses a bit it does not know rather than misreading the part — which is the only thing a version bump was ever really buying. `FEATURE_PROMOTED_COLUMNS`, `FEATURE_PARTITION_META`, `FEATURE_COLUMN_COMPRESSION` and `FEATURE_ENCRYPTION` are **reserved and deliberately unimplemented**: the bit numbers are nailed down now so two sprints cannot quietly claim the same one, and a part that sets one is refused by this build, which is exactly right — we cannot read it, and guessing would be worse than failing.
+- **A TLV extension section**, with a `required` bit per extension id. A reader that meets an unknown *required* extension refuses the part; an unknown *optional* one it may skip. The mechanism ships with **zero** extensions defined, on purpose: the first user of an extension point must not also be the thing that breaks the format.
+
+Plus four **reserved manifest words** that must be zero — a cheap slot for a future fixed-width field, guarded by a feature bit. A non-zero reserved word is *refused*, not ignored: ignoring is how a reader silently drops a field that changed what the data means.
+
+S3's typed columns and S4's partitioning metadata are therefore **flagged extensions on v3**, not v4 and v5.
+
+## D-021 — The block size is per-column, and 64 KiB was wrong
+**S2.** Charter C-1 forced `BLOCK_SIZE` to be derived or dropped. Deriving it required making it *variable*, so it moved into the manifest per column.
+
+The derivation (`testing/evidence/block-size.json`) is not close:
+
+| block | manifest B/row | bytes read | read amp | p50 |
+|---|---|---|---|---|
+| 512 B | 16.06 | 51.1 MB | 32.6× | 5.8 ms |
+| 1 KiB | 8.94 | 52.9 MB | 33.7× | 5.7 ms |
+| 2 KiB | 5.38 | 58.1 MB | 37.0× | 6.1 ms |
+| **4 KiB** | **3.62** | **69.2 MB** | **44.1×** | **6.8 ms** |
+| 16 KiB | 2.30 | 136.8 MB | 87.2× | 11.7 ms |
+| **64 KiB** *(the S1 pick)* | 2.05 | **387.6 MB** | **247.1×** | **29.7 ms** |
+| 1 MiB | 1.98 | 2,695 MB | 1717.6× | 194.0 ms |
+
+A 300-byte centroid range and a 256-byte rerank vector were each dragging a 64 KiB block off the disk behind them. End to end, `prism bench` p50 fell from **44.5 ms to 20.2 ms** and the scan rate doubled.
+
+**The rule is constrained, and the constraint is the interesting part.** A naive "minimise bytes read" objective picks the smallest candidate every time — and it is *wrong*, because at a 2,000-row corpus the manifest term is invisible. The block directory is read **in full on every part open**, including opens that then prune the part away without touching a column; at 512-byte blocks that is ~16 bytes/row, so a billion-row part would carry a **16 GB directory** every reader must load before deciding the part is irrelevant. So: minimise bytes read, *subject to* the manifest staying under 4 bytes/row. The budget is a **policy** constant with a rationale; the block size is a **tuned** constant derived under it. That split is the whole point of C-1 — measurement answers the empirical question, and prose answers the one measurement cannot.
+
+**The change also exposed a latent bug.** `read_range` computed a block's logical offset from the *global constant* rather than the column's actual block size. It was silently correct for exactly as long as every column happened to be 64 KiB, and the first store built at any other size returned whole blocks where a caller had asked for 256 bytes. Deriving a constant found a bug that assuming it had hidden.
+
+## D-022 — The idempotency index is keyed by a composite string, not a tuple
+**S2.** `BTreeMap<(String, String), Entry>` is the obvious model and it does not survive contact with JSON: object keys must be strings, and a tuple key serializes to `key must be a string`. The key is now `tenant \u{1f} idempotency_key` — the ASCII unit separator cannot occur in either field, so the composite is unambiguous. Caught the moment the index first hit disk, which is the only place it could have been caught.
+
+## D-023 — The corpus generator draws S2 fields from a separate RNG stream
+**S2. A near-miss worth recording.** Adding attributes and `observed_time` to `corpus::generate` consumed extra draws from the shared PRNG — which shifted the stream, changed every subsequent event's tenant, cost and body, and silently **changed the committed golden corpus**.
+
+That is worse than it sounds. `make-fixtures` regenerates the corpus *and* its expected answers, so the drift check (`the_committed_golden_corpus_still_means_what_it_meant`) would have gone on passing **by construction**, while testing nothing at all. The S1 recall-tail finding — five cluster-boundary queries returning nothing at `nprobe=1` — would have quietly evaporated with it.
+
+The S2 fields now draw from their own independent stream, and `testing/golden/corpus.tsv` is **byte-identical to the one S1 committed**. A golden corpus that moves is not a golden corpus.
+
+## D-024 — S2 builds the ingestion *semantics*, not the transport
+**S2.** Named so nobody mistakes silence for completeness.
+
+- **No network listener.** No OTLP/gRPC server, no HTTP endpoint. The OTLP **mapping** is real, tested against realistic OTLP/JSON GenAI payloads (including int64-as-string, which is what the protobuf JSON mapping actually emits and which a naive mapper silently drops), and events ingest from a file. The server is `prismd`, and it is S14.
+- **No Kafka client.** The `Source` trait has exactly Kafka's offset semantics — poll, publish, *then* commit — and the file-backed source implements it, so invariant 7 is tested for real, through real process deaths. Wiring a broker is a transport detail. Getting the offset ordering wrong loses data permanently, and no amount of correct transport gets it back.
+
+The S2 gate is about duplicate/replay semantics, offsets and fairness. All three are built and tested. The transport is a later sprint's problem, and saying so is cheaper than pretending otherwise.

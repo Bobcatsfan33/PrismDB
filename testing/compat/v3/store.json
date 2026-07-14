@@ -1,0 +1,8 @@
+{
+  "format_version": 2,
+  "dim": 32,
+  "nlist": 8,
+  "pq_m": 4,
+  "seed": 7,
+  "block_size": 4096
+}

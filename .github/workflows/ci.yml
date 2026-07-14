@@ -78,6 +78,32 @@ jobs:
       # nightly (.github/workflows/nightly.yml). Never a hybrid snapshot, ever.
       - run: PRISM_CAMPAIGN_RUNS=400 cargo test --release -p prism-cli --test campaign -- --ignored --nocapture
 
+  ingestion:
+    name: the S2 gate — replay, offsets, quotas, starvation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Every test in here asserts a clause of docs/INGESTION-CONTRACT.md, which was
+      # written BEFORE the code. Includes the crash that matters most: acked, embedded,
+      # and dead before the part was durable -- the event must come back exactly once,
+      # WITH its semantic columns.
+      - run: cargo test --release -p prism-cli --test ingestion -- --nocapture
+
+  constants:
+    name: no tuned constant without evidence (charter C-1)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Checks the ledger and the code against each other IN BOTH DIRECTIONS: a
+      # constant cannot drift from its receipt, and a new one cannot be added without
+      # one. Also re-checks that each tuned constant's own stated rule really does
+      # select it from the data the evidence recorded.
+      - run: cargo test --release -p prism-engine --test tuning -- --nocapture
+
   recall:
     name: recall contract vs the exact oracle
     runs-on: ubuntu-latest
@@ -114,7 +140,7 @@ jobs:
       - name: every released format must still open, verify, and answer
         run: |
           set -euxo pipefail
-          for v in v1 v2; do
+          for v in v1 v2 v3; do
             ./target/release/prism verify --path "testing/compat/$v"
             ./target/release/prism fsck   --path "testing/compat/$v"
             ./target/release/prism search --path "testing/compat/$v" \
@@ -127,7 +153,7 @@ jobs:
           # a fatal error and abort.
           set +e
           fail=0
-          for d in testing/compat/corrupt/*/ testing/compat/corrupt-v2/*/; do
+          for d in testing/compat/corrupt/*/ testing/compat/corrupt-v3/*/; do
             msg=$(./target/release/prism verify --path "$d" 2>&1 | head -1)
             if ./target/release/prism verify --path "$d" >/dev/null 2>&1; then
               echo "FAIL: corrupt fixture $d was ACCEPTED"

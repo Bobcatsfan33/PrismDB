@@ -1,0 +1,119 @@
+{
+  "_comment": [
+    "The constant ledger (charter amendment C-1).",
+    "",
+    "Every constant that steers behaviour is here, classified, and the test",
+    "`every_tuned_constant_matches_its_committed_evidence` asserts -- in BOTH",
+    "directions -- that this file and the code agree. A constant cannot drift from",
+    "its receipt, and a new constant cannot be added without landing here.",
+    "",
+    "  tuned  = derived from measurement. A different measurement would have given a",
+    "           different value. Owes EVIDENCE: a committed file, the key inside it",
+    "           that IS the value, and the rule by which the evidence chose it.",
+    "  policy = a deliberate decision about behaviour, not an empirical optimum. A cap",
+    "           of 64 attribute keys is not the measured best number of attribute",
+    "           keys; it is a statement about what we are willing to accept. Owes a",
+    "           RATIONALE, pointed at prose, which is reviewable.",
+    "",
+    "The distinction exists to be abuse-proof: without it, every inconvenient constant",
+    "gets reclassified as policy to escape the evidence requirement."
+  ],
+  "constants": [
+    {
+      "name": "DEFAULT_NPROBE",
+      "value": 4,
+      "kind": "tuned",
+      "evidence": "testing/golden/nprobe-provenance.json",
+      "evidence_key": "chosen_nprobe",
+      "rule": "the smallest probe count whose p1 recall@10 clears 0.8 on the golden corpus. Chosen on the TAIL, not the mean: at nprobe=1 the mean is 0.904 while five queries return nothing at all."
+    },
+    {
+      "name": "BLOCK_SIZE",
+      "value": 4096,
+      "kind": "tuned",
+      "evidence": "testing/evidence/block-size.json",
+      "evidence_key": "chosen_block_size",
+      "rule": "the block size minimising physically-read bytes across the golden query set (whole blocks, frame headers and over-read included, measured by the reader itself), subject to the manifest block directory staying under 4 bytes/row so a billion-row part remains cheap to open. Was 64 KiB in S1 by convention; measurement showed that cost a 247x read amplification."
+    },
+
+    {
+      "name": "DEFAULT_CANDIDATES",
+      "value": 200,
+      "kind": "policy",
+      "rationale": "docs/PRISM.md Part III §11 -- candidate width is one of four controls a caller is expected to set deliberately. 200 is a starting point wide enough that the rerank budget, not the heap, is the binding constraint. OWES A DERIVATION once S6 publishes real kernel cost curves."
+    },
+    {
+      "name": "DEFAULT_RERANK",
+      "value": 50,
+      "kind": "policy",
+      "rationale": "docs/PRISM.md Part III §11 -- the declared exact-vector fetch budget. A policy about how many 32x-larger vectors we are willing to pull for one query, not a measured optimum. OWES A DERIVATION once S11 makes the two-tier cost a product surface."
+    },
+
+    {
+      "name": "MAX_ATTRIBUTE_KEYS",
+      "value": 64,
+      "kind": "policy",
+      "rationale": "docs/INGESTION-CONTRACT.md §5 -- bounds the size of ONE EVENT, not the shape of the dataset. Sixty-four keys is generous for a real GenAI span (a dozen or so) and small enough that a runaway producer is caught rather than absorbed."
+    },
+    {
+      "name": "MAX_ATTRIBUTE_KEY_BYTES",
+      "value": 128,
+      "kind": "policy",
+      "rationale": "docs/INGESTION-CONTRACT.md §5 -- a key is an identifier, not a payload. 128 bytes comfortably fits every OTel GenAI convention key with room to spare, and anything longer is a value that has been mistaken for a key."
+    },
+    {
+      "name": "MAX_ATTRIBUTE_VALUE_BYTES",
+      "value": 4096,
+      "kind": "policy",
+      "rationale": "docs/INGESTION-CONTRACT.md §5 -- values may be large (a model name, a stop reason, a session id) but they are not documents. Anything past 4 KiB belongs in the body, where it will be embedded and searchable, rather than in a map where it is merely stored."
+    },
+    {
+      "name": "MAX_ATTRIBUTES_BYTES",
+      "value": 16384,
+      "kind": "policy",
+      "rationale": "docs/INGESTION-CONTRACT.md §5 -- the total budget binds even when every individual value is legal: 32 keys x 4 KiB is 32 legal values adding up to an illegal event."
+    },
+    {
+      "name": "MAX_ATTRIBUTE_KEY_CARDINALITY",
+      "value": 512,
+      "kind": "policy",
+      "rationale": "docs/INGESTION-CONTRACT.md §5 -- THE ONE THAT MATTERS. The other caps bound one event; only this bounds the SHAPE of the dataset. A tenant using a uuid as an attribute KEY would otherwise grow a dictionary the size of their traffic, carried in every manifest, forever. That is how a columnar format dies."
+    },
+    {
+      "name": "MAX_LATENESS_MS",
+      "value": 604800000,
+      "kind": "policy",
+      "rationale": "docs/INGESTION-CONTRACT.md §4 -- seven days. Beyond it an event's partition may already have been merged, tiered or expired, and admitting it would resurrect a closed partition."
+    },
+    {
+      "name": "MAX_SKEW_AHEAD_MS",
+      "value": 3600000,
+      "kind": "policy",
+      "rationale": "docs/INGESTION-CONTRACT.md §4 -- one hour. A clock-skewed producer emitting event_time=2099 would make its partition immortal: no retention policy would ever reclaim it."
+    },
+    {
+      "name": "IDEMPOTENCY_WINDOW_MS",
+      "value": 604800000,
+      "kind": "policy",
+      "rationale": "docs/INGESTION-CONTRACT.md §2 -- the honest limit. Beyond this window a replayed key is admitted as a new event and becomes a duplicate ROW, which merge reconciles by last-write-wins on event_time (D-012). Two mechanisms, one seam, documented rather than pretended away."
+    },
+    {
+      "name": "IDEMPOTENCY_MAX_ENTRIES",
+      "value": 1000000,
+      "kind": "policy",
+      "rationale": "docs/INGESTION-CONTRACT.md §2 -- the backstop for a store whose clock never advances. A window that never rolls over is not a bound."
+    },
+    {
+      "name": "MAX_BODY_BYTES",
+      "value": 1048576,
+      "kind": "policy",
+      "rationale": "docs/DECISIONS.md D-005 -- an oversized body is DEAD-LETTERED, never truncated. A stored event whose body is silently half-missing is a lie nobody will ever catch."
+    },
+    {
+      "name": "MAX_EMBED_INPUT_BYTES",
+      "value": 32768,
+      "kind": "policy",
+      "rationale": "docs/DECISIONS.md D-005 -- embedding cost is bounded; the stored body is not damaged. Distinct from MAX_BODY_BYTES on purpose."
+    }
+  ]
+}
