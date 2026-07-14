@@ -6,16 +6,20 @@
 //! (CRC-32, SHA-256, a deterministic PRNG) so that none of them come from a
 //! third party.
 
+pub mod attributes;
 pub mod embed;
 pub mod error;
 pub mod event;
 pub mod hash;
+pub mod limits;
 pub mod query;
 pub mod rng;
 pub mod vector;
 
+pub use attributes::{AttrValue, Attributes};
 pub use embed::{Embedder, HashEmbedder, MAX_EMBED_INPUT_BYTES};
 pub use error::{PrismError, Result};
-pub use event::{Event, MAX_BODY_BYTES};
+pub use event::{DeadLetter, Event, MAX_BODY_BYTES};
+pub use limits::{Quota, RejectReason};
 pub use query::{ClusterSummary, Counters, Hit, Query, SearchResult};
 pub use vector::validate_and_normalize;

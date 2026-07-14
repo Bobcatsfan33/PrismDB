@@ -110,6 +110,17 @@ pub struct Counters {
     /// Rows in eligible parts. `rows_scanned_pq / rows_eligible` is the
     /// fraction of the pruned set the centroid index made us touch.
     pub rows_eligible: usize,
+
+    /// **Bytes actually pulled off the disk**, as opposed to the logical bytes the
+    /// plan asked for.
+    ///
+    /// The gap between this and `pq_bytes_scanned + exact_bytes_fetched` is the
+    /// block layer's over-read: a 300-byte centroid range that lives inside a 64 KiB
+    /// block costs 64 KiB, and no logical counter can see that. It is what the disk
+    /// charges, and it is the number that decides the block size
+    /// (`testing/evidence/block-size.json`).
+    #[serde(default)]
+    pub physical_bytes_read: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
