@@ -824,3 +824,167 @@ fn a_selective_query_reads_only_the_partitions_it_needs() {
 
     std::fs::remove_dir_all(root).ok();
 }
+
+/// A corpus built to make the tie-break *matter*.
+///
+/// 400 events share one body **verbatim** — identical text, therefore identical vector,
+/// therefore identical PQ code, therefore an **exactly equal** distance. That is not a
+/// contrivance; it is what agent telemetry looks like. The same retry, the same timeout, the
+/// same tool error, a thousand times a day.
+///
+/// 400 tied rows against a candidate width of 50 means the bounded heap must *choose*, and
+/// only what it chooses can be an answer. Event ids are deliberately assigned in the reverse
+/// of time order, so "the smallest ids" and "the rows we happen to scan first" are different
+/// sets — which is exactly the confusion the old tie-break made.
+fn tied_events(n: usize, dupes: usize) -> Vec<Event> {
+    let mut rng = Rng::new(77);
+    let mut evs = corpus::generate(Kind::Zipf, n, 11);
+    let day = 24 * 60 * 60 * 1000i64;
+    for (i, e) in evs.iter_mut().enumerate() {
+        e.tenant_id = "alpha".into();
+        // Ids run backwards against time: id order != storage order, ever.
+        e.event_id = format!("e{:06}", n - i);
+        e.event_time = 1_760_000_000_000
+            + (rng.next_u64() % 10) as i64 * day
+            + (rng.next_u64() % day as u64) as i64;
+        // Spread the duplicates through the whole corpus, not into the first batch. A
+        // duplicate cluster that lands entirely in one ingest is scanned in time order by
+        // every layout, and would hide precisely the bug this exists to catch.
+        if i % (n / dupes).max(1) == 0 {
+            e.body = "the tool call timed out".into();
+        }
+    }
+    evs
+}
+
+/// **The answer is a function of the data, not of where the data is stored.**/// **The answer is a function of the data, not of where the data is stored.**
+///
+/// This is the test S4 needed and did not have, and its absence cost a real bug — one the
+/// recall floor caught only because the floor exists.
+///
+/// Partitioning changes which rows live in which part. It must not change a single answer.
+/// Real telemetry repeats bodies verbatim, so identical vectors, identical PQ codes and
+/// *exactly equal* distances are ordinary — a top-k is routinely a choice among many tied
+/// rows. The candidate heap is **bounded**, so it does not merely order the answer; it decides
+/// which tied rows are *allowed to be* answers at all. Break that tie on physical position and
+/// the store answers questions about its own layout.
+///
+/// Here the same 3,000 events are laid out three ways — one time window, days, and hours —
+/// producing wildly different part counts. Every query must return **byte-identical ordered
+/// results** from all three. (D-033)
+#[test]
+fn the_same_rows_laid_out_differently_give_byte_identical_answers() {
+    let evs = tied_events(1_500, 200);
+
+    // Same rows, laid out four ways. Both axes matter, and each catches something the other
+    // cannot: the time window decides *which* part a row lands in, and the ingest batching
+    // decides how many parts a window has and in what order they are published — which is the
+    // order they are scanned in. A layout test that varies only the window would scan the
+    // tied rows in time order every time and prove nothing.
+    let layouts = [
+        ("one-window-one-batch", i64::MAX / 4, 1_500usize),
+        ("daily-one-batch", 24 * 60 * 60 * 1000, 1_500),
+        ("daily-many-batches", 24 * 60 * 60 * 1000, 300),
+        ("hourly-many-batches", 60 * 60 * 1000, 500),
+    ];
+
+    /// (layout name, part count, the ordered answer)
+    type Answer = (String, usize, Vec<(String, f32)>);
+    let mut answers: Vec<Answer> = Vec::new();
+
+    for (tag, window, batch) in layouts {
+        let root = tmp(tag);
+        let scheme = PartitionScheme {
+            buckets: 16,
+            time_window_ms: window,
+            dedicated: Default::default(),
+        };
+        let engine = Engine::init(&root, config(scheme, Vec::new())).unwrap();
+        for chunk in evs.chunks(batch) {
+            engine.ingest(chunk.to_vec(), 1_760_000_000_000).unwrap();
+        }
+        let parts = engine.snapshot().unwrap().parts.len();
+
+        let q = Query {
+            text: "the tool call timed out".into(),
+            tenant: Some("alpha".into()),
+            k: 20,
+            ..Default::default()
+        };
+        let hits = engine.search(&q).unwrap().hits;
+        let rows: Vec<(String, f32)> = hits
+            .iter()
+            .map(|h| (h.event.event_id.clone(), h.score))
+            .collect();
+
+        // Sanity: the layouts really are different, or this test proves nothing.
+        assert!(!rows.is_empty(), "{tag} returned no rows");
+        answers.push((tag.to_string(), parts, rows));
+    }
+
+    let part_counts: Vec<usize> = answers.iter().map(|a| a.1).collect();
+    assert!(
+        part_counts
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            > 1,
+        "every layout produced the same number of parts ({part_counts:?}); this test is \
+         not testing anything"
+    );
+
+    let (base_tag, base_parts, base) = &answers[0];
+    for (tag, parts, rows) in &answers[1..] {
+        assert_eq!(
+            base,
+            rows,
+            "the answer changed with the layout: `{base_tag}` ({base_parts} parts) and `{tag}` \
+             ({parts} parts) hold IDENTICAL rows and returned DIFFERENT results.\n\n  \
+             {base_tag}: {:?}\n  {tag}: {:?}\n\nAn answer that depends on where the rows are \
+             stored is not an answer. See D-033 and the query contract section 1.",
+            base.iter().take(6).collect::<Vec<_>>(),
+            rows.iter().take(6).collect::<Vec<_>>(),
+        );
+    }
+}
+
+/// And a merge — which physically moves rows between parts — must not change an answer either.
+///
+/// Same principle, the other axis. D-008 fixed the final sort; this proves the *selection* is
+/// stable too, which is the half that was still broken.
+#[test]
+fn a_merge_moves_rows_between_parts_and_changes_no_answer() {
+    let root = tmp("merge-stable");
+    let engine = Engine::init(&root, config(PartitionScheme::default(), Vec::new())).unwrap();
+    for chunk in tied_events(1_500, 200).chunks(300) {
+        engine.ingest(chunk.to_vec(), 1_760_000_000_000).unwrap();
+    }
+
+    let q = Query {
+        text: "the tool call timed out".into(),
+        tenant: Some("alpha".into()),
+        k: 20,
+        ..Default::default()
+    };
+
+    let before = engine.search(&q).unwrap();
+    let parts_before = engine.snapshot().unwrap().parts.len();
+
+    engine.merge(1_760_000_100_000).unwrap();
+
+    let after = engine.search(&q).unwrap();
+    let parts_after = engine.snapshot().unwrap().parts.len();
+
+    let ids = |r: &prism_types::SearchResult| -> Vec<(String, f32)> {
+        r.hits
+            .iter()
+            .map(|h| (h.event.event_id.clone(), h.score))
+            .collect()
+    };
+
+    assert_eq!(
+        ids(&before),
+        ids(&after),
+        "a merge ({parts_before} parts -> {parts_after}) changed an unchanged answer"
+    );
+}

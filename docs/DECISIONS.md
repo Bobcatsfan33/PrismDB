@@ -360,3 +360,28 @@ The only way to produce a cross-partition duplicate is the S0 loader (`prism ing
 **S4.** Found while demonstrating promotion: `--promot gen_ai.system` was **silently ignored**, and the store was created without the promotion its operator asked for. They would have discovered it months later, from a query reading more bytes than it should.
 
 A silently-ignored flag on a command that *defines a store's configuration* is not a usability wart, it is a correctness bug with a very long fuse. Unknown flags are now rejected, with a suggestion.
+
+## D-033 — The candidate heap breaks ties on `event_id`, not on physical position
+**S4. A real bug, found by the recall floor, in code that had a comment claiming it was fine.**
+
+The bounded candidate heap ordered candidates by `(dist, part, row)`, with this comment:
+
+> *"Ties break on (part, row) so the candidate set is deterministic."*
+
+**Deterministic, yes — in the layout.** Which is precisely the error [D-008](DECISIONS.md) corrected in the final sort, surviving in the one place D-008 never reached. The query contract says the total order is `(score DESC, event_id ASC)` and that *"order must be a function of the data, never of the layout."* The heap is **bounded**, so it does not merely *order* the answer — it decides **which tied rows are allowed to be answers at all**. A layout-dependent selection means two stores holding identical rows answer the same query differently, and a merge changes an unchanged answer.
+
+This is not an exotic case. Real telemetry repeats bodies verbatim — the same retry, the same timeout, the same tool error, a thousand times a day — so identical vectors, identical PQ codes and **exactly equal** distances are ordinary, and a top-k is routinely a *choice* among hundreds of tied rows.
+
+**How it surfaced.** S4 repartitioned by time window, which changed nothing about the data and everything about the layout. `p1 recall@10` on the bench corpus fell from **1.00 to 0.60**, and five queries returned rows that were not in the exact oracle's answer at all. The diagnostic that named it: on the same corpus, with the same codebook, the pre-S4 and post-S4 engines scanned **the same 3,880 rows**, considered **the same 50 candidates**, and returned **the same top score (0.9258)** — with **different event ids**. And raising `nprobe` from 4 to 8 doubled the scan fraction and changed recall *not at all*, because the rows were never being **missed**. They were being **outvoted by their addresses**.
+
+**The fix:** distance ties break on `event_id`, so the candidate set is a function of the data. The scan therefore needs event ids, not just the rerank — the id column joins `event_time` and `tenant_id` as a scalar the scan reads. The distance is compared *before* an id is materialized, so a candidate that loses on distance alone (nearly all of them) never allocates.
+
+**It costs 19%** — bench `query_p50` 21.9 ms → 26.1 ms on the same machine, same corpus. That is the honest price of an answer that does not depend on where its rows are stored, and it is worth it: the alternative is a database whose answers change when it tidies up. Making the scan cheaper again is the SIMD sprint's problem (S6), which is where scan kernels belong.
+
+**Why the existing tests all passed.** Every suite ran green — including the golden-corpus recall gate, because the golden store is a *single part* and a single part has no layout to disagree about. The bench, which builds a multi-part store, was the only thing that could see it, and the only reason it *did* see it is that the recall report carries `p1` and `min` and not just the mean. **The mean was 0.965.** A mean-only report would have shipped this.
+
+Two tests now bind it, and both were verified to **fail against the old code** before being committed:
+- `the_same_rows_laid_out_differently_give_byte_identical_answers` — one corpus, four layouts (one window vs days vs hours, one ingest vs many), 1 part to 55, byte-identical answers required. It varies the *batching* as well as the window, because a layout test that varies only the window scans tied rows in time order every time and proves nothing — the first version of this test did exactly that, passed against the bug, and had to be sharpened.
+- `a_merge_moves_rows_between_parts_and_changes_no_answer` — the same property along the axis a running store actually travels.
+
+Both receipts (`nprobe`, `widths`) were **re-derived against the fixed engine**, since a selection rule changing is at least as material as the corpus changing. Both chose the same constants: `nprobe = 4`, `candidates = 50`, `rerank = 50`.

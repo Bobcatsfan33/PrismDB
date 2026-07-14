@@ -20,6 +20,8 @@ ORDER BY score DESC, event_id ASC
 
 `score` is the exact cosine against the stored vector. For a query with no semantic predicate, every row has the same score and the order collapses to `event_id ASC` — which is still a *total* order, and that is what matters.
 
+**And the tie-break binds the *selection*, not just the sort.** The candidate heap is bounded, so it decides which tied rows are *allowed to be* answers at all. If it breaks distance ties on physical position, then two stores holding identical rows answer the same query differently, and a merge changes an unchanged answer — while the final sort looks impeccable. S4 shipped exactly that bug and the recall floor caught it ([D-033](DECISIONS.md)). Ordering the output correctly is not enough if the wrong rows were chosen to order.
+
 The tie-break is not cosmetic. Real telemetry repeats bodies verbatim, so exact-score ties are common. S0 broke ties on physical position — which part a row happened to live in — and a merge that moved rows between parts changed the order of an unchanged answer ([D-008](DECISIONS.md)). **Order must be a function of the data, never of the layout.** A pagination scheme built on an order that the storage engine can quietly permute is a pagination scheme that duplicates and drops rows for reasons no one will ever debug.
 
 ## 2. A cursor is an opaque token binding a snapshot and a position

@@ -426,8 +426,23 @@ Every receipt now records the **golden-corpus version** that produced it, and ev
 
 **[Issue #3](https://github.com/Bobcatsfan33/PrismDB/issues/3)** files the fix: build a real-embedding golden corpus (small open model, CPU, checksum-pinned, frozen under C-2) and re-derive every C-1 sweep against it. **Not deferred to S13** — S13 is the production GPU model plane, which is not a prerequisite for running one small model once, offline, and committing its output.
 
+### The bug S4 found in S0's code
+
+**`p1 recall@10` fell from 1.00 to 0.60, and raising `nprobe` did nothing at all.**
+
+That second half is what named it. If rows were being *missed*, probing harder would find them. It didn't — so they were not being missed. On the same corpus, with the same codebook, the pre-S4 and post-S4 engines scanned **the same 3,880 rows**, considered **the same 50 candidates**, and returned **the same top score** — with **different event ids**.
+
+The bounded candidate heap broke distance ties on `(part, row)`, under a comment calling that *"deterministic"*. It is — **in the layout**. Which is the exact error [D-008](DECISIONS.md) corrected in the final sort, surviving in the one place D-008 never reached. The heap is *bounded*, so it does not merely order the answer, it decides **which tied rows are allowed to be answers at all**. Repartitioning changed nothing about the data and everything about the layout, and the answers moved. Ties are not exotic here: real telemetry repeats bodies verbatim, so exactly-equal distances are ordinary and a top-k is routinely a choice among hundreds of tied rows.
+
+Ties now break on `event_id`, so the candidate set is a function of the data. **It costs 19%** (bench `query_p50` 21.9 → 26.1 ms), which is the honest price of an answer that does not change when the database tidies up.
+
+**Every other suite passed** — including the golden recall gate, because the golden store is a *single part*, and a single part has no layout to disagree about. The bench was the only thing that could see it, and the only reason it did is that the recall report carries `p1` and `min` and not just the mean. **The mean was 0.965.** ([D-033](DECISIONS.md))
+
+Two tests now bind it, and both were verified to **fail against the old code** before being committed. The first version of the layout test varied only the time window — it passed against the bug, because every window layout scans tied rows in time order. It had to vary the *ingest batching* too before it could see anything. A test that cannot fail is not a test.
+
 ### Bugs found
 
+- **The candidate heap chose its rows by address** ([D-033](DECISIONS.md)) — the one above.
 - **Promotion read *more* bytes than the map** — the columns were re-read per row. Caught by asserting the win.
 - **`COUNT(*)` materialized every column of every row.** It now materializes none.
 - **The embedding-space filter stopped counting its own pruning** when catalog pruning arrived, so a narrowing the caller could not see in the counters was a narrowing they could not audit.

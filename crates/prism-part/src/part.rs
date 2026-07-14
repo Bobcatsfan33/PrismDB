@@ -701,6 +701,8 @@ pub struct Scalars {
     pub times: Vec<i64>,
     tenant_data: Vec<u8>,
     tenant_offs: Vec<i64>,
+    id_data: Vec<u8>,
+    id_offs: Vec<i64>,
     row_count: usize,
 }
 
@@ -711,6 +713,17 @@ impl Scalars {
         io::string_at(&self.tenant_data, &self.tenant_offs, row, self.row_count)
             .map(|t| t == want)
             .unwrap_or(false)
+    }
+
+    /// This row's event id, borrowed in place.
+    ///
+    /// The scan needs it, not just the rerank, and that is not an optimization detail — it is
+    /// the ordering contract. `(score DESC, event_id ASC)` is a total order on the *data*, and
+    /// a bounded candidate heap that breaks distance ties on physical position decides *which
+    /// tied rows are allowed to be answers* by where they happen to be stored. Two stores with
+    /// identical rows would then answer the same query differently. See D-033.
+    pub fn event_id_at(&self, row: usize) -> &str {
+        io::string_at(&self.id_data, &self.id_offs, row, self.row_count).unwrap_or("")
     }
 }
 
@@ -1571,6 +1584,8 @@ impl PartReader {
             times: io::decode_i64(&self.read_column_checked("event_time")?),
             tenant_data: self.read_column_checked("tenant_id.data")?,
             tenant_offs: io::string_offsets(&self.read_column_checked("tenant_id.offsets")?, n)?,
+            id_data: self.read_column_checked("event_id.data")?,
+            id_offs: io::string_offsets(&self.read_column_checked("event_id.offsets")?, n)?,
             row_count: n,
         })
     }

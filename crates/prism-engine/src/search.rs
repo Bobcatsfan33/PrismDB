@@ -29,9 +29,11 @@ use prism_types::{ClusterSummary, Counters, Hit, Query, SearchResult};
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 
 /// A row that survived the scalar mask and got an approximate distance.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 struct Candidate {
     dist: f32,
+    /// Carried into the heap, and it has to be. See the `Ord` impl.
+    event_id: String,
     part: usize,
     row: usize,
 }
@@ -40,13 +42,30 @@ impl Eq for Candidate {}
 
 impl Ord for Candidate {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // A max-heap on distance: the worst candidate is on top, so a bounded
-        // heap evicts in O(log n) and the scan never allocates past the budget.
-        // Ties break on (part, row) so the candidate set is deterministic.
+        // A max-heap on distance: the worst candidate is on top, so a bounded heap evicts in
+        // O(log n) and the scan never allocates past the budget.
+        //
+        // **Distance ties break on `event_id`, not on physical position.** This used to break
+        // on `(part, row)`, with a comment calling that "deterministic" — and it is, in the
+        // sense that it reproduces on *this* store. It is not a function of the *data*, which
+        // is what D-008 established and what the query contract requires: `(score DESC,
+        // event_id ASC)`, always.
+        //
+        // The heap is bounded, so it does not merely *order* the answer — it decides which
+        // tied rows are *allowed to be* answers at all. Real telemetry repeats bodies
+        // verbatim, so identical vectors, identical codes and exactly-equal distances are
+        // common, and a top-k is routinely a choice among hundreds of tied rows. Breaking that
+        // choice on layout means two stores holding identical rows answer the same query
+        // differently, and a merge changes an unchanged answer.
+        //
+        // S4 proved it the expensive way: repartitioning by time window (same rows, same
+        // codebook, same 3,880 rows scanned, same tied distance) changed which tied rows
+        // survived the heap, and recall against the exact oracle fell from 1.00 to 0.60 —
+        // while raising `nprobe` did nothing at all, because the rows were never being
+        // *missed*, they were being *outvoted by their addresses*. See D-033.
         self.dist
             .total_cmp(&other.dist)
-            .then(self.part.cmp(&other.part))
-            .then(self.row.cmp(&other.row))
+            .then(self.event_id.cmp(&other.event_id))
     }
 }
 
@@ -327,21 +346,40 @@ impl Engine {
                     c.rows_passing_filter += 1;
 
                     let code = &codes[i * m..(i + 1) * m];
+                    let dist = ctx.adc.distance(code);
+
+                    // Bounded candidate width: the heap never grows past it.
+                    //
+                    // The distance is checked *before* the event id is materialized. A
+                    // candidate that loses on distance alone — the overwhelming majority —
+                    // never allocates. Only one that could actually enter the heap pays for
+                    // its id, so the cost of an ordering that is a function of the data is
+                    // bounded by the heap, not by the scan.
+                    let enters = match heap.peek() {
+                        _ if heap.len() < q.candidates => true,
+                        Some(worst) => match dist.total_cmp(&worst.dist) {
+                            std::cmp::Ordering::Less => true,
+                            std::cmp::Ordering::Greater => false,
+                            std::cmp::Ordering::Equal => {
+                                scalars.event_id_at(row) < worst.event_id.as_str()
+                            }
+                        },
+                        None => true,
+                    };
+                    if !enters {
+                        continue;
+                    }
+
                     let cand = Candidate {
-                        dist: ctx.adc.distance(code),
+                        dist,
+                        event_id: scalars.event_id_at(row).to_string(),
                         part: pi,
                         row,
                     };
-
-                    // Bounded candidate width: the heap never grows past it.
-                    if heap.len() < q.candidates {
-                        heap.push(cand);
-                    } else if let Some(worst) = heap.peek() {
-                        if cand < *worst {
-                            heap.pop();
-                            heap.push(cand);
-                        }
+                    if heap.len() >= q.candidates {
+                        heap.pop();
                     }
+                    heap.push(cand);
                 }
             }
         }

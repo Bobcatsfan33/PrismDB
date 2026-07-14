@@ -13,7 +13,7 @@
   "chosen_nprobe": 4,
   "chosen_mean_recall": 0.998077,
   "chosen_p1_recall": 1.0,
-  "chosen_scan_fraction": 0.14893269230769232,
+  "chosen_scan_fraction": 0.1487801392185335,
   "sweep": [
     {
       "nprobe": 1,
@@ -22,7 +22,7 @@
       "p1_recall": 0.0,
       "min_recall": 0.0,
       "zero_recall_queries": 5,
-      "mean_scan_fraction": 0.04516346153846152
+      "mean_scan_fraction": 0.045469244059768515
     },
     {
       "nprobe": 2,
@@ -31,7 +31,7 @@
       "p1_recall": 0.0,
       "min_recall": 0.0,
       "zero_recall_queries": 2,
-      "mean_scan_fraction": 0.07622115384615384
+      "mean_scan_fraction": 0.07676453750533617
     },
     {
       "nprobe": 3,
@@ -40,7 +40,7 @@
       "p1_recall": 0.7,
       "min_recall": 0.0,
       "zero_recall_queries": 1,
-      "mean_scan_fraction": 0.11235576923076919
+      "mean_scan_fraction": 0.11240803024107754
     },
     {
       "nprobe": 4,
@@ -49,7 +49,7 @@
       "p1_recall": 1.0,
       "min_recall": 0.8,
       "zero_recall_queries": 0,
-      "mean_scan_fraction": 0.14893269230769232
+      "mean_scan_fraction": 0.1487801392185335
     },
     {
       "nprobe": 5,
@@ -58,7 +58,7 @@
       "p1_recall": 1.0,
       "min_recall": 0.8,
       "zero_recall_queries": 0,
-      "mean_scan_fraction": 0.1884567307692308
+      "mean_scan_fraction": 0.18805300843229522
     },
     {
       "nprobe": 6,
@@ -67,7 +67,7 @@
       "p1_recall": 1.0,
       "min_recall": 1.0,
       "zero_recall_queries": 0,
-      "mean_scan_fraction": 0.2270192307692308
+      "mean_scan_fraction": 0.22652921743222024
     },
     {
       "nprobe": 7,
@@ -76,7 +76,7 @@
       "p1_recall": 1.0,
       "min_recall": 1.0,
       "zero_recall_queries": 0,
-      "mean_scan_fraction": 0.26485096153846144
+      "mean_scan_fraction": 0.2643786175974152
     },
     {
       "nprobe": 8,
@@ -85,7 +85,7 @@
       "p1_recall": 1.0,
       "min_recall": 1.0,
       "zero_recall_queries": 0,
-      "mean_scan_fraction": 0.30199519230769234
+      "mean_scan_fraction": 0.3018336313814261
     },
     {
       "nprobe": 9,
@@ -94,7 +94,7 @@
       "p1_recall": 1.0,
       "min_recall": 1.0,
       "zero_recall_queries": 0,
-      "mean_scan_fraction": 0.33907692307692316
+      "mean_scan_fraction": 0.33847564192007895
     },
     {
       "nprobe": 10,
@@ -103,7 +103,7 @@
       "p1_recall": 1.0,
       "min_recall": 1.0,
       "zero_recall_queries": 0,
-      "mean_scan_fraction": 0.37401442307692323
+      "mean_scan_fraction": 0.3731723138675772
     },
     {
       "nprobe": 11,
@@ -112,7 +112,7 @@
       "p1_recall": 1.0,
       "min_recall": 1.0,
       "zero_recall_queries": 0,
-      "mean_scan_fraction": 0.408605769230769
+      "mean_scan_fraction": 0.40762501572197163
     },
     {
       "nprobe": 12,
@@ -121,7 +121,7 @@
       "p1_recall": 1.0,
       "min_recall": 1.0,
       "zero_recall_queries": 0,
-      "mean_scan_fraction": 0.4430000000000002
+      "mean_scan_fraction": 0.4420368280629929
     },
     {
       "nprobe": 13,
@@ -130,7 +130,7 @@
       "p1_recall": 1.0,
       "min_recall": 1.0,
       "zero_recall_queries": 0,
-      "mean_scan_fraction": 0.4777596153846155
+      "mean_scan_fraction": 0.47684218841926584
     },
     {
       "nprobe": 14,
@@ -139,7 +139,7 @@
       "p1_recall": 1.0,
       "min_recall": 1.0,
       "zero_recall_queries": 0,
-      "mean_scan_fraction": 0.5109519230769229
+      "mean_scan_fraction": 0.5103802701371427
     },
     {
       "nprobe": 15,
@@ -148,7 +148,7 @@
       "p1_recall": 1.0,
       "min_recall": 1.0,
       "zero_recall_queries": 0,
-      "mean_scan_fraction": 0.543860576923077
+      "mean_scan_fraction": 0.5431323242036249
     },
     {
       "nprobe": 16,
@@ -157,7 +157,7 @@
       "p1_recall": 1.0,
       "min_recall": 1.0,
       "zero_recall_queries": 0,
-      "mean_scan_fraction": 0.5750384615384614
+      "mean_scan_fraction": 0.5744964382794202
     },
     {
       "nprobe": 17,
@@ -166,7 +166,7 @@
       "p1_recall": 1.0,
       "min_recall": 1.0,
       "zero_recall_queries": 0,
-      "mean_scan_fraction": 0.6079326923076922
+      "mean_scan_fraction": 0.6074454444253764
     },
     {
       "nprobe": 18,
@@ -175,7 +175,7 @@
       "p1_recall": 1.0,
       "min_recall": 1.0,
       "zero_recall_queries": 0,
-      "mean_scan_fraction": 0.6423798076923076
+      "mean_scan_fraction": 0.6418189762823077
     },
     {
       "nprobe": 19,
@@ -184,7 +184,7 @@
       "p1_recall": 1.0,
       "min_recall": 1.0,
       "zero_recall_queries": 0,
-      "mean_scan_fraction": 0.6716346153846153
+      "mean_scan_fraction": 0.671174461400451
     },
     {
       "nprobe": 20,
@@ -193,7 +193,7 @@
       "p1_recall": 1.0,
       "min_recall": 1.0,
       "zero_recall_queries": 0,
-      "mean_scan_fraction": 0.7034230769230767
+      "mean_scan_fraction": 0.7027364135800206
     },
     {
       "nprobe": 21,
@@ -202,7 +202,7 @@
       "p1_recall": 1.0,
       "min_recall": 1.0,
       "zero_recall_queries": 0,
-      "mean_scan_fraction": 0.7318365384615386
+      "mean_scan_fraction": 0.7311173982780405
     },
     {
       "nprobe": 22,
@@ -211,7 +211,7 @@
       "p1_recall": 1.0,
       "min_recall": 1.0,
       "zero_recall_queries": 0,
-      "mean_scan_fraction": 0.7585961538461538
+      "mean_scan_fraction": 0.758150985007608
     },
     {
       "nprobe": 23,
@@ -220,7 +220,7 @@
       "p1_recall": 1.0,
       "min_recall": 1.0,
       "zero_recall_queries": 0,
-      "mean_scan_fraction": 0.7843028846153849
+      "mean_scan_fraction": 0.7838774605761164
     },
     {
       "nprobe": 24,
@@ -229,7 +229,7 @@
       "p1_recall": 1.0,
       "min_recall": 1.0,
       "zero_recall_queries": 0,
-      "mean_scan_fraction": 0.815471153846154
+      "mean_scan_fraction": 0.8149724455429206
     },
     {
       "nprobe": 25,
@@ -238,7 +238,7 @@
       "p1_recall": 1.0,
       "min_recall": 1.0,
       "zero_recall_queries": 0,
-      "mean_scan_fraction": 0.8416298076923077
+      "mean_scan_fraction": 0.8409764468804701
     },
     {
       "nprobe": 26,
@@ -247,7 +247,7 @@
       "p1_recall": 1.0,
       "min_recall": 1.0,
       "zero_recall_queries": 0,
-      "mean_scan_fraction": 0.8667596153846152
+      "mean_scan_fraction": 0.8664236170931814
     },
     {
       "nprobe": 27,
@@ -256,7 +256,7 @@
       "p1_recall": 1.0,
       "min_recall": 1.0,
       "zero_recall_queries": 0,
-      "mean_scan_fraction": 0.8919903846153848
+      "mean_scan_fraction": 0.8914898314573267
     },
     {
       "nprobe": 28,
@@ -265,7 +265,7 @@
       "p1_recall": 1.0,
       "min_recall": 1.0,
       "zero_recall_queries": 0,
-      "mean_scan_fraction": 0.916254807692308
+      "mean_scan_fraction": 0.9159376713120388
     },
     {
       "nprobe": 29,
@@ -274,7 +274,7 @@
       "p1_recall": 1.0,
       "min_recall": 1.0,
       "zero_recall_queries": 0,
-      "mean_scan_fraction": 0.9426442307692315
+      "mean_scan_fraction": 0.9421927378669755
     },
     {
       "nprobe": 30,
@@ -283,7 +283,7 @@
       "p1_recall": 1.0,
       "min_recall": 1.0,
       "zero_recall_queries": 0,
-      "mean_scan_fraction": 0.9687307692307692
+      "mean_scan_fraction": 0.9684184777420507
     },
     {
       "nprobe": 31,
@@ -292,7 +292,7 @@
       "p1_recall": 1.0,
       "min_recall": 1.0,
       "zero_recall_queries": 0,
-      "mean_scan_fraction": 0.9870769230769241
+      "mean_scan_fraction": 0.9868347333220198
     },
     {
       "nprobe": 32,
@@ -301,7 +301,7 @@
       "p1_recall": 1.0,
       "min_recall": 1.0,
       "zero_recall_queries": 0,
-      "mean_scan_fraction": 1.0
+      "mean_scan_fraction": 0.9996923076923073
     }
   ],
   "note": "The default nprobe is the smallest probe count whose p1 recall@k clears the floor on the golden corpus, at the reference configuration recorded above. It is chosen on the tail rather than the mean because the mean hid a total failure on cluster-boundary queries in S0. Re-derive with `prism golden sweep` whenever the corpus, the embedder, or the index geometry changes. A different nlist or a different corpus will have a different answer; this number is not universal, it is provenanced."
