@@ -233,3 +233,198 @@ pub fn sweep_block_size(workdir: &Path, corpus_tsv: &Path) -> Result<BlockSizeEv
             .to_string(),
     })
 }
+
+// --- candidate width x rerank width, swept JOINTLY (S3, charter C-1) -----------
+//
+// `DEFAULT_CANDIDATES` and `DEFAULT_RERANK` were classified `policy` in S2, and the
+// ledger admitted in writing that they were "empirical questions wearing a policy hat".
+// They are now `tuned`, and this is their derivation.
+//
+// **They are swept jointly, and that is not a stylistic choice.** The two controls
+// interact: the candidate width decides *who is allowed to be reranked*, and the rerank
+// width decides *how many of those actually are*. A rerank budget of 200 buys nothing if
+// only 50 candidates ever entered the heap, and a candidate width of 500 buys nothing if
+// only 10 of them are ever scored exactly. An independent single-axis sweep of either one
+// measures a cross-section of a surface and reports it as the surface.
+//
+// `nprobe` is held at its own receipted value throughout. Sweeping three interacting
+// controls at once would produce a receipt nobody could interpret, and `nprobe` already
+// has one.
+
+/// How many rows the default plan must be able to produce.
+///
+/// A **policy** constant (charter C-1): not an empirical optimum, a statement about what
+/// has to remain true. Measurement cannot see it, and it is the constraint that actually
+/// binds.
+///
+/// **Pagination's result set IS the plan's rerank survivors** (see `docs/QUERY-CONTRACT.md`).
+/// A rerank width of 10, with a default page size of 10, means the first page is the entire
+/// result set and the cursor is decorative. So the default plan must be able to serve at
+/// least five pages at the default page size: `5 x 10 = 50`.
+///
+/// Without this bound, the sweep below chooses `rerank = 10` — because on the golden corpus
+/// the recall floors do not bind *at all*: every point in the grid clears them, since PQ's
+/// top-10 already contains the true top-10. That is a property of a synthetic corpus with
+/// well-separated motifs, and tuning to it would be overfitting to the easiest thing we own.
+pub const MIN_PAGEABLE_ROWS: usize = 50;
+
+/// One point on the (candidates x rerank) surface.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WidthRow {
+    pub candidates: usize,
+    pub rerank: usize,
+    pub mean_recall: f32,
+    pub p1_recall: f32,
+    pub min_recall: f32,
+    pub zero_recall_queries: usize,
+    /// The number that costs money: exact vectors are ~32x the size of the codes, and
+    /// this is how many of them the plan pulls.
+    pub mean_exact_bytes: f64,
+    pub mean_physical_bytes: f64,
+    pub query_p50_ms: f64,
+    /// Does this point clear both tail floors?
+    pub meets_floor: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WidthEvidence {
+    pub constants: Vec<String>,
+    pub chosen_candidates: usize,
+    pub chosen_rerank: usize,
+    pub held_nprobe: usize,
+    pub p1_floor: f32,
+    pub corpus_version: String,
+    pub queries: usize,
+    pub rule: String,
+    pub sweep: Vec<WidthRow>,
+    pub note: String,
+}
+
+/// Sweep the two widths jointly against the frozen golden corpus.
+pub fn sweep_widths(
+    engine: &Engine,
+    golden: &oracle::Golden,
+    corpus_version: &str,
+    p1_floor: f32,
+) -> Result<WidthEvidence> {
+    let nprobe = prism_types::query::DEFAULT_NPROBE;
+    let candidate_grid = [25usize, 50, 100, 200, 400, 800];
+    let rerank_grid = [10usize, 25, 50, 100, 200, 400];
+
+    let mut sweep = Vec::new();
+
+    for &cand in &candidate_grid {
+        for &rr in &rerank_grid {
+            // A rerank budget wider than the candidate list is not a configuration, it is
+            // a misunderstanding: you cannot exactly score rows that never entered the
+            // heap. Skipping these keeps the receipt honest rather than padding it with
+            // points that are really just `rerank = candidates`.
+            if rr > cand {
+                continue;
+            }
+
+            let report = oracle::measure_recall(engine, golden, nprobe, cand, rr)?;
+
+            // Cost is measured, not modelled.
+            let mut exact_bytes = 0usize;
+            let mut phys_bytes = 0usize;
+            let mut lat: Vec<f64> = Vec::new();
+            for exp in &golden.expectations {
+                let mut q = exp.query.to_query();
+                q.nprobe = nprobe;
+                q.candidates = cand;
+                q.rerank = rr;
+                let t = Instant::now();
+                let res = engine.search(&q)?;
+                lat.push(t.elapsed().as_secs_f64() * 1000.0);
+                exact_bytes += res.counters.exact_bytes_fetched;
+                phys_bytes += res.counters.physical_bytes_read;
+            }
+            lat.sort_by(|a, b| a.total_cmp(b));
+            let n = golden.expectations.len().max(1);
+
+            sweep.push(WidthRow {
+                candidates: cand,
+                rerank: rr,
+                mean_recall: report.mean_recall,
+                p1_recall: report.p1_recall,
+                min_recall: report.min_recall,
+                zero_recall_queries: report.zero_recall_queries,
+                mean_exact_bytes: exact_bytes as f64 / n as f64,
+                mean_physical_bytes: phys_bytes as f64 / n as f64,
+                query_p50_ms: lat[lat.len() / 2],
+                meets_floor: report.p1_recall >= p1_floor && report.zero_recall_queries == 0,
+            });
+        }
+    }
+
+    // --- the rule, and the constraint that actually binds ---
+    //
+    // Among the points that clear BOTH tail floors -- the same floors nprobe was chosen
+    // against, because a control that quietly relaxes the recall contract is a downgrade
+    // and not a tuning choice -- take the smallest rerank width, then the smallest candidate
+    // width. Rerank leads because it is the expensive one: an exact vector is ~32x a coded
+    // row, so one rerank fetch costs 32 rows of scanning; the candidate heap costs memory,
+    // not I/O.
+    //
+    // But **on this corpus the recall floors do not bind at all**: every point in the grid
+    // clears them, because PQ's top-10 already contains the true top-10. Left there, the rule
+    // would choose `rerank = 10` -- the hard floor, since you cannot return k=10 hits from
+    // fewer than 10 reranked rows -- and that would be overfitting to a synthetic corpus with
+    // unusually well-separated motifs.
+    //
+    // It would also quietly break pagination. The paginated result set IS the rerank survivor
+    // set, so rerank=10 with a default page size of 10 makes the first page the whole result
+    // and the cursor decorative. That is a real constraint, measurement cannot see it, and so
+    // it is stated as policy: MIN_PAGEABLE_ROWS.
+    let best = sweep
+        .iter()
+        .filter(|r| r.meets_floor && r.rerank >= MIN_PAGEABLE_ROWS)
+        .min_by(|a, b| {
+            a.rerank
+                .cmp(&b.rerank)
+                .then(a.candidates.cmp(&b.candidates))
+        })
+        .ok_or_else(|| {
+            prism_types::error::PrismError::Invariant(format!(
+                "no (candidates, rerank) pair clears the tail floors at nprobe={nprobe}; the \
+                 floors or the index have to change"
+            ))
+        })?
+        .clone();
+
+    Ok(WidthEvidence {
+        constants: vec!["DEFAULT_CANDIDATES".into(), "DEFAULT_RERANK".into()],
+        chosen_candidates: best.candidates,
+        chosen_rerank: best.rerank,
+        held_nprobe: nprobe,
+        p1_floor,
+        corpus_version: corpus_version.to_string(),
+        queries: golden.expectations.len(),
+        rule: format!(
+            "swept JOINTLY, because the two controls interact: the candidate width decides who \
+             is allowed to be reranked and the rerank width decides how many of them actually \
+             are, so an independent single-axis sweep of either measures a cross-section of a \
+             surface and reports it as the surface. nprobe is held at its own receipted value \
+             ({nprobe}). Among the points clearing BOTH tail floors -- p1 recall@10 >= \
+             {p1_floor} AND zero_recall_queries == 0, the same floors nprobe was chosen against, \
+             because a control that quietly relaxes the recall contract is a downgrade and not a \
+             tuning choice -- take the smallest RERANK width first, then the smallest CANDIDATE \
+             width. Rerank leads because it is the expensive one: an exact vector is ~32x a \
+             coded row, so one rerank fetch costs 32 rows of scanning; the candidate heap costs \
+             memory, not I/O. SUBJECT TO rerank >= {} (MIN_PAGEABLE_ROWS), because the paginated \
+             result set IS the rerank survivor set and a rerank width of 10 with a page size of \
+             10 makes the cursor decorative. THE RECALL FLOORS DO NOT BIND ON THIS CORPUS -- \
+             every point in the grid clears them -- so the pagination bound is what actually \
+             selects the value. If a future corpus makes recall bind, this receipt moves.",
+            MIN_PAGEABLE_ROWS
+        ),
+        sweep,
+        note: "Measured against the FROZEN golden corpus (charter C-2), whose version is named \
+               above. Re-derive with `prism evidence widths` if the corpus version, the index \
+               geometry, or the embedder changes -- and note that a new corpus version does not \
+               invalidate this receipt, it simply means this receipt describes the corpus it \
+               names."
+            .to_string(),
+    })
+}

@@ -307,12 +307,12 @@ fn the_committed_golden_corpus_still_means_what_it_meant() {
         .unwrap_or(engine)
     };
 
-    let corpus_path = repo_root().join("testing/golden/corpus.tsv");
+    let corpus_path = repo_root().join("testing/golden/v1/corpus.tsv");
     let events = tsv::parse(&std::fs::read_to_string(&corpus_path).unwrap()).unwrap();
     engine.ingest(events, 1_000).unwrap();
 
     let golden: oracle::Golden = serde_json::from_slice(
-        &std::fs::read(repo_root().join("testing/golden/expected.json")).unwrap(),
+        &std::fs::read(repo_root().join("testing/golden/v1/expected.json")).unwrap(),
     )
     .unwrap();
 
@@ -940,11 +940,11 @@ fn copy_tree(from: &Path, to: &Path) {
 fn the_default_nprobe_still_matches_its_committed_provenance() {
     // PRISM.md Part I §5.3: "No magic constants in docs or defaults without
     // benchmark provenance." DEFAULT_NPROBE is derived from a sweep on the golden
-    // corpus, and `testing/golden/nprobe-provenance.json` is the receipt. This
+    // corpus, and `testing/evidence/nprobe.json` is the receipt. This
     // test is what stops the constant from drifting away from its evidence: if
     // someone edits one without re-deriving the other, CI says so.
     let prov: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(repo_root().join("testing/golden/nprobe-provenance.json")).unwrap(),
+        &std::fs::read(repo_root().join("testing/evidence/nprobe.json")).unwrap(),
     )
     .unwrap();
 
@@ -1003,13 +1003,13 @@ fn cluster_boundary_queries_are_what_expose_the_recall_tail() {
     )
     .unwrap();
     let events = tsv::parse(
-        &std::fs::read_to_string(repo_root().join("testing/golden/corpus.tsv")).unwrap(),
+        &std::fs::read_to_string(repo_root().join("testing/golden/v1/corpus.tsv")).unwrap(),
     )
     .unwrap();
     engine.ingest(events, 1_000).unwrap();
 
     let golden: oracle::Golden = serde_json::from_slice(
-        &std::fs::read(repo_root().join("testing/golden/expected.json")).unwrap(),
+        &std::fs::read(repo_root().join("testing/golden/v1/expected.json")).unwrap(),
     )
     .unwrap();
 

@@ -15,6 +15,7 @@ path = "src/main.rs"
 prism-types = { workspace = true }
 prism-quantizer = { workspace = true }
 prism-part = { workspace = true }
+prism-sql = { workspace = true }
 prism-engine = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -22,5 +23,6 @@ serde_json = { workspace = true }
 [dev-dependencies]
 prism-types = { workspace = true }
 prism-part = { workspace = true }
+prism-sql = { workspace = true }
 prism-engine = { workspace = true }
 serde_json = { workspace = true }

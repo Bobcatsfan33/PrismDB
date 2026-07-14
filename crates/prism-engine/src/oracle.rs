@@ -344,7 +344,7 @@ pub struct SweepRow {
 /// PRISM.md Part I §5.3 is explicit: *"`nlist`/`nprobe` are outputs of recall,
 /// skew, filter selectivity and latency targets… No magic constants in docs or
 /// defaults without benchmark provenance."* This struct is that provenance,
-/// committed to `testing/golden/nprobe-provenance.json`, and a test asserts the
+/// committed to `testing/evidence/nprobe.json`, and a test asserts the
 /// constant in the code still matches it. The default cannot drift from its
 /// receipt without CI noticing.
 #[derive(Clone, Debug, Serialize, Deserialize)]

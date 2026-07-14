@@ -35,6 +35,9 @@ USAGE:
   prism search    --path <dir> --query <text> [--tenant T] [--from MS] [--to MS]
                   [--k 10] [--nprobe 4] [--candidates 200] [--rerank 50]
                   [--group K] [--space model:version] [--exact]
+  prism sql       --path <dir> --tenant <T> --query "SELECT ..." [--cursor TOK]
+                  the SAME door as `search`, reached through SQL. Tenant policy is
+                  injected BELOW the parser and is not expressible in the statement.
   prism inspect   --path <dir>
   prism verify    --path <dir>
   prism fsck      --path <dir|part-dir>   offline format validator; needs no catalog
@@ -44,7 +47,8 @@ USAGE:
   prism gc        --path <dir> [--retain 5] [--dry-run]
   prism bench     [--path <dir>] [--rows 20000] [--kind zipf] [--out baselines.json]
   prism gen-corpus --kind <uniform|zipf|tenant-skew|late|duplicates|edge>
-                   --rows <n> [--seed 42] --out <file.tsv>
+                   --rows <n> [--seed 42] [--format tsv|jsonl] --out <file>
+                   tsv is the S0 slice; jsonl carries attributes and trace context
   prism golden build --path <dir> --out <golden.json> [--k 10]
   prism golden check --path <dir> --golden <golden.json>
                      [--nprobe N] [--candidates 200] [--rerank 50]
@@ -96,6 +100,7 @@ fn run(argv: Vec<String>) -> Result<()> {
         "recover" => cmd_recover(&a),
         "evidence" => cmd_evidence(&a),
         "search" => cmd_search(&a),
+        "sql" => cmd_sql(&a),
         "inspect" => cmd_inspect(&a),
         "verify" => cmd_verify(&a),
         "fsck" => cmd_fsck(&a),
@@ -138,11 +143,25 @@ fn cmd_init(a: &Args) -> Result<()> {
     }))
 }
 
+/// The S0 loader: no admission boundary, no quotas, no skew check.
+///
+/// Distinct from `ingest-source`, which is the S2 path and *does* enforce all of those.
+/// Loading a corpus whose event times are a fixed historical epoch through the admission
+/// boundary would -- correctly -- dead-letter every row for lateness.
 fn cmd_ingest(a: &Args) -> Result<()> {
     let engine = open(a)?;
     let file = a.req("file")?;
     let text = std::fs::read_to_string(file)?;
-    let events = tsv::parse(&text)?;
+
+    let events = if file.ends_with(".jsonl") || a.opt("format") == Some("jsonl") {
+        text.lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str::<prism_types::Event>(l).map_err(PrismError::from))
+            .collect::<Result<Vec<_>>>()?
+    } else {
+        tsv::parse(&text)?
+    };
+
     let report = engine.ingest(events, now_ms())?;
     emit(&report)
 }
@@ -159,6 +178,7 @@ fn cmd_search(a: &Args) -> Result<()> {
         candidates: a.parse_opt("candidates", prism_types::query::DEFAULT_CANDIDATES)?,
         rerank: a.parse_opt("rerank", prism_types::query::DEFAULT_RERANK)?,
         group_k: a.parse_some("group")?,
+        predicate: None,
         space: a.opt("space").map(String::from),
     };
 
@@ -252,7 +272,7 @@ fn cmd_recover(a: &Args) -> Result<()> {
 fn cmd_evidence(a: &Args) -> Result<()> {
     match a.sub.as_deref() {
         Some("block-size") => {
-            let corpus = PathBuf::from(a.opt("corpus").unwrap_or("testing/golden/corpus.tsv"));
+            let corpus = PathBuf::from(a.opt("corpus").unwrap_or("testing/golden/v1/corpus.tsv"));
             let work = std::env::temp_dir().join(format!("prism-evidence-{}", std::process::id()));
             std::fs::create_dir_all(&work)?;
 
@@ -265,10 +285,70 @@ fn cmd_evidence(a: &Args) -> Result<()> {
             }
             emit(&ev)
         }
+        Some("widths") => {
+            // DEFAULT_CANDIDATES x DEFAULT_RERANK, swept jointly. They interact, so there
+            // is no honest single-axis sweep of either one.
+            let root = std::env::temp_dir().join(format!("prism-widths-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+
+            let manifest: serde_json::Value =
+                serde_json::from_slice(&std::fs::read("testing/golden/MANIFEST.json")?)?;
+            let version = manifest["current"].as_str().unwrap_or("v1").to_string();
+
+            let engine = Engine::init(
+                &root,
+                StoreConfig {
+                    format_version: STORE_VERSION,
+                    dim: 64,
+                    nlist: 32,
+                    pq_m: 8,
+                    seed: 1234,
+                    block_size: prism_part::format::DEFAULT_BLOCK_SIZE,
+                },
+            )?;
+            let corpus = format!("testing/golden/{version}/corpus.tsv");
+            engine.ingest(
+                tsv::parse(&std::fs::read_to_string(&corpus)?)?,
+                1_760_000_000_000,
+            )?;
+
+            let golden: oracle::Golden = serde_json::from_slice(&std::fs::read(format!(
+                "testing/golden/{version}/expected.json"
+            ))?)?;
+
+            let ev = prism_engine::evidence::sweep_widths(
+                &engine,
+                &golden,
+                &version,
+                a.parse_opt("p1-floor", 0.8f32)?,
+            )?;
+            std::fs::remove_dir_all(&root).ok();
+
+            if let Some(out) = a.opt("out") {
+                std::fs::write(out, serde_json::to_string_pretty(&ev)?)?;
+                eprintln!("prism: wrote {out}");
+            }
+            emit(&ev)
+        }
         _ => Err(PrismError::Invalid(
-            "usage: prism evidence block-size --out <file.json>".into(),
+            "usage: prism evidence <block-size|widths> --out <file.json>".into(),
         )),
     }
+}
+
+/// The SQL door.
+///
+/// It compiles to the same `Query` the direct path takes and calls the same executor. The
+/// tenant comes from `--tenant` (standing in for the authorization layer) and is injected
+/// by the binder, beneath the statement, where nothing the user writes can reach it.
+fn cmd_sql(a: &Args) -> Result<()> {
+    let engine = open(a)?;
+    let session = prism_sql::Session {
+        tenant: a.req("tenant")?.to_string(),
+    };
+    let plan = prism_sql::compile(a.req("query")?, &session)?;
+    let res = engine.run_sql(&plan, a.opt("cursor"))?;
+    emit(&res)
 }
 
 fn cmd_inspect(a: &Args) -> Result<()> {
@@ -430,10 +510,29 @@ fn cmd_gen_corpus(a: &Args) -> Result<()> {
     let out = a.req("out")?;
 
     let events = corpus::generate(kind, rows, seed);
-    std::fs::write(out, tsv::write(&events))?;
+
+    // TSV is the S0 slice of the event model and carries no attributes, no trace context
+    // and no observed_time. JSONL carries the whole event -- which is what you want if you
+    // are going to query the things S2 added.
+    let format = a.opt("format").unwrap_or("tsv");
+    let text = match format {
+        "tsv" => tsv::write(&events),
+        "jsonl" => events
+            .iter()
+            .map(|e| serde_json::to_string(e).unwrap_or_default())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        other => {
+            return Err(PrismError::Invalid(format!(
+                "unknown format `{other}`; use tsv or jsonl"
+            )))
+        }
+    };
+    std::fs::write(out, text)?;
 
     emit(&serde_json::json!({
         "kind": kind_s,
+        "format": format,
         "rows": events.len(),
         "seed": seed,
         "out": out,

@@ -57,15 +57,41 @@ pub fn constants() -> Vec<Constant> {
             value: prism_part::format::DEFAULT_BLOCK_SIZE as i64,
             kind: Kind::Tuned,
         },
-        // --- policy: a decision about behaviour, owes a rationale ---
+        // Swept JOINTLY (S3): they interact, so neither has an honest single-axis sweep.
         Constant {
             name: "DEFAULT_CANDIDATES",
             value: prism_types::query::DEFAULT_CANDIDATES as i64,
-            kind: Kind::Policy,
+            kind: Kind::Tuned,
         },
         Constant {
             name: "DEFAULT_RERANK",
             value: prism_types::query::DEFAULT_RERANK as i64,
+            kind: Kind::Tuned,
+        },
+        // --- policy: a decision about behaviour, owes a rationale ---
+        Constant {
+            name: "MIN_PAGEABLE_ROWS",
+            value: crate::evidence::MIN_PAGEABLE_ROWS as i64,
+            kind: Kind::Policy,
+        },
+        Constant {
+            name: "MAX_STATEMENT_BYTES",
+            value: prism_sql::limits::MAX_STATEMENT_BYTES as i64,
+            kind: Kind::Policy,
+        },
+        Constant {
+            name: "MAX_EXPR_DEPTH",
+            value: prism_sql::limits::MAX_EXPR_DEPTH as i64,
+            kind: Kind::Policy,
+        },
+        Constant {
+            name: "MAX_IN_LIST",
+            value: prism_sql::limits::MAX_IN_LIST as i64,
+            kind: Kind::Policy,
+        },
+        Constant {
+            name: "MAX_TOKENS",
+            value: prism_sql::limits::MAX_TOKENS as i64,
             kind: Kind::Policy,
         },
         Constant {

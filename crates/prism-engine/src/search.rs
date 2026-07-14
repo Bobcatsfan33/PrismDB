@@ -74,7 +74,26 @@ struct SpaceContext {
 }
 
 impl Engine {
+    /// Search the live snapshot.
     pub fn search(&self, q: &Query) -> Result<SearchResult> {
+        let snap = self.snapshot()?;
+        self.search_at(&snap, q)
+    }
+
+    /// Search a **specific** snapshot.
+    ///
+    /// This is what makes pagination correct. A paginated query is a query whose lifetime
+    /// spans several requests, and invariant 4 says a reader pins a snapshot for the
+    /// lifetime of a query. Parts are immutable and a snapshot is a fixed set of them, so
+    /// the answer to a query against a given snapshot is fixed forever — ingest publishes a
+    /// new snapshot without touching the old one, and merge writes new parts without
+    /// touching the old ones. Pagination needed no new invariant; it needed the ones we
+    /// already had to be true.
+    pub fn search_at(
+        &self,
+        snap: &prism_part::catalog::Snapshot,
+        q: &Query,
+    ) -> Result<SearchResult> {
         if q.k == 0 {
             return Err(PrismError::Invalid("k must be positive".into()));
         }
@@ -85,8 +104,7 @@ impl Engine {
             return Err(PrismError::Invalid("query text is empty".into()));
         }
 
-        let snap = self.snapshot()?; // pinned for the lifetime of this query
-        let readers = self.open_parts(&snap)?;
+        let readers = self.open_parts(snap)?;
         let dim = self.store.config.dim;
 
         let mut c = Counters {
@@ -95,12 +113,26 @@ impl Engine {
         };
 
         // --- 1. prune on metadata alone ---
+        //
+        // Time bounds come from the query AND, conservatively, from the predicate's
+        // top-level conjunction. `time_bounds` never narrows across an OR: pruning that can
+        // lose a row is not pruning, it is sampling.
+        let (pred_from, pred_to) = match &q.predicate {
+            Some(p) => prism_types::predicate::time_bounds(p),
+            None => (None, None),
+        };
+        let from = match (q.time_from, pred_from) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        };
+        let to = match (q.time_to, pred_to) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+
         let mut eligible: Vec<&PartReader> = readers
             .iter()
-            .filter(|r| {
-                r.manifest
-                    .may_match(q.tenant.as_deref(), q.time_from, q.time_to)
-            })
+            .filter(|r| r.manifest.may_match(q.tenant.as_deref(), from, to))
             .collect();
 
         // --- 2. embedding-space check (invariant 9) ---
@@ -147,7 +179,7 @@ impl Engine {
                 clusters: None,
                 counters: c,
                 generations: Vec::new(),
-                snapshot_id: snap.snapshot_id,
+                snapshot_id: snap.snapshot_id.clone(),
             });
         }
 
@@ -192,6 +224,14 @@ impl Engine {
             // only survivors pay for their body.
             let scalars = r.read_scalars()?;
             let times = &scalars.times;
+
+            // The row predicate, if any. Columns load lazily and only if the predicate
+            // actually names them — a filter that never mentions `body` must not cost a
+            // `body` decode.
+            let rows_view = match &q.predicate {
+                Some(p) => Some(crate::rowsource::PartRows::new(r, Some(p))?),
+                None => None,
+            };
 
             let by_centroid: BTreeMap<u32, &prism_part::part::CentroidRange> = r
                 .manifest
@@ -245,6 +285,13 @@ impl Engine {
                     }
                     if let Some(t) = q.time_to {
                         if times[row] > t {
+                            continue;
+                        }
+                    }
+                    // The general predicate, fused into the same loop. Evaluated last,
+                    // because tenant and time are cheap and prune whole parts.
+                    if let (Some(p), Some(view)) = (&q.predicate, &rows_view) {
+                        if !prism_types::predicate::eval(p, view, row)? {
                             continue;
                         }
                     }
@@ -387,7 +434,7 @@ impl Engine {
             clusters,
             counters: c,
             generations: gen_ids.into_iter().collect(),
-            snapshot_id: snap.snapshot_id,
+            snapshot_id: snap.snapshot_id.clone(),
         })
     }
 
@@ -427,6 +474,15 @@ impl Engine {
                 }
                 if let Some(t) = q.time_to {
                     if e.event_time > t {
+                        continue;
+                    }
+                }
+                if let Some(p) = &q.predicate {
+                    let view = crate::rowsource::EventRow {
+                        event: e,
+                        score: 0.0,
+                    };
+                    if !prism_types::predicate::eval(p, &view, 0)? {
                         continue;
                     }
                 }

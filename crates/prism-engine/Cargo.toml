@@ -11,5 +11,6 @@ description = "PrismDB engine: ingest, prune, centroid-range scan, exact rerank,
 prism-types = { workspace = true }
 prism-quantizer = { workspace = true }
 prism-part = { workspace = true }
+prism-sql = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
