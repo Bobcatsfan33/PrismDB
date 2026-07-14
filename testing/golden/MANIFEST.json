@@ -1,0 +1,47 @@
+{
+  "_comment": [
+    "Charter amendment C-2: golden corpora and their expected answers are FROZEN,",
+    "IMMUTABLE, VERSIONED artifacts. Drift checks compare COMMITTED BYTES; they never",
+    "compare regenerated output against regenerated output.",
+    "",
+    "Nothing in this directory is ever rewritten in place. A corpus change is a NEW",
+    "VERSION, with a reviewed diff, and every predecessor is retained -- so that every",
+    "historical receipt (an nprobe sweep, a block-size derivation, a recall number in a",
+    "release note) stays interpretable forever. A receipt that points at a corpus which",
+    "no longer exists is not a receipt.",
+    "",
+    "Create a new version with scripts/new-golden-corpus.sh. It will refuse to touch an",
+    "existing one."
+  ],
+  "current": "v1",
+  "versions": {
+    "v1": {
+      "created_in_sprint": "S0",
+      "frozen_since_sprint": "S3",
+      "generator": {
+        "kind": "zipf",
+        "rows": 2000,
+        "seed": 1234
+      },
+      "reference_config": {
+        "dim": 64,
+        "nlist": 32,
+        "pq_m": 8,
+        "seed": 1234
+      },
+      "queries": 104,
+      "k": 10,
+      "why": "The original corpus. Zipf-skewed behavioural motifs; 104 queries in three classes (topic, cluster-boundary, hybrid). Byte-identical since S0 -- and it is only because it never moved that S1's recall-tail finding, and every receipt derived from it, still means anything.",
+      "files": {
+        "corpus.tsv": {
+          "sha256": "e360f548b32639c1ba0db99b3f4f9e84c6ba2d741839dcfc24323dbe3d94e117",
+          "bytes": 264281
+        },
+        "expected.json": {
+          "sha256": "3b91d9eaf59a1f04bc6aeb385ad744db00717f1400b4162ea9d2ae23991429af",
+          "bytes": 73152
+        }
+      }
+    }
+  }
+}

@@ -2,9 +2,9 @@
   "snapshot_id": "s00000001",
   "parent": "s00000000",
   "parts": [
-    "p00000001-e6ec0f17dc59d5c3"
+    "p00000001-eed509c6b198abe8"
   ],
   "next_seq": 2,
-  "active_generation": "27db56054445d691",
-  "created_at_ms": 1784039257471
+  "active_generation": "11bc6235d83235d2",
+  "created_at_ms": 1784042689896
 }

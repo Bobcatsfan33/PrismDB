@@ -232,19 +232,37 @@ PY
 echo "    built $(ls testing/compat/corrupt-v3 | wc -l | tr -d ' ') corrupt v3 fixtures"
 
 # ---------------------------------------------------------------- golden corpus
-echo "==> testing/golden"
-mkdir -p testing/golden
-"$PRISM" gen-corpus --kind zipf --rows 2000 --seed 1234 --out testing/golden/corpus.tsv >/dev/null
-rm -rf "$TMP/golden"
-"$PRISM" init --path "$TMP/golden" --dim 64 --nlist 32 --pq-m 8 --seed 1234 >/dev/null
-"$PRISM" ingest --path "$TMP/golden" --file testing/golden/corpus.tsv >/dev/null
-"$PRISM" golden build --path "$TMP/golden" --out testing/golden/expected.json --k 10 --kind zipf
-
-# The nprobe default is not a round number someone liked. It is the smallest
-# probe count that holds p1 recall@10 at or above the floor on this corpus, and
-# this file is the receipt.
-"$PRISM" golden sweep --path "$TMP/golden" --golden testing/golden/expected.json \
-  --out testing/golden/nprobe-provenance.json --p1-floor 0.8
+#
+# NOT REGENERATED. Charter amendment C-2: golden corpora and their expected answers are
+# frozen, immutable, versioned artifacts, and a drift check compares COMMITTED BYTES.
+#
+# This script used to regenerate the corpus *and* its expected answers, which meant the
+# drift check passed by construction while testing nothing at all (D-023). It now only
+# VERIFIES them. A new corpus is a new version: scripts/new-golden-corpus.sh.
+echo "==> testing/golden (verify only — never regenerate)"
+python3 - <<'PYEOF'
+import hashlib, json, sys
+m = json.load(open("testing/golden/MANIFEST.json"))
+bad = 0
+for version, v in m["versions"].items():
+    for name, meta in v["files"].items():
+        path = f"testing/golden/{version}/{name}"
+        actual = hashlib.sha256(open(path, "rb").read()).hexdigest()
+        if actual != meta["sha256"]:
+            print(f"    FROZEN ARTIFACT CHANGED: {path}")
+            print(f"      manifest: {meta['sha256']}")
+            print(f"      on disk:  {actual}")
+            bad += 1
+        else:
+            print(f"    ok  {path}")
+if bad:
+    print()
+    print("    A frozen golden artifact was modified in place. That is exactly what charter")
+    print("    C-2 forbids: every receipt that names this corpus now describes something")
+    print("    else. Restore it, and make a NEW VERSION instead.")
+    sys.exit(1)
+print(f"    current corpus: {m['current']}")
+PYEOF
 
 echo
 echo "Fixtures regenerated. Review the diff: on an unchanged format there should be none."
