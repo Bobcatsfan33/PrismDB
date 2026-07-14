@@ -60,6 +60,8 @@ fn config() -> StoreConfig {
         pq_m: 4,
         seed: 7,
         block_size: prism_part::format::DEFAULT_BLOCK_SIZE,
+        partitions: Default::default(),
+        promote: Vec::new(),
     }
 }
 

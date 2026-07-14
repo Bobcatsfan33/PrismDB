@@ -23,6 +23,9 @@ const USAGE: &str = r#"prism — the semantic event store
 
 USAGE:
   prism init      --path <dir> [--dim 64] [--nlist 32] [--pq-m 8] [--seed 42]
+                  [--buckets 16] [--time-window-ms 86400000]
+                  [--dedicated tenantA,tenantB]   tenants with a bucket to themselves
+                  [--promote gen_ai.system,...]   attribute keys as typed columns
   prism ingest    --path <dir> --file <events.tsv>
   prism ingest-source --path <dir> --file <events.jsonl> --source <name> [--max N]
                   poll a source, admit, ack, publish, THEN advance its offset
@@ -127,6 +130,18 @@ fn open(a: &Args) -> Result<Engine> {
 }
 
 fn cmd_init(a: &Args) -> Result<()> {
+    a.allow(&[
+        "path",
+        "dim",
+        "nlist",
+        "pq-m",
+        "seed",
+        "block-size",
+        "buckets",
+        "time-window-ms",
+        "dedicated",
+        "promote",
+    ])?;
     let config = StoreConfig {
         format_version: STORE_VERSION,
         dim: a.parse_opt("dim", 64usize)?,
@@ -134,6 +149,32 @@ fn cmd_init(a: &Args) -> Result<()> {
         pq_m: a.parse_opt("pq-m", 8usize)?,
         seed: a.parse_opt("seed", 42u64)?,
         block_size: a.parse_opt("block-size", prism_part::format::DEFAULT_BLOCK_SIZE)?,
+        partitions: prism_part::partition::PartitionScheme {
+            buckets: a.parse_opt("buckets", prism_part::partition::DEFAULT_BUCKETS)?,
+            time_window_ms: a.parse_opt(
+                "time-window-ms",
+                prism_part::partition::DEFAULT_TIME_WINDOW_MS,
+            )?,
+            dedicated: a
+                .opt("dedicated")
+                .map(|s| {
+                    s.split(',')
+                        .filter(|t| !t.is_empty())
+                        .enumerate()
+                        .map(|(i, t)| (t.to_string(), i as u32))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        },
+        promote: a
+            .opt("promote")
+            .map(|s| {
+                s.split(',')
+                    .filter(|k| !k.is_empty())
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default(),
     };
     let root = path_of(a)?;
     Engine::init(&root, config.clone())?;
@@ -167,6 +208,20 @@ fn cmd_ingest(a: &Args) -> Result<()> {
 }
 
 fn cmd_search(a: &Args) -> Result<()> {
+    a.allow(&[
+        "path",
+        "query",
+        "tenant",
+        "from",
+        "to",
+        "k",
+        "nprobe",
+        "candidates",
+        "rerank",
+        "group",
+        "space",
+        "exact",
+    ])?;
     let engine = open(a)?;
     let q = Query {
         text: a.req("query")?.to_string(),
@@ -304,6 +359,8 @@ fn cmd_evidence(a: &Args) -> Result<()> {
                     pq_m: 8,
                     seed: 1234,
                     block_size: prism_part::format::DEFAULT_BLOCK_SIZE,
+                    partitions: Default::default(),
+                    promote: Vec::new(),
                 },
             )?;
             let corpus = format!("testing/golden/{version}/corpus.tsv");
@@ -342,6 +399,7 @@ fn cmd_evidence(a: &Args) -> Result<()> {
 /// tenant comes from `--tenant` (standing in for the authorization layer) and is injected
 /// by the binder, beneath the statement, where nothing the user writes can reach it.
 fn cmd_sql(a: &Args) -> Result<()> {
+    a.allow(&["path", "tenant", "query", "cursor"])?;
     let engine = open(a)?;
     let session = prism_sql::Session {
         tenant: a.req("tenant")?.to_string(),

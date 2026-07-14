@@ -41,6 +41,8 @@ fn store(tag: &str, rows: usize) -> (Engine, PathBuf) {
             pq_m: 8,
             seed: 9,
             block_size: prism_part::format::DEFAULT_BLOCK_SIZE,
+            partitions: Default::default(),
+            promote: Vec::new(),
         },
     )
     .unwrap();

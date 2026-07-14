@@ -263,8 +263,12 @@ fn killing_a_merge_before_it_commits_changes_nothing() {
 
     let before = assert_healthy(&root);
     let engine = Engine::open(&root).unwrap();
-    let parts_before = engine.snapshot().unwrap().parts;
-    assert_eq!(parts_before.len(), 2);
+    let parts_before = engine.snapshot().unwrap().part_ids();
+    // S4: one ingest writes one part per PARTITION (tenant-bucket x time-window x
+    // generation), so two ingests of a multi-tenant corpus leave more than two parts. The
+    // invariant under test is unchanged -- a killed merge must not advance the catalog -- so
+    // the test compares against what is actually there rather than a hard-coded count.
+    assert!(parts_before.len() >= 2, "there must be something to merge");
 
     let out = run(
         &["merge", "--path", root.to_str().unwrap()],
@@ -283,7 +287,7 @@ fn killing_a_merge_before_it_commits_changes_nothing() {
     assert_eq!(after.rows, before.rows);
 
     let engine = Engine::open(&root).unwrap();
-    assert_eq!(engine.snapshot().unwrap().parts, parts_before);
+    assert_eq!(engine.snapshot().unwrap().part_ids(), parts_before);
 
     // Retrying the merge works, and now it commits.
     let out = run(&["merge", "--path", root.to_str().unwrap()], None);
@@ -317,7 +321,7 @@ fn killing_gc_midway_never_takes_a_live_part_with_it() {
 
     let before = assert_healthy(&root);
     let engine = Engine::open(&root).unwrap();
-    let live: Vec<String> = engine.snapshot().unwrap().parts;
+    let live: Vec<String> = engine.snapshot().unwrap().part_ids();
 
     let out = run(
         &["gc", "--path", root.to_str().unwrap(), "--retain", "1"],
@@ -371,11 +375,21 @@ fn orphans_left_by_a_crash_are_invisible_to_readers_and_reclaimable_by_gc() {
     assert_eq!(h.snapshot, old_snapshot);
     assert_eq!(h.rows, old_rows, "an uncommitted part must not be visible");
 
-    // It really is on disk...
+    // The orphan parts really are on disk -- complete, checksum-valid, named by no snapshot.
+    //
+    // S4: an ingest writes one part per PARTITION (tenant-bucket x time-window x generation),
+    // so a crashed batch of a multi-tenant corpus leaves several orphans, not one. The
+    // invariant is unchanged; the arithmetic is.
+    let live = Engine::open(&root).unwrap().snapshot().unwrap().part_ids();
     let on_disk = std::fs::read_dir(root.join("parts")).unwrap().count();
-    assert_eq!(on_disk, 2, "expected the orphan part to be sitting there");
+    assert!(
+        on_disk > live.len(),
+        "expected orphan parts to be sitting there: {on_disk} on disk, {} live",
+        live.len()
+    );
+    let orphans = on_disk - live.len();
 
-    // ...and GC is what removes it. Not the reader, not the next write.
+    // ...and GC is what removes them. Not the reader, not the next write.
     let out = run(
         &["gc", "--path", root.to_str().unwrap(), "--retain", "1"],
         None,
@@ -384,13 +398,16 @@ fn orphans_left_by_a_crash_are_invisible_to_readers_and_reclaimable_by_gc() {
     let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(
         report["removed_parts"].as_array().unwrap().len(),
-        1,
-        "gc should have reclaimed exactly the orphan"
+        orphans,
+        "gc should have reclaimed exactly the orphans, and nothing else"
     );
 
     let h = assert_healthy(&root);
     assert_eq!(h.rows, old_rows);
-    assert_eq!(std::fs::read_dir(root.join("parts")).unwrap().count(), 1);
+    assert_eq!(
+        std::fs::read_dir(root.join("parts")).unwrap().count(),
+        live.len()
+    );
 
     std::fs::remove_dir_all(&dir).ok();
 }

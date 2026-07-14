@@ -62,6 +62,35 @@ impl Args {
         })
     }
 
+    /// Reject any flag this command does not know.
+    ///
+    /// A silently-ignored flag is worse than a rejected one: `prism init --promot gen_ai.system`
+    /// would create a store whose configuration is quietly not what the operator asked for, and
+    /// they would find out months later from a query that reads more bytes than it should.
+    pub fn allow(&self, known: &[&str]) -> Result<()> {
+        for name in self.flags.keys().chain(self.switches.iter()) {
+            if !known.contains(&name.as_str()) {
+                let hint = known
+                    .iter()
+                    .filter(|k| {
+                        k.starts_with(&name[..name.len().min(3)])
+                            || name.starts_with(&k[..k.len().min(3)])
+                    })
+                    .copied()
+                    .collect::<Vec<_>>();
+                return Err(PrismError::Invalid(format!(
+                    "unknown flag `--{name}`{}",
+                    if hint.is_empty() {
+                        String::new()
+                    } else {
+                        format!("; did you mean --{}?", hint.join(" or --"))
+                    }
+                )));
+            }
+        }
+        Ok(())
+    }
+
     pub fn has(&self, name: &str) -> bool {
         self.switches.iter().any(|s| s == name)
     }
