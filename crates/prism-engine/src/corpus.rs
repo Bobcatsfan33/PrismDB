@@ -95,6 +95,19 @@ pub fn topic_name(i: usize) -> &'static str {
     TOPICS[i % TOPICS.len()].0
 }
 
+/// The phrases a motif is built from. Exposed so the golden query set can build
+/// **cluster-boundary queries**: take half a sentence from one motif and half
+/// from another, and the resulting query vector lands *between* two centroids.
+///
+/// Those are the queries that produced S0's `min recall = 0.000` — a query deep
+/// inside one cluster is easy, and a query on a boundary has its true neighbours
+/// split across two centroids that a small `nprobe` may not both reach. A recall
+/// number measured only on easy queries is a recall number that will surprise
+/// you in production.
+pub fn topic_phrases(i: usize) -> &'static [&'static str] {
+    TOPICS[i % TOPICS.len()].1
+}
+
 /// A sentence from a topic, with deterministic lexical variation so that rows
 /// are near-duplicates rather than exact ones.
 fn sentence(rng: &mut Rng, topic: usize) -> String {

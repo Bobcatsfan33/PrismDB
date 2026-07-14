@@ -8,6 +8,38 @@
 use crate::event::Event;
 use serde::{Deserialize, Serialize};
 
+/// The default probe count.
+///
+/// **Derived, not chosen.** It is the smallest `nprobe` whose *p1* recall@10
+/// clears 0.8 on the golden corpus at the reference configuration, and the
+/// receipt is `testing/golden/nprobe-provenance.json`. A test asserts this
+/// constant still equals the `chosen_nprobe` in that file, so the default cannot
+/// drift away from the evidence that produced it.
+///
+/// It is picked on the **tail**, not the mean. S0 defaulted to a round number and
+/// reported a mean recall of ~0.90 at `nprobe=1` — while the *minimum* was 0.000,
+/// because cluster-boundary queries have their true neighbours split across two
+/// centroids and a single probe reaches only one of them. A default tuned on a
+/// mean is a default that works until it matters.
+///
+/// The sweep that produced it is unambiguous. At `nprobe=1`, *topic* queries —
+/// aimed at the middle of a cluster — score a flawless mean recall of 1.000,
+/// while *cluster-boundary* queries fail outright on 5 of 56. The mean across
+/// everything is still 0.904, which is how a system with total failures in it
+/// gets described as "90% accurate". `nprobe=4` is the first probe count at
+/// which no query returns nothing, and it costs a 14.9% scan fraction.
+///
+/// This number is not universal. A different `nlist`, a different embedding
+/// model, or a different corpus will have a different answer — re-derive it with
+/// `prism golden sweep`. Adaptive per-query probing is issue #1, targeted at S6.
+pub const DEFAULT_NPROBE: usize = 4;
+
+/// Default candidate width: how many PQ-scored rows survive into the heap.
+pub const DEFAULT_CANDIDATES: usize = 200;
+
+/// Default rerank width — the declared exact-vector fetch budget.
+pub const DEFAULT_RERANK: usize = 50;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Query {
     pub text: String,
@@ -47,9 +79,9 @@ impl Default for Query {
             time_from: None,
             time_to: None,
             k: 10,
-            nprobe: 4,
-            candidates: 200,
-            rerank: 50,
+            nprobe: DEFAULT_NPROBE,
+            candidates: DEFAULT_CANDIDATES,
+            rerank: DEFAULT_RERANK,
             group_k: None,
             space: None,
         }
