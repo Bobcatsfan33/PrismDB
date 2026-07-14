@@ -290,6 +290,8 @@ Named so nobody mistakes silence for completeness: **no network listener** (the 
 
 **Gate:** *parity against an oracle on the scalar subset; hybrid smoke queries return slice-identical results through SQL; a design partner can be demoed.*
 
+**Proof:** [CI run #29348236729](https://github.com/Bobcatsfan33/PrismDB/actions/runs/29348236729) — all fourteen jobs green on `main`, including the S3 gate suite (same-door counter parity, 8,000-statement tenant fuzz, every parser bound named, pagination under concurrent ingest+merge), the charter-C-1 constant ledger, and `golden-frozen` (charter C-2: committed bytes, not regenerated output).
+
 The architect raised the real risk before we built anything: **the SQL path is a second door into the same engine, and it must be provably the SAME door.** So the gate is not "does SQL work" — it is "is SQL a compiler rather than a second engine", and it is enforced on the *counters*.
 
 ### 1. The same door, proven on the counters
