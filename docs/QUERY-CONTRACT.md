@@ -109,3 +109,35 @@ The SQL text is now the same category of thing as a part file: bytes from a stra
 | `GROUP BY` keys | 16 |
 
 A statement that exceeds one is refused with a specific error naming the bound and the value. The parser must **never** panic, never recurse without a depth counter, and never reserve capacity on the strength of a number it just read.
+
+---
+
+## 8. Tenant isolation, and the shared-bucket seam
+
+Isolation is not a filter we promise to apply. **It is a set of bytes we never read.**
+
+Rows are partitioned by `tenant-bucket × event-time window × semantic generation`, and the partition key lives in the **catalog** — above the parts. A query for tenant A never opens a part outside A's partitions: not to check it, not to prune it, not at all.
+
+That is testable, and it is tested in the strongest form we could think of: **fill every other tenant's partitions with unreadable garbage, and tenant A's queries still answer correctly — because they never looked.**
+
+A useful consequence: damage is **attributable**. Corrupting one tenant's part affects that tenant, and — because a column is only read if a query needs it — only the queries that actually touch the damaged column. "Tenant bravo cannot run similarity search on this partition" is something an operator can act on. "The store is corrupt" is not.
+
+### Buckets: shared and dedicated
+
+Large tenants get a **dedicated bucket** and share a part with nobody. Small tenants are hashed (with SHA-256 — a tenant must not be able to *choose* their bucket by choosing their id) into **shared buckets**, because a store with ten thousand tenants cannot afford ten thousand sets of partitions.
+
+### What a shared bucket does and does not hide
+
+In a shared bucket, part-level metadata naturally describes the *bucket*, not the tenant. So the metadata a **query** can observe is scoped per tenant: every part carries a per-tenant section, and a query reads its own and no other.
+
+- *"Does this part contain attribute key X?"* is answered **per tenant**.
+- A **zone map is a zone map for one tenant** — which closes the leak and also prunes better.
+- No row, count, error, or execution counter reveals another tenant's data.
+
+**What is not hidden, stated plainly:** the union attribute-key dictionary and the tenant list are in the manifest bytes, because the dictionary is what *decodes* the attribute column and the tenant list is what *prunes* the part.
+
+> **An operator with raw disk access to a shared bucket can see which tenants share it, and the union of their attribute keys. No query can.**
+
+If that is unacceptable for a given tenant, they get a **dedicated bucket** — and a dedicated bucket holding two tenants is *refused at commit*, because if it were accepted, every isolation claim resting on dedicated buckets would be false and nothing would notice. S14's envelope encryption closes the disk layer properly.
+
+This is a deliberate, logged decision ([D-030](DECISIONS.md)), not an oversight. A seam you have written down is a seam you can close later; a seam you have not is a breach you find out about from someone else.

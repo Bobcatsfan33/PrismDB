@@ -16,7 +16,13 @@
     "           RATIONALE, pointed at prose, which is reviewable.",
     "",
     "The distinction exists to be abuse-proof: without it, every inconvenient constant",
-    "gets reclassified as policy to escape the evidence requirement."
+    "gets reclassified as policy to escape the evidence requirement.",
+    "",
+    "Charter C-3: a `tuned` entry also records the golden-corpus version it was derived",
+    "against, declares its policy bounds with a rationale for why measurement cannot see",
+    "them, and is marked corpus_conditional when derived on a hash-embedder corpus.",
+    "corpus_conditional means: we already know this value may move. Issue #3 tracks",
+    "re-deriving every one of them on a real-embedding corpus."
   ],
   "constants": [
     {
@@ -25,7 +31,16 @@
       "kind": "tuned",
       "evidence": "testing/evidence/nprobe.json",
       "evidence_key": "chosen_nprobe",
-      "rule": "the smallest probe count whose p1 recall@10 clears 0.8 on the golden corpus. Chosen on the TAIL, not the mean: at nprobe=1 the mean is 0.904 while five queries return nothing at all."
+      "rule": "the smallest probe count whose p1 recall@10 clears 0.8 on the golden corpus. Chosen on the TAIL, not the mean: at nprobe=1 the mean is 0.904 while five queries return nothing at all.",
+      "corpus_version": "v1",
+      "corpus_conditional": true,
+      "corpus_conditional_reason": "derived on the deterministic hash-embedder corpus, whose motifs are unusually well-separated. On a real embedding space this value may move -- issue #3.",
+      "policy_bounds": [
+        {
+          "bound": "chosen on the p1 tail, not the mean",
+          "why_measurement_cannot_see_it": "A mean is not a policy. At nprobe=1 the mean recall is 0.904 while five queries return NOTHING AT ALL. Optimising the mean is how a system with total failures in it gets shipped as '90% accurate'."
+        }
+      ]
     },
     {
       "name": "BLOCK_SIZE",
@@ -33,7 +48,16 @@
       "kind": "tuned",
       "evidence": "testing/evidence/block-size.json",
       "evidence_key": "chosen_block_size",
-      "rule": "the block size minimising physically-read bytes across the golden query set (whole blocks, frame headers and over-read included, measured by the reader itself), subject to the manifest block directory staying under 4 bytes/row so a billion-row part remains cheap to open. Was 64 KiB in S1 by convention; measurement showed that cost a 247x read amplification."
+      "rule": "the block size minimising physically-read bytes across the golden query set (whole blocks, frame headers and over-read included, measured by the reader itself), subject to the manifest block directory staying under 4 bytes/row so a billion-row part remains cheap to open. Was 64 KiB in S1 by convention; measurement showed that cost a 247x read amplification.",
+      "corpus_version": "v1",
+      "corpus_conditional": true,
+      "corpus_conditional_reason": "derived on the deterministic hash-embedder corpus, whose motifs are unusually well-separated. On a real embedding space this value may move -- issue #3.",
+      "policy_bounds": [
+        {
+          "bound": "manifest block directory <= 4 bytes/row",
+          "why_measurement_cannot_see_it": "The directory is read IN FULL on every part open, including the opens that then prune the part away without reading a column. At a 2,000-row corpus that term is invisible, so the byte-count objective collapses onto the smallest candidate -- which at 512-byte blocks would give a billion-row part a ~16 GB directory that every reader must load before it can decide the part is irrelevant. No number of saved read-bytes buys that back."
+        }
+      ]
     },
     {
       "name": "DEFAULT_CANDIDATES",
@@ -41,7 +65,16 @@
       "kind": "tuned",
       "evidence": "testing/evidence/widths.json",
       "evidence_key": "chosen_candidates",
-      "rule": "swept JOINTLY with DEFAULT_RERANK against the frozen golden corpus, holding nprobe at its own receipted value. They interact -- the candidate width decides who is allowed to be reranked, the rerank width decides how many of them actually are -- so an independent single-axis sweep of either measures a cross-section of a surface and reports it as the surface. Among the points clearing both tail floors (p1 recall@10 >= 0.8 AND zero_recall_queries == 0, the same floors nprobe was chosen against), smallest rerank first, then smallest candidates."
+      "rule": "swept JOINTLY with DEFAULT_RERANK against the frozen golden corpus, holding nprobe at its own receipted value. They interact -- the candidate width decides who is allowed to be reranked, the rerank width decides how many of them actually are -- so an independent single-axis sweep of either measures a cross-section of a surface and reports it as the surface. Among the points clearing both tail floors (p1 recall@10 >= 0.8 AND zero_recall_queries == 0, the same floors nprobe was chosen against), smallest rerank first, then smallest candidates.",
+      "corpus_version": "v1",
+      "corpus_conditional": true,
+      "corpus_conditional_reason": "derived on the deterministic hash-embedder corpus, whose motifs are unusually well-separated. On a real embedding space this value may move -- issue #3.",
+      "policy_bounds": [
+        {
+          "bound": "candidates >= rerank",
+          "why_measurement_cannot_see_it": "A rerank budget wider than the candidate list is not a configuration, it is a misunderstanding: you cannot exactly score rows that never entered the heap. Points where rerank > candidates are really just 'rerank = candidates' and would pad the receipt."
+        }
+      ]
     },
     {
       "name": "DEFAULT_RERANK",
@@ -49,7 +82,16 @@
       "kind": "tuned",
       "evidence": "testing/evidence/widths.json",
       "evidence_key": "chosen_rerank",
-      "rule": "swept JOINTLY with DEFAULT_CANDIDATES; see that entry. THE RECALL FLOORS DO NOT BIND ON THIS CORPUS -- every point in the grid clears them, because PQ's top-10 already contains the true top-10 -- so the binding constraint is MIN_PAGEABLE_ROWS: the paginated result set IS the rerank survivor set, and rerank=10 with a page size of 10 would make the cursor decorative. Rerank leads the ordering because it is the expensive control: an exact vector is ~32x a coded row."
+      "rule": "swept JOINTLY with DEFAULT_CANDIDATES; see that entry. THE RECALL FLOORS DO NOT BIND ON THIS CORPUS -- every point in the grid clears them, because PQ's top-10 already contains the true top-10 -- so the binding constraint is MIN_PAGEABLE_ROWS: the paginated result set IS the rerank survivor set, and rerank=10 with a page size of 10 would make the cursor decorative. Rerank leads the ordering because it is the expensive control: an exact vector is ~32x a coded row.",
+      "corpus_version": "v1",
+      "corpus_conditional": true,
+      "corpus_conditional_reason": "derived on the deterministic hash-embedder corpus, whose motifs are unusually well-separated. On a real embedding space this value may move -- issue #3.",
+      "policy_bounds": [
+        {
+          "bound": "rerank >= MIN_PAGEABLE_ROWS (50)",
+          "why_measurement_cannot_see_it": "The paginated result set IS the rerank survivor set (docs/QUERY-CONTRACT.md \u00a74). A rerank width of 10 with a default page size of 10 makes the first page the entire result and the cursor decorative. Recall cannot see this -- and on this corpus the recall floors do not bind at all, so without the bound the sweep chooses rerank=10."
+        }
+      ]
     },
     {
       "name": "MAX_ATTRIBUTE_KEYS",

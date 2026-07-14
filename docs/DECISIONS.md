@@ -45,6 +45,24 @@ In S2 a change to the corpus *generator* silently changed the corpus, and `make-
 
 `testing/golden/v1/corpus.tsv` is byte-identical to the corpus S0 committed. It is only *because* it never moved that S1's recall-tail finding — and every constant derived since — still means anything.
 
+## C-3 — A sweep declares its policy bounds, and a boundary optimum is an artifact
+**S4. Architect's standing rule.** Formalizes the pattern that has now appeared three times.
+
+Every C-1 sweep must:
+
+1. **Declare its policy bounds explicitly**, in the receipt, each with a **written rationale for why measurement cannot see it.** A tuned objective almost always sits inside a constraint the numbers do not contain. Three examples, all real:
+   - `BLOCK_SIZE`: minimise bytes read — *subject to* the manifest block directory staying under 4 bytes/row, because it is read in full on every part open and a billion-row part would otherwise carry a 16 GB directory. The byte count cannot see that; it only sees a 2,000-row corpus where the manifest term is invisible.
+   - `DEFAULT_RERANK`: smallest width clearing the recall floors — *subject to* `MIN_PAGEABLE_ROWS = 50`, because the paginated result set **is** the rerank survivor set and a width of 10 makes the cursor decorative.
+   - `DEFAULT_NPROBE`: chosen on the **tail**, not the mean — because a mean of 0.904 with five queries returning nothing is not a 90% system.
+
+2. **Treat an optimum on the boundary of its grid as presumptively an artifact.** A sweep whose winner is its own smallest or largest candidate has not found an optimum; it has hit a wall. **Expand the grid, or find the missing constraint, before committing the receipt.** Both block-size sweeps hit this: the first collapsed onto 4 KiB (the smallest candidate offered), and extending the range downward showed the true bottom was 512 B — at which point the *missing constraint* was the manifest budget, not a wider grid. The evidence tests now assert the chosen value is strictly inside the swept range.
+
+3. **Record the golden-corpus version that produced it.** A receipt that does not name its corpus is not interpretable once the corpus moves — and under C-2 corpora are versioned precisely so that they can move without invalidating history.
+
+4. **Mark constants derived on a hash-embedder corpus `corpus_conditional: true`.** The deterministic hash embedder exists so that tests and baselines are reproducible with no weights and no network. It is the right tool for that and the **wrong corpus to tune an index on**: its motifs are unusually well-separated, which is exactly why the `(candidates × rerank)` sweep found the recall floors *did not bind at all*. Every constant so marked is a constant we already know may move.
+
+**[Issue #3](https://github.com/Bobcatsfan33/PrismDB/issues/3) files the work**: create a real-embedding golden corpus (small open model, CPU, checksum-pinned, frozen per C-2) and re-derive every C-1 sweep against it. **Not deferred to S13** — S13 is the production GPU model plane, which is not a prerequisite for running one small model once, offline, and committing its output. Waiting means every constant derived between now and then is derived on a corpus we already know is unrepresentative.
+
 ---
 
 ## D-001 — `docs/PRISM.md` is the canonical v2 text — *verified*
@@ -266,3 +284,79 @@ The parity tests assert **the physical-execution counters match, not just the ro
 **The parser is network-facing input**, so S1's discipline applies in full: statement bytes, token count, expression depth, `IN`-list length and projection count are all bounded, and every bound is **named in its error** — "syntax error" is not something an operator can act on. The depth counter is the one that matters: a recursive-descent parser without one is a stack overflow waiting for `((((...))))`, and a stack overflow is a *process death*, not an error — it cannot be caught, reported, or attributed to the query that caused it.
 
 **Two bugs found:** an ungrouped aggregate over an empty set returned **zero rows** instead of one row saying zero (which makes "nothing matched" indistinguishable from "the query failed"), and `ORDER BY` was silently ignored rather than refused (which would let a caller believe they had asked for an order they did not get).
+
+## D-028 — Partition metadata lives in the **catalog**, not in the part manifests
+**S4. Directive 2 forced this, and it is the most consequential design decision in the sprint.**
+
+The directive: *"'physically impossible' must be testable, so define it as an I/O property: a query's execution trace never touches a byte range belonging to another tenant's partition. The strongest gate test: fill other tenants' partitions with unreadable garbage — every tenant-A query still returns correct results, because it never looked."*
+
+Until S4, pruning opened **every part's manifest** to decide which parts to skip. That means a tenant-A query already read bytes belonging to tenant B's parts — so the isolation claim was false in exactly the sense the directive cares about, and one corrupt part anywhere broke every query in the store.
+
+**Pruning that must open a manifest to decide whether to open a manifest is not isolation.**
+
+So the partition key, tenant list and zone map now live in the **catalog snapshot** (`PartEntry::Located`), above the parts. A part outside a query's partitions is never opened, never checksummed, never read. `a_query_never_touches_another_tenants_partition_even_if_it_is_garbage` shreds every non-alpha partition — manifests, columns, everything — and alpha's scalar, semantic, hybrid and aggregate queries all still answer correctly.
+
+Pre-S4 snapshots deserialize as `PartEntry::Legacy` (a bare part id) and fall back to opening the manifest, which is exactly the old behaviour. Old stores keep working; they simply do not get the new guarantee until a merge rewrites them.
+
+**A second property fell out for free:** the blast radius is now localized **per column** as well as per tenant. Corrupting `pq.codes` in one of bravo's parts breaks bravo's *similarity search* and leaves bravo's `COUNT(*)` working — because a count does not read the compressed codes. "Tenant bravo cannot run similarity search on this partition" is a far more actionable thing to tell an operator than "the store is corrupt".
+
+## D-029 — Attribute promotion is a schema *event*, and the two representations are a dual door
+**S4. Directive 4, and [issue #2](https://github.com/Bobcatsfan33/PrismDB/issues/2).**
+
+Promotion is **versioned and generation-like, never an in-place rewrite.** A part is written either promoting a key or not; existing parts are never touched. So the two representations — a typed top-level column and an entry in the attribute map — **coexist across parts of different ages**, and every reader dispatches on which one a given part uses. A merge is what migrates a part forward onto the current promotion scheme, exactly as it migrates a format version or a generation.
+
+**The promoted key is removed from the map** in a part that promotes it. Storing it twice would make promotion cost storage rather than save it, and leave two sources of truth for one value. That is precisely why the S4 extension is **required**: a reader that ignored it would decode the map, not find the key, and report it as *absent* — silently wrong answers rather than an error.
+
+**The dual-door test is the S4 gate that matters most.** Two stores, identical but for promotion; every query must return identical rows **and identical logical counters** — same parts opened, same rows scanned, same rows passing the filter. If promotion changed what the engine *considered*, it would be a different query wearing the same text.
+
+`physical_bytes_read` is the **one counter that legitimately differs**, and the test asserts it differs *downward* — because if promotion did not read fewer bytes, it bought nothing. Measured: **181,489 → 118,440 bytes (−35%)** on a two-key predicate, with an identical answer.
+
+That assertion caught a real bug immediately. The first implementation re-read all three column files **on every row**, so promotion read *more* bytes than the map it replaced. Asserting the win, rather than assuming it, is what found that. It also exposed that `COUNT(*)` was materializing every column of every row to answer a question about the *number* of rows — now it materializes nothing.
+
+**Promotion is invisible to an event.** An event read out of a promoted part is byte-identical to the same event read out of a mapped one; the promoted key is re-attached into the map on read. Promotion is a storage decision, not a schema change, and if it were observable every equivalence in the system would quietly stop holding.
+
+## D-030 — The shared-bucket seam: query-layer isolation is complete; disk-layer co-tenancy is documented and accepted
+**S4. Directive 3 required a deliberate choice, and this is it.**
+
+In a **shared** bucket, part-level metadata describes the *bucket*, not the tenant: one `time_min`/`time_max` pair, one cost range, one union attribute-key dictionary, one set of centroid ranges, one tenant list. **Every one of those tells tenant A something about tenant B.**
+
+Three options were on the table: scope the metadata per tenant; document and accept the leak; or abolish shared buckets (which destroys the small-tenant economics that shared buckets exist for). We did the first for everything a query can observe, and the second — explicitly — for what remains.
+
+### What is scoped (enforced)
+
+Every part carries a **per-tenant section** (`TenantStats`) in the S4 extension: rows, time range, cost range, error/success flags, and **the attribute keys that tenant uses**. A query reads *its own section and no other*.
+
+- *"Does this part contain key X?"* is answerable **per tenant**. Tenant A cannot learn that tenant B uses `b.secret.key`.
+- A **zone map is a zone map for one tenant**. If A's rows span one minute and B's span an hour, A skips the part on a query outside A's minute — even though the part as a whole overlaps. This both closes the leak *and* prunes better, which is the pleasant case where the secure thing is also the fast thing.
+- No count, row, error message or counter reveals another tenant's data. `a_shared_bucket_leaks_no_metadata_through_any_query_surface` asserts it.
+
+### What is **not** hidden (documented and accepted)
+
+The **union attribute-key dictionary** and the **tenant list** are in the manifest bytes. They have to be: the dictionary is what *decodes* the attribute column, and the tenant list is what *prunes* the part. So:
+
+> **An operator with raw disk access to a shared bucket can see which tenants share it, and the union of their attribute keys. No query can.**
+
+That is the seam, stated plainly rather than pretended away. The threat model is explicit:
+
+| layer | co-tenancy visible? |
+|---|---|
+| any query surface (rows, counts, errors, counters, `EXPLAIN`) | **no** — enforced, tested |
+| raw disk / backup access to a shared bucket's manifests | **yes** — accepted |
+
+**Two mitigations, both real.** A tenant who cannot accept this gets a **dedicated bucket** — `--dedicated whale` — and shares a part with nobody; `a_dedicated_bucket_shares_a_part_with_nobody` enforces that a dedicated bucket holding two tenants is *refused at commit*, because if it were accepted every isolation claim resting on dedicated buckets would be false and nothing would notice. And S14's envelope encryption closes the disk layer properly, per tenant.
+
+**Bucket assignment is SHA-256, not a fast hash.** A tenant must not be able to *choose* which bucket they land in by choosing their id: co-tenancy is our decision, not theirs, and an attacker who can steer themselves into a chosen victim's bucket has turned a metadata question into a targeting one.
+
+## D-031 — Duplicate reconciliation is partition-scoped
+**S4. A consequence of partitioning that had to be found, and was — by a failing test.**
+
+A merge collapses each *partition*; it never collapses partitions into each other, because a part spanning two buckets is a part a query for one tenant has a reason to open on behalf of another. So merge-time duplicate reconciliation ([D-012](DECISIONS.md): last-write-wins by `event_time`) now only sees collisions **within a partition**.
+
+A duplicate whose `event_time` moved it into a different time window would therefore survive as two rows. **This is prevented at admission, not at merge:** the S2 idempotency index refuses same-key-different-content as an `idempotency_conflict` and dead-letters it. A *replay* — same key, same content — necessarily has the same `event_time`, therefore the same window, therefore the same partition, and *is* reconciled. Merge-time reconciliation remains exactly what it always was: the backstop for duplicates that predate the idempotency window, which by construction share a partition.
+
+The only way to produce a cross-partition duplicate is the S0 loader (`prism ingest`), which bypasses admission **on purpose** — it is a bulk loader, not a production path. Noted here so nobody rediscovers it as a bug.
+
+## D-032 — An unknown CLI flag is an error
+**S4.** Found while demonstrating promotion: `--promot gen_ai.system` was **silently ignored**, and the store was created without the promotion its operator asked for. They would have discovered it months later, from a query reading more bytes than it should.
+
+A silently-ignored flag on a command that *defines a store's configuration* is not a usability wart, it is a correctness bug with a very long fuse. Unknown flags are now rejected, with a suggestion.

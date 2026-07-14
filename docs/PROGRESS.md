@@ -8,8 +8,8 @@ Sprint gates from [PRISM.md](PRISM.md) Part IV. **A sprint is done when its gate
 | **S1** | Part format + recovery hardening | 10,000 randomized kill/reopen runs → old-or-new, never hybrid; all compat fixtures open, all corrupt fixtures rejected specifically; no untrusted length allocates unbounded | ✅ **complete** |
 | **S2** | Production ingestion + OTel GenAI schema | replaying acknowledged input loses no rows; offsets never advance pre-publication; one tenant cannot starve another | ✅ **complete** |
 | **S3** | Minimal SQL + scalar analytics | scalar-subset parity against an oracle; hybrid smoke queries identical through SQL | ✅ **complete** |
-| S4 | Hybrid partitioning + typed columns + data skipping | selective benchmarks read only eligible partitions; cross-tenant reads impossible even with malformed metadata | ⬜ **next** |
-| S5 | Immutable generations | queries available throughout a two-generation migration; rollback is catalog-only; no part decodes with the wrong codebook | ⬜ |
+| **S4** | Hybrid partitioning + typed columns + data skipping | selective benchmarks read only eligible partitions; cross-tenant reads impossible even with malformed metadata | ✅ **complete** |
+| S5 | Immutable generations | queries available throughout a two-generation migration; rollback is catalog-only; no part decodes with the wrong codebook | ⬜ **next** |
 | S6 | CPU scan engine | bit/epsilon equivalence to the scalar oracle; zero heap allocation in the block loop | ⬜ |
 | S7 | GPU compressed scan + rerank | GPU meets recall/tolerance vs the CPU oracle; p99 bounded under saturation; speedups end-to-end | ⬜ |
 | S8 | Cost-based hybrid optimizer + full SQL semantics | SQL ≡ direct-executor results; fuzzing cannot bypass tenant policy; plan selection beats any fixed plan | ⬜ |
@@ -359,13 +359,90 @@ Also refused rather than ignored: a second statement (`SELECT 1; DROP TABLE even
 
 ---
 
-## S4 — next
+## S4 — complete
 
-**Hybrid partitioning + typed columns + data skipping.** Outer partitions (tenant-bucket × time × generation); typed scalar columns with null maps and dictionary/delta compression; block min/max, low-cardinality sets, bounded Blooms.
+**Gate:** *selective benchmarks read only eligible partitions/blocks; recall within tolerance of S0; **cross-tenant reads impossible even with malformed metadata or a poisoned cache**.*
 
-**Gate:** selective benchmarks read only eligible partitions/blocks; recall within tolerance of S0; **cross-tenant reads impossible even with malformed metadata or a poisoned cache**.
+### 1. "Physically impossible" is now an I/O property
 
-**Carry into S4:**
-- **Typed columns and partition metadata land as *flagged extensions on v3*, not v4** ([D-020](DECISIONS.md)). The feature bits are already reserved and already refused by this build.
-- **Attribute promotion is [issue #2](https://github.com/Bobcatsfan33/PrismDB/issues/2)** — and it belongs here, because promotion only pays once the block-skipping machinery it depends on exists. Its acceptance criteria demand the promotion decision itself be *derived* from committed evidence (cardinality, selectivity, query frequency) rather than a hand-picked list of key names — charter C-1 applies.
-- **Tenant isolation becomes structural.** Today it is a filter fused into the scan plus a pruning predicate — strong, and tested against 8,000 fuzzed statements, but still a *check*. S4's outer partitioning makes a cross-tenant read *physically impossible*, which is a different and better kind of guarantee. The S4 gate says "even with malformed metadata", so the fuzzing moves down a layer: poison the manifest, not the SQL.
+The architect refused to let this stay a slogan: *define it as an I/O property — a query's execution trace never touches a byte range belonging to another tenant's partition.*
+
+That has a sharp consequence, and it reshaped the sprint. **Until S4, pruning opened every part's manifest** to decide which parts to skip — so a tenant-A query *already* read tenant B's bytes, and one corrupt part broke every query in the store. **Pruning that must open a manifest to decide whether to open a manifest is not isolation.**
+
+So the partition key, tenant list and zone map moved into the **catalog snapshot**, above the parts ([D-028](DECISIONS.md)).
+
+**The gate test does the strongest thing we could think of:** it fills every non-`alpha` partition with unreadable garbage — manifests, columns, every byte — and then runs alpha's scalar, semantic, hybrid, aggregate and time-bounded queries. All of them answer correctly. **Because they never looked.**
+
+And the shredded tenants get an **error**, not silence. Their data really is gone, and reporting zero rows would be a lie.
+
+**A second property fell out for free:** blast radius is localized **per column** as well as per tenant. Corrupting `pq.codes` in one of bravo's parts breaks bravo's *similarity search* and leaves bravo's `COUNT(*)` working — because a count does not read the compressed codes. "Tenant bravo cannot run similarity search on this partition" is actionable. "The store is corrupt" is not.
+
+### 2. The shared-bucket seam — chosen deliberately, logged
+
+In a shared bucket, part-level metadata describes *the bucket*, not the tenant: one time range, one cost range, one union key dictionary, one tenant list. Every one of those tells tenant A something about tenant B.
+
+**What is scoped (enforced and tested):** every part carries a **per-tenant section**, and a query reads its own and no other. *"Does this part contain key X?"* is answerable **per tenant**. A **zone map is a zone map for one tenant** — which closes the leak *and* prunes better, the pleasant case where the secure thing is also the fast thing.
+
+**What is not hidden (documented and accepted):**
+
+> An operator with **raw disk access** to a shared bucket can see which tenants share it, and the union of their attribute keys. **No query can.**
+
+The dictionary has to be there — it is what *decodes* the attribute column. The tenant list has to be there — it is what *prunes* the part. Mitigations are real: a **dedicated bucket** (`--dedicated whale`) shares a part with nobody, and a dedicated bucket holding two tenants is **refused at commit**, because if it were accepted every isolation claim resting on it would be false and nothing would notice. S14's envelope encryption closes the disk layer properly. ([D-030](DECISIONS.md), [query contract §8](QUERY-CONTRACT.md))
+
+Bucket assignment is **SHA-256**, not a fast hash: a tenant must not be able to *choose* their bucket by choosing their id. An attacker who can steer themselves into a chosen victim's bucket has turned a metadata question into a targeting one.
+
+### 3. Promotion is a dual door — the gate that matters most
+
+Promotion is a **versioned, generation-like schema event, never an in-place rewrite**. The typed column and the attribute map **coexist across parts of different ages**, and a merge migrates a part forward — the same mechanism as every other migration here.
+
+The equivalence test: two stores, identical but for promotion. Every query must return **identical rows and identical logical counters** — same parts opened, same rows scanned, same rows passing the filter. If promotion changed what the engine *considered*, it would be a different query wearing the same text.
+
+`physical_bytes_read` is the **one counter that legitimately differs**, and the test asserts it differs **downward** — because if promotion did not read fewer bytes, it bought nothing:
+
+```
+SELECT count(*) FROM events
+ WHERE attributes['gen_ai.system'] = 'anthropic'
+   AND attributes['gen_ai.usage.input_tokens'] > 2000
+
+  plain      count=186   physical_bytes = 181,489
+  promoted   count=186   physical_bytes = 118,440    (-35%)
+```
+
+**Asserting the win rather than assuming it caught a real bug instantly:** the first implementation re-read all three column files *on every row*, so promotion read **more** bytes than the map it replaced. It also exposed that `COUNT(*)` was materializing every column of every row to answer a question about the *number* of rows. It now materializes nothing.
+
+Promotion is **invisible to an event**: a promoted part reads back byte-identical to a mapped one. It is a storage decision, not a schema change — if it were observable, every equivalence in the system would quietly stop holding. And a key used with two value types is **refused**: a promoted column is typed, and a key that is an int on one row and a string on another is a map entry pretending to be a column.
+
+### 4. Pruning, and the fuzz corpus one layer down
+
+- **Zero false negatives**, as a property test over 10,000 randomized part-metadata/query pairs. Pruning may be too generous — that costs a scan. It may never be too eager: a part excluded that held a matching row is a **lost row**, and pruning that can lose a row is not pruning, it is sampling.
+- **Partition metadata is untrusted input.** The S3 fuzz corpus moved down a layer, as planned: 5,000 byte flips, every truncation length, `u32::MAX` planted at every aligned offset, 5,000 pieces of garbage. Decode it, or refuse it with an error naming the byte. Never panic, never allocate on a number a stranger sent. A zone map with `time_min > time_max` is **refused** — a zone map that cannot be true is worse than no zone map, because it is *trusted*.
+- **Data skipping:** a query for one tenant in one hour, over a store with 20+ partitions, opens **at most 2 parts**. As a fact about the counters.
+
+### 5. Charter amendment C-3 — and the constants are now marked honest
+
+Formalizes the pattern that has appeared three times: **a sweep declares its policy bounds, with a written rationale for why measurement cannot see them**, and **an optimum on the boundary of its grid is presumptively an artifact** — expand the grid or find the missing constraint before committing the receipt.
+
+Every receipt now records the **golden-corpus version** that produced it, and every constant derived on a hash-embedder corpus is marked **`corpus_conditional: true`**. That is honest, and it is not a fix. The hash embedder exists so tests are reproducible with no weights and no network — it is the right tool for that and the **wrong corpus to tune an index on**. Its motifs are unusually well-separated, which is exactly why the `(candidates × rerank)` sweep found the recall floors *did not bind at all*.
+
+**[Issue #3](https://github.com/Bobcatsfan33/PrismDB/issues/3)** files the fix: build a real-embedding golden corpus (small open model, CPU, checksum-pinned, frozen under C-2) and re-derive every C-1 sweep against it. **Not deferred to S13** — S13 is the production GPU model plane, which is not a prerequisite for running one small model once, offline, and committing its output.
+
+### Bugs found
+
+- **Promotion read *more* bytes than the map** — the columns were re-read per row. Caught by asserting the win.
+- **`COUNT(*)` materialized every column of every row.** It now materializes none.
+- **The embedding-space filter stopped counting its own pruning** when catalog pruning arrived, so a narrowing the caller could not see in the counters was a narrowing they could not audit.
+- **An unknown CLI flag was silently ignored** — `--promot gen_ai.system` created a store without the promotion its operator asked for ([D-032](DECISIONS.md)).
+- **The build refused its own parts** when the S4 extension was not registered in `SUPPORTED_EXTENSIONS` — which is the required-extension mechanism working exactly as designed, loudly, at the commit that would have published them.
+
+---
+
+## S5 — next
+
+**Immutable generations.** Content-addressed model/preprocessing/coarse/OPQ/PQ generation records; codebooks trained from stratified/reservoir samples (never just the first batch); mixed-generation planning with per-generation ADC tables; a create/canary/compare/rollback/retire lifecycle; the score-bridge rule enforced.
+
+**Gate:** queries available throughout a two-generation migration; rollback is catalog-only; property/fault tests prove no part decodes with the wrong codebook.
+
+**Carry into S5:**
+- **Most of the machinery already exists** — generations are content-addressed (S0), a part pins its generation, mixed-generation queries build one ADC table per generation, and a cross-space query is *refused* rather than silently merged (invariant 9). S5 is the **lifecycle**: canary a new generation, compare it, promote or roll it back, retire the old one.
+- **Generation is part of the partition key**, so a re-embed necessarily writes into *new* partitions. That is right — a partition whose parts disagree about what their bytes mean is not a partition — but it means the merge scheduler must not try to combine across generations, and S10 will need to know that.
+- **The open tension flagged in S0 comes due here:** a re-embed silently invalidates any `NOVELTY … AGAINST` drift baseline, because a baseline's centroids belong to a generation and invariant 9 forbids cross-space comparison. S9 owns novelty, but **S5 is where the migration that breaks it happens.** Decide the baseline re-projection story now, not when a customer's drift alarms go quiet.

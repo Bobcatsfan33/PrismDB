@@ -118,6 +118,22 @@ jobs:
       - run: cargo test --release -p prism-cli --test sql -- --nocapture
       - run: cargo test --release -p prism-sql
 
+  partition:
+    name: the S4 gate — isolation as an I/O property, and the promotion dual door
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Two gates. The first fills every other tenant's partitions with unreadable
+      # garbage and asserts a tenant-A query still answers correctly -- because it never
+      # looked. The second asserts a promoted key and a mapped key are the SAME DOOR:
+      # identical rows and identical logical counters, with physical_bytes_read strictly
+      # LOWER -- because if promotion did not read fewer bytes, it bought nothing.
+      # Plus 10,000 randomized pruning cases (zero false negatives) and the S1 fuzz
+      # discipline applied one layer down, to partition metadata.
+      - run: cargo test --release -p prism-cli --test partition -- --nocapture
+
   golden-frozen:
     name: the golden corpus has not moved (charter C-2)
     runs-on: ubuntu-latest
