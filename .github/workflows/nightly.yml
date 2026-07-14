@@ -1,0 +1,71 @@
+name: nightly
+
+# The S1 acceptance gate, at full size.
+#
+# > "10,000 randomized kill/reopen runs yield old-or-new snapshot, never hybrid."
+#
+# It takes ~11 minutes, which is too long for every push and far too short to be
+# an excuse not to run it every night.
+on:
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  campaign:
+    name: 10,000-run kill/reopen campaign
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: kill the writer 10,000 times at random durability boundaries
+        run: |
+          PRISM_CAMPAIGN_RUNS=10000 \
+            cargo test --release -p prism-cli --test campaign -- --ignored --nocapture
+
+  deep-fuzz:
+    name: extended format fuzzing
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --release -p prism-part --test fuzz -- --nocapture
+
+  nprobe-provenance:
+    name: the default nprobe still holds on a fresh sweep
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release
+      # Re-derive the default from scratch and confirm the committed receipt is
+      # still the right answer. A default that quietly stops being justified by
+      # its own evidence is exactly the "magic constant" the charter forbids.
+      - name: re-derive and compare
+        run: |
+          set -euxo pipefail
+          P=./target/release/prism
+          $P init --path /tmp/g --dim 64 --nlist 32 --pq-m 8 --seed 1234
+          $P ingest --path /tmp/g --file testing/golden/corpus.tsv
+          $P golden sweep --path /tmp/g --golden testing/golden/expected.json \
+             --out /tmp/prov.json --p1-floor 0.8 >/dev/null
+          python3 - <<'PY'
+          import json
+          fresh = json.load(open("/tmp/prov.json"))
+          committed = json.load(open("testing/golden/nprobe-provenance.json"))
+          print(f"fresh sweep chose nprobe={fresh['chosen_nprobe']}, "
+                f"committed receipt says {committed['chosen_nprobe']}")
+          assert fresh["chosen_nprobe"] == committed["chosen_nprobe"], \
+              "the committed nprobe provenance no longer reproduces; re-derive it"
+          print("the default is still justified by its own evidence.")
+          PY

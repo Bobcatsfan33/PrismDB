@@ -4,9 +4,10 @@ Judgment calls made where [PRISM.md](PRISM.md) is silent. The rule: **where the 
 
 ---
 
-## D-001 — `docs/PRISM.md` is the pasted v2 text, not a file copied off disk
-**S0.** The build instruction said to copy `06-prism-overview-and-roadmap-v2.md` from the working directory. That file does not exist anywhere on the machine; the v2 master document was supplied inline instead. `docs/PRISM.md` is therefore that text, verbatim and unedited.
-**Revisit if:** the canonical file turns up and differs. Diff it against `docs/PRISM.md` before trusting either.
+## D-001 — `docs/PRISM.md` is the canonical v2 text — *verified*
+**S0, closed in S1.** The build instruction said to copy `06-prism-overview-and-roadmap-v2.md` from the working directory; no such file existed anywhere on the machine, so `docs/PRISM.md` was written from the v2 text supplied inline, and this entry flagged the risk.
+
+**The canonical file has since been located** (in the architect's outputs directory) and diffed against `docs/PRISM.md`: **byte-identical, 29,080 bytes, zero differences.** The contract is verified rather than assumed. Nothing further to revisit.
 
 ## D-002 — Two dependencies: `serde` and `serde_json`. Nothing else.
 **S0.** The charter says dependency-light. Manifests, catalog snapshots, generation records and CLI output are all JSON, and hand-rolling a JSON parser would be strictly worse than using the standard one — more code, more bugs, no benefit.
@@ -20,17 +21,45 @@ Everything else is implemented in-tree, on purpose:
 **Revisit if:** a hand-rolled primitive shows up as a hotspot in a profile (then swap the *implementation*, keeping the tests), or the CLI grows a surface that genuinely needs a parser.
 
 ## D-003 — The rerank tier is full float32, in a separate file
-**S0.** PRISM.md Part I §5.2 lists four options for the exact-rerank tier (full vectors cold, fp16 with an accuracy contract, re-embed on demand, residual quantization) and deliberately does not choose. S0 has to store *something*, and the choice freezes into the part format.
+**S0. Superseded by D-003-resolved.** PRISM.md Part I §5.2 lists four options for the exact-rerank tier (full vectors cold, fp16 with an accuracy contract, re-embed on demand, residual quantization) and deliberately does not choose. S0 had to store *something*, and the choice was going to freeze into the part format.
 
-Chosen: **full float32, in its own column file (`vectors.f32`), never on the scan path.** It is the boring option and the only one with no accuracy contract to negotiate: the re-rank is exact because the vector is exact. Keeping it in a separate file rather than interleaved is what makes the tier separation physical — the scan reads `pq.codes` and never opens `vectors.f32`, and `bench` reports the two byte counts separately, always.
+Chosen: **full float32, in its own column file, never on the scan path.** The boring option, and the only one with no accuracy contract to negotiate: the re-rank is exact because the vector is exact. Keeping it in a separate file rather than interleaved is what makes the tier separation physical — the scan reads `pq.codes` and never opens the rerank column, and `bench` reports the two byte counts separately, always.
 
-**This is the biggest open cost question in the project.** Full float32 is ~3.07 PB per trillion vectors against ~96 TB for the codes — a 32× multiple that dominates the storage bill, and "cost per billion events retained and queryable" is one of the three numbers the company watches. S0 does not decide it; S0 makes it *measurable* (`rerank_tier_multiple` in `baselines.json`) and *swappable* (one file, one reader).
-**Revisit at:** S1, before the part format hardens, and again at S11 when the two-tier cost becomes a product surface.
+This was flagged as **the biggest open cost question in the project**: full float32 is ~3.07 PB per trillion vectors against ~96 TB for the codes — a 32× multiple that dominates the storage bill, and "cost per billion events retained and queryable" is one of the three numbers the company watches.
+
+## D-003-resolved — The encoding stays float32; the *format* stops assuming it
+**S1. Architect's decision.** Keep float32-cold as the only implemented encoding, and make the format stop hard-coding that assumption.
+
+Every v2 part manifest now carries a **versioned rerank-tier descriptor**: `{ encoding_id, accuracy_contract_id }`. The reader **dispatches** on it (`RerankDescriptor::decode_vector`, `bytes_per_vector`) rather than assuming 4 bytes per dimension anywhere. Centroid marks size their rerank byte ranges from the declared encoding. An id this build does not implement is **refused at open time** with a specific error — never decoded into plausible-looking numbers. `testing/compat/corrupt-v2/unknown-rerank-encoding/` is the fixture that proves it, and it is the fixture that will matter on the day fp16 ships: it is what stops an older binary from silently reading fp16 bytes as float32.
+
+The consequence is the point: **changing the encoding later is a generation migration, never a format break.** Parts are rewritten by a merge into a new encoding, old parts remain readable, and rollback stays a catalog write. The column file is named `rerank.vec`, not `vectors.f32` — a name that hard-codes `f32` becomes a lie the day it is not.
+
+The cost question is not answered, and it is not supposed to be. It is now *changeable* without breaking anyone, and *measurable* (`rerank_tier_multiple` in `baselines.json`, currently exactly 32.0×).
+**Revisit at:** S11, when the two-tier cost becomes a product surface and there is real evidence about what accuracy the rerank tier actually needs.
 
 ## D-004 — Whole-file CRC now; block framing at S1
-**S0.** Each column file carries one CRC-32 over its whole contents in the manifest. The contract wants checksummed *block* framing so that damage localizes to a block (Part III §9) — that is explicitly an S1 deliverable, and building it now would mean designing the block header twice.
-**Consequence today:** a single flipped byte invalidates a whole column rather than a 64 KiB block. Acceptable at S0 scale; not acceptable at object-storage scale.
-**Revisit at:** S1.
+**S0. Done in S1.** Each v1 column file carried one CRC-32 over its whole contents, so a single flipped byte condemned an entire column.
+
+v2 column files are **framed into 64 KiB checksummed blocks**. Damage now localizes to one block and the error names it (`column 'body.data' block 7 failed checksum: expected …, computed …, logical bytes 458752..524288`). A ranged read fetches only the blocks that overlap the range, which is what makes "we read only the ranges we selected" a fact about the syscalls rather than a claim. The block size is a constant, not a per-part field, because a variable block size buys nothing today and would be one more untrusted number to validate.
+
+## D-014 — v2 is written; v1 is still read
+**S1.** The alternative was to declare v1 unreleased (it shipped for one day, to nobody) and regenerate the fixtures at v2 — cheaper, and it would have made `testing/compat/` a directory of bytes that only ever agreed with the code that wrote them.
+
+Instead: **`PartWriter` only writes v2. `PartReader` opens both.** A part announces its format by which manifest file it carries (`manifest.bin` vs `manifest.json`) — the reader never guesses, and a directory with neither is not a part. `legacy_v1.rs` decodes the old JSON manifest into the same in-memory structure, synthesizing the rerank descriptor that v1 implicitly had (float32/exact, because it had no choice). Every reader above that line stops caring which format it came from.
+
+Why it is worth the ~150 lines: the compatibility promise is kept by *keeping it*. It also exercises the exact version-dispatch discipline that D-003-resolved requires for the rerank encoding — the same machinery, proven twice.
+
+**And v1 parts are migrated forward by a merge**, not by a rewrite-in-place: a legacy part is on its own sufficient reason for a merge to run, even when there is nothing to compact. This was a real gap found by a failing test — a single-part v1 store previously had *no way to reach v2 at all*, because merge short-circuited on `parts < 2`. The v1 bytes are never touched; a new v2 part is written and the catalog swapped, so rollback still works.
+
+## D-015 — `fsck` is offline, exhaustive, and does not need a catalog
+**S1.** The contract asks for an "offline format validator". `prism fsck` takes a directory of bytes and answers one question: *is this a part, and is it intact?* No engine, no catalog, no generation, no store. An operator holding a suspicious object out of a backup or an object store must be able to condemn it — or clear it — without standing a database up first.
+
+It reports **every** finding rather than dying on the first, because the blast radius is what an operator needs at 3am, not the first casualty. It also checks two things a checksum cannot: that every stored vector is **unit-norm** (the engine assumes this and never re-checks it, so a part that breaks it produces *silently wrong scores* rather than errors — the worst possible failure), and that rows really are in `(centroid, event_time, event_id)` order (if they are not, a centroid is not a contiguous byte range and probing returns the wrong rows).
+
+## D-016 — Truncation must name itself
+**S1.** Found by a fixture. A truncated column file produced `io error: failed to fill whole buffer` — a generic read failure that tells an operator nothing. The S1 gate says corrupt fixtures must be rejected *with specific errors*; a raw `ErrorKind::UnexpectedEof` is not one.
+
+The reader now stats the column file and checks each block's byte range against its actual length **before** reading, so truncation is reported as `column 'rerank_vectors' is truncated: block 3 needs bytes 196608..262144 of 'rerank.vec', but the file is only 131072 bytes`.
 
 ## D-005 — Oversized bodies are dead-lettered; embedding input is truncated
 **S0.** Two different limits, deliberately:
@@ -77,3 +106,32 @@ Order must be a function of the data, not of the layout. Ties now break on `even
 ## D-013 — Semantic grouping clusters the re-rank survivors
 **S0.** The flagship aggregate — semantic `GROUP BY` over an arbitrarily large *filtered set*, with distributed-mergeable partial states — is S9. S0 delivers the *surface* over the survivors of a top-k: real clusters, real per-cluster scalar aggregates, real exemplar events. The API shape is the one S9 has to satisfy; the execution is not.
 **This is stated as a limit in the README**, because a reader could otherwise reasonably believe the flagship feature is finished.
+
+## D-017 — The default `nprobe` is derived from the tail, and carries a receipt
+**S1. Architect's decision.** PRISM.md Part I §5.3: *"`nlist`/`nprobe` are outputs of recall, skew, filter selectivity and latency targets… No magic constants in docs or defaults without benchmark provenance."* S0's default of 4 was a round number that happened to be right. It is now a *derived* number that is right for a stated reason.
+
+The rule: **the smallest `nprobe` whose p1 recall@10 clears 0.8 on the golden corpus.** Chosen on the **tail**, not the mean, because the mean is exactly what hid the failure in S0. `prism golden sweep` runs it and writes `testing/golden/nprobe-provenance.json`; a test asserts `DEFAULT_NPROBE` still equals `chosen_nprobe` in that file, and that no smaller probe count clears the floor. The constant cannot drift away from its evidence without CI noticing.
+
+The sweep (104 queries, 32 centroids) is unambiguous:
+
+| nprobe | mean | p5 | p1 | min | queries returning **nothing** | scan fraction |
+|---|---|---|---|---|---|---|
+| 1 | 0.904 | 0.200 | 0.000 | 0.000 | **5** | 0.045 |
+| 2 | 0.960 | 0.800 | 0.000 | 0.000 | **2** | 0.076 |
+| 3 | 0.986 | 1.000 | 0.700 | 0.000 | **1** | 0.112 |
+| **4** | **0.998** | **1.000** | **1.000** | **0.800** | **0** | **0.149** |
+
+A mean of 0.904 at `nprobe=1` is how a system with five total failures in it gets described as "90% accurate".
+
+## D-018 — The golden corpus asks hard questions on purpose
+**S1. Architect's decision.** The S0 query set only asked *topic* queries — aimed at the middle of a behavioural motif. Those are easy, and they are not the queries that break.
+
+The golden set now has three classes, and reports recall for each separately:
+
+- **topic** (32 queries) — the middle of a cluster.
+- **cluster-boundary** (56 queries) — half of one motif's vocabulary and half of another's, so the query vector lands *between* two centroids and its true neighbours are split across them.
+- **hybrid** (16 queries) — meaning plus a scalar predicate.
+
+At `nprobe=1` the classes diverge completely: **topic queries score a flawless mean of 1.000 with zero failures, while cluster-boundary queries fail outright on 5 of 56.** A benchmark that asked only topic questions would have measured recall 1.000 and concluded that a single probe was enough. That is the whole argument for the boundary class, and it is why `min`, `p1`, `p5`, `zero_recall_queries` and the five worst queries *by name* are now in every recall report.
+
+Adaptive per-query probing — scaling the probe count when the centroid distance margins are tight, which is precisely the boundary case — is [issue #1](https://github.com/Bobcatsfan33/PrismDB/issues/1), targeted at S6. It is deliberately **not** built in S1: it is a planner decision that must be costed against real kernel curves, and those do not exist until the CPU scan engine publishes them.

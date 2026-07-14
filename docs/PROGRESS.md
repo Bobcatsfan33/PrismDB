@@ -5,8 +5,8 @@ Sprint gates from [PRISM.md](PRISM.md) Part IV. **A sprint is done when its gate
 | | Sprint | Gate | Status |
 |---|---|---|---|
 | **S0** | Executable reference slice + oracle harness | clean checkout passes CI; baselines checked in; README quickstart runs | ✅ **complete** |
-| S1 | Part format + recovery hardening | 10,000 randomized kill/reopen runs → old-or-new, never hybrid; all compat fixtures open, all corrupt fixtures rejected specifically; no untrusted length allocates unbounded | ⬜ **next** |
-| S2 | Production ingestion + OTel GenAI schema | replaying acknowledged input loses no rows; offsets never advance pre-publication; one tenant cannot starve another | ⬜ |
+| **S1** | Part format + recovery hardening | 10,000 randomized kill/reopen runs → old-or-new, never hybrid; all compat fixtures open, all corrupt fixtures rejected specifically; no untrusted length allocates unbounded | ✅ **complete** |
+| S2 | Production ingestion + OTel GenAI schema | replaying acknowledged input loses no rows; offsets never advance pre-publication; one tenant cannot starve another | ⬜ **next** |
 | S3 | Minimal SQL + scalar analytics | scalar-subset parity against an oracle; hybrid smoke queries identical through SQL | ⬜ |
 | S4 | Hybrid partitioning + typed columns + data skipping | selective benchmarks read only eligible partitions; cross-tenant reads impossible even with malformed metadata | ⬜ |
 | S5 | Immutable generations | queries available throughout a two-generation migration; rollback is catalog-only; no part decodes with the wrong codebook | ⬜ |
@@ -83,15 +83,121 @@ Single writer, single node, in-process. No SQL. Scalar loops only — no SIMD, n
 
 ---
 
-## S1 — next
+## S1 — complete
 
-**Part format + recovery hardening.** From PRISM.md Part IV:
+**Gate:** *10,000 randomized kill/reopen runs yield old-or-new snapshot, never hybrid; all compatibility fixtures open, all corrupt fixtures rejected with specific errors; no untrusted length allocates unbounded.*
 
-- An explicit **binary manifest**: endianness, feature flags, codec ids, format version. (Today the manifest is JSON and declares its byte order but not its codecs.)
-- **Persisted centroid marks with byte offsets** — already written (`CentroidRange` carries `pq_offset`/`pq_len`/`vec_offset`/`vec_len`, and the reader fetches exactly those ranges); S1 must cover them with the format validator and the fuzzer.
-- **Checksummed block framing**, so damage localizes to a block instead of condemning a whole column ([DECISIONS.md D-004](DECISIONS.md)).
-- An **offline format validator** that can condemn a part without the engine.
-- **Fuzz and property tests** on manifests, offsets, lengths, NaNs, truncation.
-- The **10,000-run randomized kill/reopen campaign** (`testing/faults/campaign.sh`, already written — S1 turns the number up and puts it in a nightly job).
+### 1. Ten thousand crashes, zero hybrids
 
-**Carry into S1:** [D-003](DECISIONS.md) — the exact-rerank tier is currently full float32 and the contract lists four options with different accuracy and cost characteristics. That choice freezes into the part format at S1. Decide it deliberately, before the bytes harden.
+```
+campaign: 10000 runs in 642s
+  crashes that committed:    1465
+  crashes that rolled back:  8535
+  kill points exercised:
+      1465  current.after_rename
+      1445  part.after_rename_before_snapshot
+      1439  part.after_fsync_before_rename
+      1433  merge.after_part_before_commit
+      1431  snapshot.after_write_before_current
+      1395  part.after_write_before_fsync
+      1392  gc.after_first_unlink
+
+  hybrid snapshots: 0
+```
+
+Read the first two numbers together. **1,465 crashes committed data — and exactly 1,465 were kills at `current.after_rename`.** Not one crash at any *earlier* boundary committed anything, across ten thousand attempts.
+
+That is the atomicity claim, measured rather than asserted. Publication happens at one instant — the rename of `CURRENT` — and a crash on either side of it leaves a complete world. Everything written before that instant and then abandoned is an **orphan**: real bytes, checksum-valid, named by no snapshot, visible to no reader, reclaimable only by GC. There is no repair step, no log replay, no half-committed part to reconcile, because there is no state for one to exist in.
+
+Run it yourself: `PRISM_CAMPAIGN_RUNS=10000 cargo test --release -p prism-cli --test campaign -- --ignored --nocapture`. CI runs 400 on every commit and the full 10,000 nightly.
+
+### 2. Every fixture opens; every corruption is named
+
+**17 corrupt fixtures — 12 for v2, 5 for v1 — and every one is refused with an error that says which byte lied.** A generic `io error: failed to fill whole buffer` is a CI failure now, not a pass: an operator woken at 3am cannot act on it.
+
+| Fixture | What it does | What the reader says |
+|---|---|---|
+| `bad-magic` | eight bytes overwritten | *does not begin with the PRSMPART magic; this is not a part file* |
+| `bad-header-crc` | a bit flipped in the header | *header failed checksum: expected 0x7b1b6c8e, computed 0x766a5…* |
+| `bad-body-crc` | a bit flipped in the body | *body failed checksum…* |
+| `future-format` | version set to 999, header re-sealed | *part is format version 999, this build writes version 2* |
+| `unknown-feature` | an unknown feature bit set | *requires feature bits 0x10000000000 that this build does not implement* |
+| `unknown-codec` | codec id 99 | *column `pq_codes` uses codec id 99 (unknown)* |
+| `unknown-rerank-encoding` | rerank encoding id 2 | *declares rerank encoding id 2, which this build cannot decode* |
+| `absurd-length` | 4,294,967,295 centroid ranges | *…(at least 292 GB) but only N bytes remain; refusing to allocate on an untrusted length* |
+| `block-checksum` | one byte inside one block | *column `body.data` **block 0** failed checksum* |
+| `truncated-column` | file cut in half | *column `rerank_vectors` **is truncated**: block 3 needs bytes …* |
+| `bad-offsets` | a string offset 1 TiB into a 13 KB blob, **all checksums repaired** | *offset pair (0, 1099511627776) is outside a 13772-byte blob* |
+| `mutated-codebook` | a centroid edited in place | *generation does not hash to its own id* |
+
+The corrupt fixtures are built by `scripts/partfmt.py` — an **independent Python decoder** of the binary format, not the Rust writer. A fixture generated by the code under test can quietly agree with a bug in it.
+
+### 3. Nothing allocates on an untrusted length
+
+`crates/prism-part/tests/fuzz.rs`, on every commit:
+
+- 4,000 random byte-flip mutations of a real manifest
+- every truncation length from 0 to the full manifest, plus trailing garbage
+- 4,000 pieces of total garbage, half of them prefixed with a valid magic
+- `u32::MAX` planted at every 4-byte-aligned offset in the body, **with both checksums repaired** — the adversary who *can* fix up a CRC, which is precisely the adversary a CRC cannot stop
+- 3,000 checksum-repairing single-bit edits, asserting structural validation catches more of them than it lets through
+- 200 column-byte corruptions, each of which must be caught by a block checksum
+
+The reader must **decode it or refuse it with a specific error**. Never a panic, never an out-of-bounds index, never an allocation on the strength of a number it just read.
+
+### What was built
+
+| | |
+|---|---|
+| **Binary manifest** | magic, format version, byte order, feature bitset, per-column codec ids, self-checksummed header, checksummed body. A part that needs a feature this build has never heard of is **refused**, not guessed at. |
+| **Block framing** | column files are sequences of 64 KiB checksummed blocks. A flipped byte condemns one block and **names it**; a ranged read fetches only the blocks that overlap the range. |
+| **Rerank-tier descriptor** (D-003-resolved) | every part declares `{encoding_id, accuracy_contract_id}` and the reader **dispatches** on it. float32/exact is the only implementation; the descriptor is what makes changing it later a *migration* instead of a *format break*. |
+| **Bounds-checked reader** | `format::Cursor` validates every length against the bytes actually present before reserving anything. |
+| **`prism fsck`** | the offline validator. No catalog, no engine, no database. Reports **every** finding, not the first — plus two things a checksum cannot see: that stored vectors are unit-norm (a part that breaks this produces *silently wrong scores*, not errors) and that rows really are in `(centroid, event_time, event_id)` order. |
+| **v1 still opens** | S0's parts still open, still verify, still answer — and `prism merge` migrates them forward to v2 without touching a single original byte. |
+
+### The recall tail — S0's honest finding, now a gate
+
+S0 reported mean recall@10 of ~0.90 at `nprobe=1` and noted the minimum was 0.000. S1 turns that observation into a mechanism.
+
+The golden corpus now asks **104 questions in three classes**, and the classes are the whole point:
+
+| class | n | what it is |
+|---|---|---|
+| topic | 32 | aimed at the middle of a behavioural motif — the easy case |
+| **cluster-boundary** | 56 | half of one motif's vocabulary, half of another's, so the query lands *between* two centroids and its true neighbours are split across them |
+| hybrid | 16 | meaning plus a scalar predicate |
+
+At `nprobe=1`:
+
+```
+topic             n= 32  mean=1.000  min=1.000  returned nothing: 0
+cluster-boundary  n= 56  mean=0.859  min=0.000  returned nothing: 5
+hybrid            n= 16  mean=0.869  min=0.400  returned nothing: 0
+```
+
+**Topic queries are answered perfectly. Cluster-boundary queries fail outright, five times.** A benchmark that asked only topic questions would have measured recall 1.000 and concluded that one probe was enough. The overall mean — 0.904 — is how a system with five total failures in it gets described as "90% accurate".
+
+So:
+
+- every recall report carries `min`, `p1`, `p5`, `zero_recall_queries`, a per-class breakdown, and the **five worst queries by name** — a bug report, not a number;
+- the default `nprobe` is **derived**: the smallest probe count whose *p1* recall clears 0.8. It comes out at **4** (mean 0.998, p1 1.000, zero failures, 14.9% scan fraction), and `testing/golden/nprobe-provenance.json` is the receipt. A test asserts `DEFAULT_NPROBE` still equals it *and* that no smaller probe count clears the floor — the constant cannot drift from its evidence;
+- CI enforces `--min-p1 0.8` and `zero_recall_queries == 0`, not just a mean floor. A mean floor alone would have waved S0's failure straight through.
+
+Adaptive per-query probing — scaling the probe count when the centroid margins are tight, which *is* the boundary case — is [issue #1](https://github.com/Bobcatsfan33/PrismDB/issues/1), targeted at S6. It is deliberately not built here: it is a planner decision that must be costed against real kernel curves, and those do not exist until the CPU scan engine publishes them.
+
+---
+
+## S2 — next
+
+**Production ingestion + the OTel GenAI schema.** From PRISM.md Part IV:
+
+- OTLP ingestion mapping the GenAI semantic conventions into the §9 event model, plus a native streaming API and a Kafka source.
+- Tenant auth, quotas, idempotency keys, and the duplicate policy (already documented and tested — [D-012](DECISIONS.md) — but not yet enforced at an admission boundary).
+- A durable admission log, or a synchronous commit before ack. **Offsets must never advance before publication** (invariant 7).
+- Batching by (tenant partition, model version) with backpressure; dead-lettering for schema *and* embedding failures (the embedding half already exists).
+- A default `traces` schema in the box — *what gets embedded is a product decision, and the contract says to decide it deliberately.*
+
+**Gate:** replaying acknowledged input produces no missing rows and documented duplicate behavior; offsets never advance pre-publication; one tenant cannot exceed quota or starve others.
+
+**Carry into S2:** the event model is still the S0 slice (`event_id, tenant_id, event_time, event_name, cost, error, body`). S2 adds `observed_time`, `attributes`, `trace_id`/`span_id` and promoted attribute columns — and that is a **format change**, so it lands as v3 with a v2 fixture kept behind it, exactly as v1 is kept now.

@@ -58,20 +58,29 @@ prism inspect --path ./demo
 prism merge   --path ./demo
 prism gc      --path ./demo --retain 5
 prism verify  --path ./demo
+
+# The offline validator: is this a part, and is it intact? Needs no catalog, no
+# engine, no database standing up -- point it at a directory of bytes from a
+# backup and it will condemn it, or clear it, and say which byte lied.
+prism fsck --path ./demo
 ```
 
 ## Status
 
-**Executable reference core under active development.** Sprint S0 of eighteen is complete: a dependency-light, single-node vertical slice that really ingests, really prunes, really scans compressed codes, really re-ranks exactly, and really answers. See [docs/PRISM.md](docs/PRISM.md) for the architecture and the full sprint roadmap, and [docs/PROGRESS.md](docs/PROGRESS.md) for exactly what is proven so far and by which test.
+**Executable reference core under active development.** Sprints **S0 and S1** of eighteen are complete: a dependency-light, single-node vertical slice that really ingests, really prunes, really scans compressed codes, really re-ranks exactly, and really answers — on a hardened, versioned, self-describing storage format. See [docs/PRISM.md](docs/PRISM.md) for the architecture and the full sprint roadmap, and [docs/PROGRESS.md](docs/PROGRESS.md) for exactly what is proven so far and by which test.
 
 **What works today**
 
 - Ingest → embed → normalize → coarse assignment → product quantization → immutable checksummed part → one atomic catalog commit.
 - Hybrid query: metadata pruning, centroid probing, contiguous-range ADC scan with the scalar filter fused into the loop, a bounded candidate heap, exact re-rank inside a declared fetch budget, and semantic grouping with real exemplar events.
+- **A storage format that refuses what it does not understand.** An explicit binary manifest with a format version, byte order, a feature bitset and per-column codec ids; column files framed into 64 KiB checksummed blocks so a flipped byte condemns one block and *names* it, not a whole column; and an offline validator (`prism fsck`) that condemns a suspicious part with no catalog, no engine, and no database standing up.
+- **Nothing allocates on an untrusted length.** Every length in a part arrives from a stranger, and every one is checked against the bytes actually present before anything is reserved. The fuzz suite throws byte flips, every truncation length, total garbage, and a checksum-*repairing* adversary at the reader; it must decode or refuse, never panic.
+- **The rerank tier is described, not assumed.** Each part declares its exact-vector encoding and the accuracy contract that encoding owes you, and the reader dispatches on it. Changing it later is a data migration, never a format break.
+- **Old formats still open, and merge migrates them forward.** The v1 parts committed on day one still open, still verify, and still answer — and a merge rewrites them into v2 without ever touching the original bytes.
 - Immutable content-addressed generations; a query spanning two embedding spaces is **refused**, not silently merged (scores from different spaces are not comparable).
 - Merge with a documented duplicate policy, re-embed migration, catalog-only rollback, and explicit GC that provably never touches a referenced part.
-- Crash consistency: the writer is killed at every durability boundary in CI, and the store always opens to the old snapshot or the new one — never a hybrid.
-- A recall contract measured against an exact brute-force oracle on a committed golden corpus, and a machine-generated [`baselines.json`](baselines.json).
+- **Crash consistency, measured.** The writer is killed at every durability boundary, and then at 10,000 randomly chosen ones, and the store always opens to the old snapshot or the new one — never a hybrid.
+- A recall contract measured against an exact brute-force oracle on a committed golden corpus — **reported with its tail**, not just its mean — and a machine-generated [`baselines.json`](baselines.json).
 
 **Deliberate limits right now** — these are sprints, not oversights
 
@@ -81,8 +90,11 @@ prism verify  --path ./demo
 - A deterministic local hash embedder, not a real language model (S13). It exists so that every test, corpus, and baseline is reproducible on any machine with no weights and no network.
 - Semantic grouping clusters the re-rank survivors. Grouping an arbitrarily large *filtered set* — the flagship aggregate — is S9.
 - Tenant isolation is a filter fused into the scan, not yet a physical partition boundary (S4).
+- The probe count is fixed per query. Scaling it when a query sits on a cluster boundary is [issue #1](https://github.com/Bobcatsfan33/PrismDB/issues/1), targeted at S6.
 
 **Numbers.** There are none in this README on purpose. Every performance claim PrismDB makes must be backed by a committed, reproducible benchmark artifact, and a roofline must be labelled a roofline. Run `prism bench --out baselines.json` and read what your own hardware says.
+
+**One number we will show you anyway, because it is a warning and not a boast.** With one centroid probed, PrismDB answers *topic* queries — aimed at the middle of a cluster — with a mean recall of 1.000. Across the whole golden set the mean is 0.904, which sounds like a good day. It is not: five of those queries return **nothing at all**. Their neighbours sat on a boundary between two clusters and we only looked in one. That is why every recall report here carries `min`, `p1`, `p5` and a count of queries that came back empty; why the golden corpus deliberately asks questions that straddle boundaries; and why the default probe count is *derived* from that tail with a [committed receipt](testing/golden/nprobe-provenance.json) rather than picked because it looked reasonable.
 
 ## Contributing
 
