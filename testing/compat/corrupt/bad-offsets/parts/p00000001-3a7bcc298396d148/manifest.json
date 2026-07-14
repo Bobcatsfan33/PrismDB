@@ -1,0 +1,201 @@
+{
+  "format_version": 1,
+  "part_id": "p00000001-3a7bcc298396d148",
+  "generation_id": "11bc6235d83235d2",
+  "model_id": "hash-embedder",
+  "model_version": "1",
+  "row_count": 200,
+  "dim": 32,
+  "pq_m": 4,
+  "byte_order": "little",
+  "time_min": 1760000000000,
+  "time_max": 1760000199000,
+  "tenants": [
+    "t0",
+    "t1",
+    "t2",
+    "t3",
+    "t4"
+  ],
+  "cost_min": 5.992651131236926e-05,
+  "cost_max": 0.04973507300019264,
+  "has_error": true,
+  "has_success": true,
+  "centroid_ranges": [
+    {
+      "centroid": 0,
+      "first_row": 0,
+      "row_count": 25,
+      "pq_offset": 0,
+      "pq_len": 100,
+      "vec_offset": 0,
+      "vec_len": 3200,
+      "time_min": 1760000002000,
+      "time_max": 1760000196000
+    },
+    {
+      "centroid": 1,
+      "first_row": 25,
+      "row_count": 20,
+      "pq_offset": 100,
+      "pq_len": 80,
+      "vec_offset": 3200,
+      "vec_len": 2560,
+      "time_min": 1760000001000,
+      "time_max": 1760000158000
+    },
+    {
+      "centroid": 2,
+      "first_row": 45,
+      "row_count": 46,
+      "pq_offset": 180,
+      "pq_len": 184,
+      "vec_offset": 5760,
+      "vec_len": 5888,
+      "time_min": 1760000000000,
+      "time_max": 1760000199000
+    },
+    {
+      "centroid": 3,
+      "first_row": 91,
+      "row_count": 24,
+      "pq_offset": 364,
+      "pq_len": 96,
+      "vec_offset": 11648,
+      "vec_len": 3072,
+      "time_min": 1760000007000,
+      "time_max": 1760000185000
+    },
+    {
+      "centroid": 4,
+      "first_row": 115,
+      "row_count": 16,
+      "pq_offset": 460,
+      "pq_len": 64,
+      "vec_offset": 14720,
+      "vec_len": 2048,
+      "time_min": 1760000009000,
+      "time_max": 1760000195000
+    },
+    {
+      "centroid": 5,
+      "first_row": 131,
+      "row_count": 19,
+      "pq_offset": 524,
+      "pq_len": 76,
+      "vec_offset": 16768,
+      "vec_len": 2432,
+      "time_min": 1760000004000,
+      "time_max": 1760000188000
+    },
+    {
+      "centroid": 6,
+      "first_row": 150,
+      "row_count": 35,
+      "pq_offset": 600,
+      "pq_len": 140,
+      "vec_offset": 19200,
+      "vec_len": 4480,
+      "time_min": 1760000005000,
+      "time_max": 1760000198000
+    },
+    {
+      "centroid": 7,
+      "first_row": 185,
+      "row_count": 15,
+      "pq_offset": 740,
+      "pq_len": 60,
+      "vec_offset": 23680,
+      "vec_len": 1920,
+      "time_min": 1760000012000,
+      "time_max": 1760000197000
+    }
+  ],
+  "columns": [
+    {
+      "name": "pq_codes",
+      "file": "pq.codes",
+      "bytes": 800,
+      "crc32": 3582866848
+    },
+    {
+      "name": "vectors",
+      "file": "vectors.f32",
+      "bytes": 25600,
+      "crc32": 3986526178
+    },
+    {
+      "name": "centroid",
+      "file": "centroid.u32",
+      "bytes": 800,
+      "crc32": 3132018745
+    },
+    {
+      "name": "event_time",
+      "file": "event_time.i64",
+      "bytes": 1600,
+      "crc32": 4072775717
+    },
+    {
+      "name": "cost",
+      "file": "cost.f64",
+      "bytes": 1600,
+      "crc32": 1762203492
+    },
+    {
+      "name": "error",
+      "file": "error.u8",
+      "bytes": 200,
+      "crc32": 1753712689
+    },
+    {
+      "name": "event_id.data",
+      "file": "event_id.dat",
+      "bytes": 1800,
+      "crc32": 2884726315
+    },
+    {
+      "name": "event_id.offsets",
+      "file": "event_id.off",
+      "bytes": 1608,
+      "crc32": 3602601232
+    },
+    {
+      "name": "tenant_id.data",
+      "file": "tenant_id.dat",
+      "bytes": 400,
+      "crc32": 739536044
+    },
+    {
+      "name": "tenant_id.offsets",
+      "file": "tenant_id.off",
+      "bytes": 1608,
+      "crc32": 3983303976
+    },
+    {
+      "name": "event_name.data",
+      "file": "event_name.dat",
+      "bytes": 2547,
+      "crc32": 1527926354
+    },
+    {
+      "name": "event_name.offsets",
+      "file": "event_name.off",
+      "bytes": 1608,
+      "crc32": 3190493106
+    },
+    {
+      "name": "body.data",
+      "file": "body.dat",
+      "bytes": 13772,
+      "crc32": 1064989698
+    },
+    {
+      "name": "body.offsets",
+      "file": "body.off",
+      "bytes": 1608,
+      "crc32": 2978418714
+    }
+  ],
+  "created_at_ms": 1783996257786
+}
