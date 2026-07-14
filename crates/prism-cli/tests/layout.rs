@@ -156,7 +156,14 @@ fn build(l: &Layout, events: &[Event]) -> (Engine, PathBuf) {
             nlist: 32,
             pq_m: 8,
             seed: 1234,
-            kmeans_restarts: prism_quantizer::kmeans::KMEANS_RESTARTS,
+            // ONE restart, not the shipping five. Layout-invariance must hold for *any*
+            // deterministic training configuration -- it is a statement about whether the
+            // codebook depends on where the rows sit, not about how good the codebook is. The
+            // shipping restart count is what `testing/evidence/kmeans-restarts.json` is for.
+            // Training dominates this test's cost and it runs four stores through a full
+            // migration; paying 5x for a property that does not depend on the 5x is a tax on
+            // every CI run, especially the debug one.
+            kmeans_restarts: 1,
             block_size: prism_part::format::DEFAULT_BLOCK_SIZE,
             partitions: PartitionScheme {
                 buckets: 16,
@@ -363,7 +370,14 @@ fn a_merge_reconciles_duplicates_the_same_way_regardless_of_which_part_they_land
                     nlist: 8,
                     pq_m: 8,
                     seed: 5,
-                    kmeans_restarts: prism_quantizer::kmeans::KMEANS_RESTARTS,
+                    // ONE restart, not the shipping five. Layout-invariance must hold for *any*
+                    // deterministic training configuration -- it is a statement about whether the
+                    // codebook depends on where the rows sit, not about how good the codebook is. The
+                    // shipping restart count is what `testing/evidence/kmeans-restarts.json` is for.
+                    // Training dominates this test's cost and it runs four stores through a full
+                    // migration; paying 5x for a property that does not depend on the 5x is a tax on
+                    // every CI run, especially the debug one.
+                    kmeans_restarts: 1,
                     block_size: prism_part::format::DEFAULT_BLOCK_SIZE,
                     partitions: PartitionScheme::default(),
                     promote: Vec::new(),
