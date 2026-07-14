@@ -18,18 +18,63 @@ use crate::faults;
 use crate::generation::Generation;
 use crate::io;
 use crate::part::PartReader;
+use crate::partition::{PartRef, PartitionKey};
 use crate::store::Store;
 use prism_types::error::{PrismError, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fs;
 
+/// A part as the catalog knows it.
+///
+/// **Untagged**, so a snapshot written before S4 -- whose `parts` were bare strings -- still
+/// deserializes. A legacy entry carries no partition metadata, so it cannot be pruned in the
+/// catalog and falls back to opening its manifest. That is exactly the pre-S4 behaviour, and
+/// it is why old snapshots keep working.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum PartEntry {
+    /// S4 and later: enough metadata to prune this part **without opening it**.
+    Located(PartRef),
+    /// Pre-S4: a bare part id.
+    Legacy(String),
+}
+
+impl PartEntry {
+    pub fn part_id(&self) -> &str {
+        match self {
+            PartEntry::Located(r) => &r.part_id,
+            PartEntry::Legacy(id) => id,
+        }
+    }
+
+    pub fn located(&self) -> Option<&PartRef> {
+        match self {
+            PartEntry::Located(r) => Some(r),
+            PartEntry::Legacy(_) => None,
+        }
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        match self {
+            PartEntry::Located(r) => r.validate(),
+            PartEntry::Legacy(_) => Ok(()),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Snapshot {
     pub snapshot_id: String,
     pub parent: Option<String>,
-    /// Every part visible in this snapshot.
-    pub parts: Vec<String>,
+    /// Every part visible in this snapshot, **with the metadata needed to prune it before a
+    /// single one of its bytes is read** (S4).
+    ///
+    /// This is where "cross-tenant reads are physically impossible" stops being a slogan.
+    /// Until S4, pruning opened every part's manifest -- so a tenant-A query already touched
+    /// tenant B's bytes, and one corrupt part broke every query in the store. Now a part
+    /// outside a query's partitions is never opened, never checksummed, never read.
+    pub parts: Vec<PartEntry>,
     /// The next part sequence number to hand out. Lives in the catalog so part
     /// naming is a property of the committed state, not of a writer's memory.
     pub next_seq: u64,
@@ -40,6 +85,40 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
+    pub fn part_ids(&self) -> Vec<String> {
+        self.parts.iter().map(|p| p.part_id().to_string()).collect()
+    }
+
+    /// Parts a query for `tenant` over `[from, to]` could possibly need.
+    ///
+    /// **The pruning happens here, in the catalog, before any part is opened.** A legacy entry
+    /// carries no partition metadata and so cannot be excluded -- we do not know where it is,
+    /// and guessing would risk a false negative, which loses a row.
+    pub fn candidate_parts(
+        &self,
+        tenant: Option<&str>,
+        from: Option<i64>,
+        to: Option<i64>,
+    ) -> Vec<String> {
+        self.parts
+            .iter()
+            .filter(|e| match (e.located(), tenant) {
+                (Some(r), Some(t)) => r.may_match(t, from, to),
+                // No tenant policy, or no catalog metadata: we cannot rule it out.
+                _ => true,
+            })
+            .map(|e| e.part_id().to_string())
+            .collect()
+    }
+
+    /// Every partition this snapshot holds.
+    pub fn partitions(&self) -> std::collections::BTreeSet<PartitionKey> {
+        self.parts
+            .iter()
+            .filter_map(|e| e.located().map(|r| r.partition.clone()))
+            .collect()
+    }
+
     pub fn empty() -> Self {
         Snapshot {
             snapshot_id: "s00000000".to_string(),
@@ -125,16 +204,18 @@ impl<'a> Catalog<'a> {
     pub fn commit(
         &self,
         parent: &Snapshot,
-        parts: Vec<String>,
+        parts: Vec<PartEntry>,
         next_seq: u64,
         active_generation: Option<String>,
         now_ms: i64,
     ) -> Result<Snapshot> {
         for p in &parts {
-            let dir = self.store.part_dir(p);
+            p.validate()?;
+            let dir = self.store.part_dir(p.part_id());
             PartReader::open(&dir).map_err(|e| {
                 PrismError::Invariant(format!(
-                    "refusing to commit a snapshot naming part `{p}`, which is not readable: {e}"
+                    "refusing to commit a snapshot naming part `{}`, which is not readable: {e}",
+                    p.part_id()
                 ))
             })?;
         }
@@ -214,7 +295,7 @@ impl<'a> Catalog<'a> {
         let mut referenced: BTreeSet<String> = BTreeSet::new();
         for id in &keep_snaps {
             if let Ok(s) = self.load_snapshot(id) {
-                referenced.extend(s.parts);
+                referenced.extend(s.part_ids());
             }
         }
 
@@ -267,7 +348,7 @@ impl<'a> Catalog<'a> {
         let mut parts_ok = 0usize;
         let mut generations: BTreeSet<String> = BTreeSet::new();
 
-        for p in &snap.parts {
+        for p in &snap.part_ids() {
             let r = PartReader::open(&self.store.part_dir(p))?;
             r.verify()?;
             generations.insert(r.manifest.generation_id.clone());

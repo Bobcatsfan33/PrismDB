@@ -11,6 +11,7 @@
 //!    was written under, and its bytes mean nothing without it.
 
 pub mod catalog;
+pub mod ext;
 pub mod faults;
 pub mod format;
 pub mod fsck;
@@ -18,10 +19,13 @@ pub mod generation;
 pub mod io;
 pub mod legacy_v1;
 pub mod part;
+pub mod partition;
 pub mod store;
 
-pub use catalog::{Catalog, Snapshot};
+pub use catalog::{Catalog, PartEntry, Snapshot};
+pub use ext::{PromotedColumn, S4Ext, TenantStats};
 pub use format::{RerankDescriptor, FORMAT_VERSION, LEGACY_FORMAT_VERSION};
 pub use generation::Generation;
 pub use part::{CentroidRange, ColumnMeta, PartManifest, PartReader, PartRows, PartWriter};
+pub use partition::{Bucket, PartRef, PartitionKey, PartitionScheme};
 pub use store::{Store, StoreConfig};
