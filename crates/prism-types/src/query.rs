@@ -158,6 +158,13 @@ pub struct Query {
     /// constant sets it, so the receipt measures the real mechanism rather than a copy of it.
     #[serde(default)]
     pub adaptive_margin: Option<f32>,
+
+    /// Force the rerank route (S7). `None` lets the cost model decide — which, with the GPU off,
+    /// is always CPU. The selection-identity and route-flip gates set this to prove the route is
+    /// invisible to the answer. A stringly-typed pass-through so `prism-types` need not depend on
+    /// the engine's `Route` enum; the engine parses it.
+    #[serde(default)]
+    pub force_route: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -180,6 +187,7 @@ impl Default for Query {
             space: None,
             adaptive: true,
             adaptive_margin: None,
+            force_route: None,
         }
     }
 }
@@ -231,6 +239,15 @@ pub struct Counters {
     pub probes_taken: usize,
     #[serde(default)]
     pub probes_widened: usize,
+    /// Which route reranked this query (S7): `cpu`, `gpu-reference`, or `cuda`. The route is
+    /// invisible to the *answer* (selection-identity), but observable so a degradation is not
+    /// silent.
+    #[serde(default)]
+    pub rerank_route: String,
+    /// True if a device route degraded to CPU mid-query after a fault. A GPU that quietly stopped
+    /// being used is a GPU you are paying for and not getting.
+    #[serde(default)]
+    pub route_degraded: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

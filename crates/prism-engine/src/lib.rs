@@ -7,6 +7,7 @@ pub mod drift;
 pub mod engine;
 pub mod evidence;
 pub mod generations;
+pub mod gpu;
 pub mod idempotency;
 pub mod ingest;
 pub mod ingestor;
