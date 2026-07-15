@@ -26,54 +26,7 @@ use prism_types::error::{PrismError, Result};
 use prism_types::event::Event;
 use prism_types::vector::{cosine_from_l2_sq, dot, l2_sq};
 use prism_types::{ClusterSummary, Counters, Hit, Query, SearchResult};
-use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
-
-/// A row that survived the scalar mask and got an approximate distance.
-#[derive(Debug, Clone, PartialEq)]
-struct Candidate {
-    dist: f32,
-    /// Carried into the heap, and it has to be. See the `Ord` impl.
-    event_id: String,
-    part: usize,
-    row: usize,
-}
-
-impl Eq for Candidate {}
-
-impl Ord for Candidate {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // A max-heap on distance: the worst candidate is on top, so a bounded heap evicts in
-        // O(log n) and the scan never allocates past the budget.
-        //
-        // **Distance ties break on `event_id`, not on physical position.** This used to break
-        // on `(part, row)`, with a comment calling that "deterministic" — and it is, in the
-        // sense that it reproduces on *this* store. It is not a function of the *data*, which
-        // is what D-008 established and what the query contract requires: `(score DESC,
-        // event_id ASC)`, always.
-        //
-        // The heap is bounded, so it does not merely *order* the answer — it decides which
-        // tied rows are *allowed to be* answers at all. Real telemetry repeats bodies
-        // verbatim, so identical vectors, identical codes and exactly-equal distances are
-        // common, and a top-k is routinely a choice among hundreds of tied rows. Breaking that
-        // choice on layout means two stores holding identical rows answer the same query
-        // differently, and a merge changes an unchanged answer.
-        //
-        // S4 proved it the expensive way: repartitioning by time window (same rows, same
-        // codebook, same 3,880 rows scanned, same tied distance) changed which tied rows
-        // survived the heap, and recall against the exact oracle fell from 1.00 to 0.60 —
-        // while raising `nprobe` did nothing at all, because the rows were never being
-        // *missed*, they were being *outvoted by their addresses*. See D-033.
-        self.dist
-            .total_cmp(&other.dist)
-            .then(self.event_id.cmp(&other.event_id))
-    }
-}
-
-impl PartialOrd for Candidate {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
+use std::collections::{BTreeMap, BTreeSet};
 
 /// A candidate that survived into the rerank set and has an exact score.
 struct Scored {
@@ -90,6 +43,9 @@ struct SpaceContext {
     adc: AdcTable,
     /// Centroid ids ranked nearest-first.
     ranked: Vec<u32>,
+    /// Their distances, in the same order — kept so adaptive probing can read the margin between
+    /// the base boundary and the next centroid (S6).
+    ranked_dists: Vec<f32>,
 }
 
 impl Engine {
@@ -277,7 +233,9 @@ impl Engine {
             let embedder = self.plane.embedder(&g.model_id, &g.model_version, dim)?;
             let qv = embedder.embed(&q.text)?;
             let adc = g.pq.adc_table(&qv)?;
-            let ranked: Vec<u32> = g.coarse.rank(&qv).into_iter().map(|(id, _)| id).collect();
+            let scored = g.coarse.rank(&qv);
+            let ranked: Vec<u32> = scored.iter().map(|(id, _)| *id).collect();
+            let ranked_dists: Vec<f32> = scored.iter().map(|(_, d)| *d).collect();
             c.centroids_scored += ranked.len();
             ctxs.insert(
                 gid.clone(),
@@ -285,12 +243,42 @@ impl Engine {
                     query_vector: qv,
                     adc,
                     ranked,
+                    ranked_dists,
                 },
             );
         }
 
         // --- 4. scan the selected centroid ranges ---
-        let mut heap: BinaryHeap<Candidate> = BinaryHeap::new();
+
+        // Pick the kernel once, for the whole query, and record it. Every kernel returns
+        // bit-identical distances (docs/DETERMINISM-CONTRACT.md §1), so this changes the query's
+        // speed and never its answer.
+        let isa = prism_quantizer::kernel::best();
+        c.scan_isa = isa.name().to_string();
+
+        // Pre-load every eligible part's scalar columns, once, and keep them alive for the whole
+        // scan. The top-k's tie-break borrows event ids out of these instead of owning copies, so
+        // a row entering the top-k allocates nothing (§4). These columns are read anyway -- the
+        // fused mask needs tenant and time -- so this only moves the read earlier, it does not add
+        // one.
+        let part_scalars: Vec<prism_part::part::Scalars> = eligible
+            .iter()
+            .map(|r| r.read_scalars())
+            .collect::<Result<Vec<_>>>()?;
+        let id_of =
+            |part: u32, row: u32| -> &str { part_scalars[part as usize].event_id_at(row as usize) };
+        let mut topk = crate::topk::TopK::new(q.candidates, &id_of);
+
+        // One distance buffer, sized once to the largest range any eligible part holds, and
+        // reused for every range of every part. The centroid ranges are in the manifest, so this
+        // needs no I/O -- and it is what makes the hot loop allocate nothing (§4).
+        let max_range_rows = eligible
+            .iter()
+            .flat_map(|r| r.manifest.centroid_ranges.iter())
+            .map(|cr| cr.row_count)
+            .max()
+            .unwrap_or(0);
+        let mut dists = vec![0.0f32; max_range_rows];
 
         for (pi, r) in eligible.iter().enumerate() {
             c.parts_opened += 1;
@@ -298,9 +286,7 @@ impl Engine {
                 PrismError::Corrupt("part references an absent generation".into())
             })?;
 
-            // The scalar columns the mask needs. Text is never touched here —
-            // only survivors pay for their body.
-            let scalars = r.read_scalars()?;
+            let scalars = &part_scalars[pi];
             let times = &scalars.times;
 
             // The row predicate, if any. Columns load lazily and only if the predicate
@@ -318,7 +304,24 @@ impl Engine {
                 .map(|cr| (cr.centroid, cr))
                 .collect();
 
-            let probes = ctx.ranked.iter().take(q.nprobe);
+            // Adaptive probing (S6): a boundary query may probe ABOVE the base nprobe, never
+            // below it, so recall can only improve and the receipts stay valid as floors. On a
+            // query deep inside a cluster the margin is not met and this is exactly q.nprobe.
+            let eff_nprobe = if q.adaptive {
+                prism_types::query::adaptive_nprobe(
+                    &ctx.ranked_dists,
+                    q.nprobe,
+                    q.adaptive_margin
+                        .unwrap_or(prism_types::query::ADAPTIVE_MARGIN),
+                    prism_types::query::ADAPTIVE_MAX_NPROBE,
+                )
+            } else {
+                q.nprobe.min(ctx.ranked.len())
+            };
+            c.probes_taken += eff_nprobe;
+            c.probes_widened += eff_nprobe.saturating_sub(q.nprobe.min(ctx.ranked.len()));
+
+            let probes = ctx.ranked.iter().take(eff_nprobe);
             for &cid in probes {
                 let Some(range) = by_centroid.get(&cid) else {
                     // This part has no rows in that centroid. The probe costs
@@ -345,7 +348,20 @@ impl Engine {
                 c.rows_scanned_pq += range.row_count;
 
                 let m = r.manifest.pq_m;
-                for i in 0..range.row_count {
+
+                // Batch the distance math for the whole range through the selected kernel, into
+                // the reused buffer. This is the one place SIMD acts; everything downstream --
+                // the fused mask, the tie-break, the bounded heap -- is unchanged, so selection
+                // semantics are exactly what they were, only the distances arrived faster.
+                prism_quantizer::kernel::adc_scan(
+                    isa,
+                    ctx.adc.table(),
+                    m,
+                    &codes,
+                    &mut dists[..range.row_count],
+                );
+
+                for (i, &dist) in dists[..range.row_count].iter().enumerate() {
                     let row = range.first_row + i;
 
                     // Fused scalar mask. Allocation-free: it runs once per
@@ -375,55 +391,31 @@ impl Engine {
                     }
                     c.rows_passing_filter += 1;
 
-                    let code = &codes[i * m..(i + 1) * m];
-                    let dist = ctx.adc.distance(code);
-
-                    // Bounded candidate width: the heap never grows past it.
-                    //
-                    // The distance is checked *before* the event id is materialized. A
-                    // candidate that loses on distance alone — the overwhelming majority —
-                    // never allocates. Only one that could actually enter the heap pays for
-                    // its id, so the cost of an ordering that is a function of the data is
-                    // bounded by the heap, not by the scan.
-                    let enters = match heap.peek() {
-                        _ if heap.len() < q.candidates => true,
-                        Some(worst) => match dist.total_cmp(&worst.dist) {
-                            std::cmp::Ordering::Less => true,
-                            std::cmp::Ordering::Greater => false,
-                            std::cmp::Ordering::Equal => {
-                                scalars.event_id_at(row) < worst.event_id.as_str()
-                            }
-                        },
-                        None => true,
-                    };
-                    if !enters {
-                        continue;
-                    }
-
-                    let cand = Candidate {
+                    // Offer the row to the bounded top-k. `Candidate` is `Copy` and owns nothing;
+                    // the tie-break borrows the event id out of `part_scalars`, so this whole
+                    // insertion — the millions-of-times hot path — allocates not one byte (§4).
+                    topk.offer(crate::topk::Candidate {
                         dist,
-                        event_id: scalars.event_id_at(row).to_string(),
-                        part: pi,
-                        row,
-                    };
-                    if heap.len() >= q.candidates {
-                        heap.pop();
-                    }
-                    heap.push(cand);
+                        part: pi as u32,
+                        row: row as u32,
+                    });
                 }
             }
         }
 
-        c.candidates_considered = heap.len();
+        c.candidates_considered = topk.len();
 
         // --- 5. exact rerank, within the declared fetch budget ---
-        let mut candidates: Vec<Candidate> = heap.into_sorted_vec(); // nearest first
+        let mut candidates: Vec<crate::topk::Candidate> = topk.into_sorted(); // nearest first
         candidates.truncate(q.rerank);
         c.rerank_width = candidates.len();
 
         let mut by_part: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
         for cand in &candidates {
-            by_part.entry(cand.part).or_default().push(cand.row);
+            by_part
+                .entry(cand.part as usize)
+                .or_default()
+                .push(cand.row as usize);
         }
 
         let mut scored: Vec<Scored> = Vec::with_capacity(candidates.len());

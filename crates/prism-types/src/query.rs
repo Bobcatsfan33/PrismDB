@@ -34,6 +34,51 @@ use serde::{Deserialize, Serialize};
 /// `prism golden sweep`. Adaptive per-query probing is issue #1, targeted at S6.
 pub const DEFAULT_NPROBE: usize = 6;
 
+/// Adaptive-probing margin (S6, [issue #1](https://github.com/Bobcatsfan33/PrismDB/issues/1)).
+///
+/// **Tuned** (charter C-1), receipt `testing/evidence/adaptive.json`. When a query sits near a
+/// cluster boundary — nearly equidistant to several centroids — its true neighbours are split
+/// across those centroids, and probing only the base `nprobe` reaches some of them and misses the
+/// rest ([`DEFAULT_NPROBE`]'s whole reason for existing). This margin says *how nearly equal*
+/// counts as "on the boundary": a centroid beyond the base is also probed when its distance is
+/// within `(1 + ADAPTIVE_MARGIN)` of the base's last probed centroid.
+///
+/// **v1 is MONOTONE ONLY.** Adaptive probing may add probes above the base; it may never subtract.
+/// So recall can only improve, and every existing `nprobe`/width receipt remains valid as a
+/// *floor*. The cost-reduction direction — *fewer* probes on easy queries — is deferred until the
+/// real-embedding corpus exists ([issue #3](https://github.com/Bobcatsfan33/PrismDB/issues/3)),
+/// because it tunes against cluster geometry the hash-embedder corpus cannot represent.
+pub const ADAPTIVE_MARGIN: f32 = 0.05;
+
+/// The hard ceiling on adaptive probing. **Policy** (C-1): a query may never probe more than this
+/// many centroids however tight its margins, so a pathological query cannot turn an approximate
+/// scan into a full one. It bounds worst-case query cost, which measurement of *average* queries
+/// cannot see.
+pub const ADAPTIVE_MAX_NPROBE: usize = 16;
+
+/// The effective probe count for a query whose ranked centroid distances (ascending) are
+/// `dists`, given a base `nprobe`.
+///
+/// **Monotone: the result is always `>= base`.** It extends the base to include centroids nearly
+/// as close as the base's boundary — the signature of a query sitting between clusters — and caps
+/// at `max`. On a query deep inside one cluster the next centroids are much farther, the margin is
+/// not met, and the result stays exactly at `base`. So easy queries pay nothing and only boundary
+/// queries probe wider.
+pub fn adaptive_nprobe(dists: &[f32], base: usize, margin: f32, max: usize) -> usize {
+    let base = base.min(dists.len());
+    if base == 0 {
+        return 0;
+    }
+    let boundary = dists[base - 1];
+    let cap = max.max(base).min(dists.len());
+    let mut k = base;
+    // ADC distances are squared L2, so non-negative; `boundary * (1+margin)` is well-defined.
+    while k < cap && dists[k] <= boundary * (1.0 + margin) {
+        k += 1;
+    }
+    k
+}
+
 /// Default candidate width: how many PQ-scored rows survive into the heap.
 ///
 /// **Derived, not chosen** (charter C-1), and derived *jointly* with [`DEFAULT_RERANK`] —
@@ -101,6 +146,22 @@ pub struct Query {
     /// comparable (invariant 9), so rather than silently merge them or silently
     /// drop one, the engine refuses and makes the caller name the space.
     pub space: Option<String>,
+
+    /// Adaptive probing (S6). When `true` (the default), a boundary query may probe *above*
+    /// `nprobe` up to [`ADAPTIVE_MAX_NPROBE`]; it never probes below `nprobe`, so recall can only
+    /// improve. Set `false` to pin the flat behaviour — the receipts do this to measure the floor
+    /// that adaptive probing sits on top of.
+    #[serde(default = "default_true")]
+    pub adaptive: bool,
+
+    /// Override the adaptive margin. `None` uses [`ADAPTIVE_MARGIN`]; the sweep that derives that
+    /// constant sets it, so the receipt measures the real mechanism rather than a copy of it.
+    #[serde(default)]
+    pub adaptive_margin: Option<f32>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for Query {
@@ -117,6 +178,8 @@ impl Default for Query {
             group_k: None,
             predicate: None,
             space: None,
+            adaptive: true,
+            adaptive_margin: None,
         }
     }
 }
@@ -154,6 +217,20 @@ pub struct Counters {
     /// (`testing/evidence/block-size.json`).
     #[serde(default)]
     pub physical_bytes_read: usize,
+    /// Which SIMD kernel scanned this query (S6). Observable so the determinism gate can name the
+    /// path it exercised and the per-ISA baseline can attribute its numbers. The *answer* does not
+    /// depend on this — that is the whole point of the determinism contract — but knowing which
+    /// kernel produced it is how we prove that.
+    #[serde(default)]
+    pub scan_isa: String,
+    /// Coarse centroids actually probed, summed across generations — the *effective* nprobe after
+    /// adaptive widening (S6). Equal to the base `nprobe` when no query hit a boundary; larger
+    /// when adaptive probing added centroids. `probes_widened` counts how many of those were the
+    /// heuristic's doing.
+    #[serde(default)]
+    pub probes_taken: usize,
+    #[serde(default)]
+    pub probes_widened: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -196,4 +273,52 @@ pub struct SearchResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bridge: Option<String>,
     pub snapshot_id: String,
+}
+
+#[cfg(test)]
+mod adaptive_tests {
+    use super::*;
+
+    #[test]
+    fn adaptive_is_monotone_never_below_the_base() {
+        // Whatever the distances and margin, the result is >= base. This is the v1 guarantee that
+        // keeps every existing receipt valid as a floor (issue #1).
+        let dists = [0.1f32, 0.11, 0.5, 0.9, 1.3, 2.0, 2.1, 2.2];
+        for base in 1..=6 {
+            for margin in [0.0f32, 0.05, 0.15, 0.5, 5.0] {
+                let k = adaptive_nprobe(&dists, base, margin, ADAPTIVE_MAX_NPROBE);
+                assert!(
+                    k >= base.min(dists.len()),
+                    "adaptive dropped below the base"
+                );
+                assert!(k <= dists.len());
+            }
+        }
+    }
+
+    #[test]
+    fn a_boundary_query_probes_wider_and_an_easy_one_does_not() {
+        let base = 2;
+        // Boundary: the 3rd and 4th centroids are nearly as close as the 2nd -- neighbours are
+        // split across them, so we must reach them.
+        let boundary = [1.00f32, 1.02, 1.05, 1.08, 9.0, 9.1];
+        assert!(
+            adaptive_nprobe(&boundary, base, 0.15, 8) > base,
+            "a boundary query did not widen its probe count"
+        );
+        // Easy: a sharp cliff after the base -- the next centroid is 9x farther, nothing to gain.
+        let easy = [1.00f32, 1.02, 9.0, 9.1, 9.2, 9.3];
+        assert_eq!(
+            adaptive_nprobe(&easy, base, 0.15, 8),
+            base,
+            "an easy query wasted probes it did not need"
+        );
+    }
+
+    #[test]
+    fn the_cap_is_never_exceeded() {
+        // Everything nearly tied: without a cap this would probe all 20. The cap holds.
+        let dists: Vec<f32> = (0..20).map(|i| 1.0 + i as f32 * 0.001).collect();
+        assert_eq!(adaptive_nprobe(&dists, 2, 1.0, 5), 5);
+    }
 }
