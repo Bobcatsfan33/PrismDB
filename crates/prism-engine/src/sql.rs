@@ -42,6 +42,14 @@ struct CursorBody {
     plan: String,
     last_score: f32,
     last_event_id: String,
+    /// The rerank route this paginated query is pinned to (S7). A paginated query is ONE logical
+    /// query, so its route -- like its snapshot -- is fixed at the first page and carried here. On
+    /// resume the pinned route wins over any planner or test override, which is what makes the
+    /// answer survive a route flip between pages: the cursor holds the route steady, so the
+    /// boundary scores on both sides of a page break come from the same route and cannot disagree
+    /// (determinism contract §9).
+    #[serde(default)]
+    route: String,
 }
 
 /// Opaque, and checksummed so that a mangled cursor is refused rather than misread.
@@ -113,6 +121,7 @@ impl Engine {
             // (docs/QUERY-CONTRACT.md §5), and adaptive probing is part of that door.
             adaptive: true,
             adaptive_margin: None,
+            force_route: None,
         })
     }
 
@@ -166,8 +175,10 @@ impl Engine {
     fn run_rows(&self, plan: &Plan, cursor: Option<&str>) -> Result<SqlResult> {
         let (snap, cur) = self.resolve_snapshot(plan, cursor)?;
 
-        // Score every row of the result set, in the one total order.
-        let (mut scored, counters) = self.result_set(plan, &snap)?;
+        // Score every row of the result set, in the one total order. The cursor's pinned route,
+        // if any, is authoritative (S7).
+        let pinned_route = cur.as_ref().map(|c| c.route.clone());
+        let (mut scored, counters) = self.result_set(plan, &snap, pinned_route.as_deref())?;
         scored.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.event_id.cmp(&b.0.event_id)));
 
         // Keyset skip. The order is a total order and the snapshot is immutable, so "after
@@ -199,11 +210,19 @@ impl Engine {
             .cloned()
             .collect();
 
+        // Pin whatever route actually ran this page, so every later page uses the same one.
+        let route = if counters.rerank_route.is_empty() {
+            "cpu".to_string()
+        } else {
+            counters.rerank_route.clone()
+        };
+
         let next_cursor = if start + page.len() < scored.len() && !page.is_empty() {
             let last = page.last().unwrap();
             Some(encode_cursor(&CursorBody {
                 snapshot: snap.snapshot_id.clone(),
                 plan: plan_fingerprint(plan),
+                route: route.clone(),
                 last_score: last.1,
                 last_event_id: last.0.event_id.clone(),
             })?)
@@ -234,12 +253,17 @@ impl Engine {
         &self,
         plan: &Plan,
         snap: &prism_part::catalog::Snapshot,
+        route_override: Option<&str>,
     ) -> Result<(Vec<(Event, f32)>, Counters)> {
         match &plan.semantic {
             Some(_) => {
                 let mut q = self.plan_to_query(plan)?;
                 // The result set is the whole rerank survivor set, not just the first page.
                 q.k = plan.rerank;
+                // A cursor's pinned route (S7) is authoritative for every page after the first.
+                if let Some(r) = route_override {
+                    q.force_route = Some(r.to_string());
+                }
                 let res = self.search_at(snap, &q)?;
                 Ok((
                     res.hits.into_iter().map(|h| (h.event, h.score)).collect(),
@@ -398,7 +422,7 @@ impl Engine {
             });
         }
 
-        let (rows, counters) = self.result_set(plan, &snap)?;
+        let (rows, counters) = self.result_set(plan, &snap, None)?;
 
         // Group. An empty GROUP BY is one group over everything.
         let mut groups: BTreeMap<Vec<String>, Vec<(Event, f32)>> = BTreeMap::new();

@@ -418,7 +418,17 @@ impl Engine {
                 .push(cand.row as usize);
         }
 
-        let mut scored: Vec<Scored> = Vec::with_capacity(candidates.len());
+        // Fetch every candidate's exact vector and id FIRST, separating I/O from the rerank
+        // compute. This is what makes a device-route degradation a pure recompute: if the GPU
+        // route faults, we re-score the already-fetched vectors on the CPU without touching disk.
+        struct Fetched {
+            part: usize,
+            row: usize,
+            vector: Vec<f32>,
+            event_id: String,
+            query_vector: Vec<f32>,
+        }
+        let mut fetched: Vec<Fetched> = Vec::with_capacity(candidates.len());
         for (pi, rows) in &by_part {
             let r = eligible[*pi];
             let ctx = ctxs.get(&r.manifest.generation_id).unwrap();
@@ -426,21 +436,104 @@ impl Engine {
             let ids = r.read_event_ids_for_rows(rows)?;
             c.exact_vectors_fetched += vectors.len();
             c.exact_bytes_fetched += vectors.len() * dim * 4;
-
             for ((row, v), event_id) in rows.iter().zip(vectors).zip(ids) {
-                // Exact cosine on the stored float32 vector. This is the answer;
-                // the PQ distance was only ever a way to avoid computing this
-                // for everything.
-                let score = dot(&ctx.query_vector, &v);
-                scored.push(Scored {
-                    score,
+                fetched.push(Fetched {
                     part: *pi,
                     row: *row,
                     vector: v,
                     event_id,
+                    query_vector: ctx.query_vector.clone(),
                 });
             }
         }
+
+        // --- route the rerank (S7) ---
+        //
+        // The route is invisible to the answer (selection-identity, determinism contract §9), so
+        // the planner chooses on cost alone. With the GPU off this is always CPU; a test may force
+        // a device route to prove the answer survives the route change.
+        // Precedence: an explicit per-query route (which a cursor sets, to pin a paginated query
+        // to one route) wins over the global test override, which wins over the cost model. The
+        // cursor's route MUST win, or a route flip between pages would corrupt pagination.
+        let forced = q
+            .force_route
+            .as_deref()
+            .map(|s| match s {
+                "gpu-reference" => crate::gpu::Route::GpuReference,
+                "cuda" => crate::gpu::Route::Cuda,
+                _ => crate::gpu::Route::Cpu,
+            })
+            .or_else(crate::gpu::forced_route_override);
+        let mut plan = crate::gpu::plan_route(fetched.len(), forced);
+
+        // Per-tenant device admission: a device route reserves its footprint before running, and a
+        // tenant over its share is DEGRADED to CPU rather than allowed to fail another tenant
+        // (determinism contract §11). The reservation releases on drop.
+        let _reservation = if plan.route.is_device() {
+            let bytes = fetched.len() * dim * 4;
+            let tenant = q.tenant.as_deref().unwrap_or("(none)");
+            match crate::gpu::admission().try_reserve(tenant, bytes) {
+                Some(res) => Some(res),
+                None => {
+                    // Not enough of this tenant's device share; degrade, do not fail.
+                    plan = crate::gpu::RoutePlan {
+                        route: crate::gpu::Route::Cpu,
+                        reason: "device admission refused this tenant's footprint; degraded".into(),
+                    };
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // Rerank on the chosen route, degrading to CPU on a device fault. A device is an
+        // accelerator, not a dependency: a query answerable on the CPU is always answered.
+        let score_all = |route: crate::gpu::Route| -> std::result::Result<Vec<Scored>, crate::gpu::DeviceFault> {
+            let fault = if route.is_device() {
+                crate::gpu::injected_fault()
+            } else {
+                None
+            };
+            let mut out = Vec::with_capacity(fetched.len());
+            for f in &fetched {
+                // Exact cosine on the stored float32 vector. This is the answer; the PQ distance
+                // was only ever a way to avoid computing this for everything.
+                let score = crate::gpu::rerank_score(route, &f.query_vector, &f.vector, fault)?;
+                out.push(Scored {
+                    score,
+                    part: f.part,
+                    row: f.row,
+                    vector: f.vector.clone(),
+                    event_id: f.event_id.clone(),
+                });
+            }
+            Ok(out)
+        };
+
+        let scored: Vec<Scored> = match score_all(plan.route) {
+            Ok(s) => {
+                c.rerank_route = plan.route.name().to_string();
+                s
+            }
+            Err(fault) => {
+                // Degrade to CPU, logged and observable. Never a failed query. The log makes a
+                // degradation loud -- a GPU that quietly stopped being used is one you are paying
+                // for and not getting -- and `route_degraded` carries it in the counters too.
+                eprintln!(
+                    "prism: device route `{}` faulted at {} ({}); degraded to CPU for tenant {:?}",
+                    plan.route.name(),
+                    fault.phase.name(),
+                    fault.reason,
+                    q.tenant.as_deref().unwrap_or("(none)")
+                );
+                c.route_degraded = true;
+                c.rerank_route = crate::gpu::Route::Cpu.name().to_string();
+                score_all(crate::gpu::Route::Cpu).expect("the CPU route cannot fault")
+            }
+        };
+        drop(_reservation);
+        let mut scored = scored;
 
         // Descending score, ties broken on `event_id`.
         //
