@@ -163,9 +163,14 @@ pub struct AdcTable {
 }
 
 impl AdcTable {
-    /// The approximate squared L2 distance between the query and a coded row.
-    /// This is the scalar reference implementation; every future SIMD/GPU kernel
-    /// must prove epsilon-equivalence against it (Part II §7.2).
+    /// The approximate squared L2 distance between the query and one coded row.
+    ///
+    /// This is the scalar definition of a single ADC distance
+    /// ([docs/DETERMINISM-CONTRACT.md](../../../docs/DETERMINISM-CONTRACT.md) §1.1). The scan
+    /// path does not call this per row -- it calls [`crate::kernel::adc_scan`] over a whole range
+    /// so a SIMD kernel can process many rows at once -- but every kernel is defined to produce,
+    /// for each row, exactly the value this function returns. It is kept as the single-row
+    /// reference and used where a lone distance is wanted.
     #[inline]
     pub fn distance(&self, code: &[u8]) -> f32 {
         debug_assert_eq!(code.len(), self.m);
@@ -174,6 +179,12 @@ impl AdcTable {
             acc += self.table[j * PQ_KSUB + c as usize];
         }
         acc
+    }
+
+    /// The flat `m·256` lookup table, for the batched scan kernels.
+    #[inline]
+    pub fn table(&self) -> &[f32] {
+        &self.table
     }
 }
 

@@ -7,6 +7,11 @@ license.workspace = true
 repository.workspace = true
 description = "Coarse k-means centroids, product quantization, and ADC distance tables for PrismDB."
 
+[features]
+# AVX-512 stays off until CI can execute it (Intel SDE or a self-hosted runner).
+# See docs/DETERMINISM-CONTRACT.md §3.
+experimental-avx512 = []
+
 [dependencies]
 prism-types = { workspace = true }
 serde = { workspace = true }

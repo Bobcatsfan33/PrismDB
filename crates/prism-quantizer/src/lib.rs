@@ -14,8 +14,10 @@
 //! PQ distances are approximate *by construction*. They never reach the
 //! surface: they decide who gets reranked, and exact vectors decide the answer.
 
+pub mod kernel;
 pub mod kmeans;
 pub mod pq;
 
+pub use kernel::{adc_scan, Isa};
 pub use kmeans::{kmeans, CoarseCodebook};
 pub use pq::{AdcTable, PqCodebook, PQ_KSUB};
