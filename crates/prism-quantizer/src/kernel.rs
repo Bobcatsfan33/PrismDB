@@ -247,14 +247,18 @@ unsafe fn adc_scan_avx512(table: &[f32], m: usize, codes: &[u8], out: &mut [f32]
         let i0 = g * 16;
         let mut acc = _mm512_setzero_ps();
         for j in 0..m {
-            let base = (j * KSUB) as i32;
-            let mut idxs = [0i32; 16];
-            for (lane, slot) in idxs.iter_mut().enumerate() {
-                *slot = base + codes[(i0 + lane) * m + j] as i32;
+            // Manual gather into an array, then a single vector load -- exactly the NEON approach
+            // at 16 lanes. This deliberately avoids `_mm512_i32gather_ps`, whose intrinsic
+            // signature has churned across std versions, in favour of `_mm512_loadu_ps`, which is
+            // stable. The gathered values are the exact f32s the scalar path would add, and the
+            // only floating-point op is the lane-wise add below, so the result stays bit-identical.
+            let base = j * KSUB;
+            let mut lanes = [0.0f32; 16];
+            for (lane, slot) in lanes.iter_mut().enumerate() {
+                *slot = table[base + codes[(i0 + lane) * m + j] as usize];
             }
-            let idx = _mm512_loadu_si512(idxs.as_ptr() as *const i32);
-            let t = _mm512_i32gather_ps::<4>(idx, table.as_ptr() as *const u8);
-            acc = _mm512_add_ps(acc, t);
+            let t = _mm512_loadu_ps(lanes.as_ptr());
+            acc = _mm512_add_ps(acc, t); // lane-wise IEEE add == scalar add, per lane
         }
         _mm512_storeu_ps(out.as_mut_ptr().add(i0), acc);
     }
