@@ -544,7 +544,7 @@ Every tuned entry now carries `generation_conditional: true`, and every receipt 
 
 ## S6 — complete
 
-**Proof:** [CI run #29382484316](https://github.com/Bobcatsfan33/PrismDB/actions/runs/29382484316) — green on `main`, including the S6 gates on **two architectures**: `determinism` (x86, scalar == AVX2) and `determinism-arm` (`ubuntu-24.04-arm`, scalar == NEON), plus `no-alloc` (counting allocator), `unsafe-inventory` (grep gate), and `avx512-compiles` (the gated kernel type-checked on x86). 272 tests.
+**Proof:** [CI run #29383807911](https://github.com/Bobcatsfan33/PrismDB/actions/runs/29383807911) — green on `main`, including the S6 gates on **two architectures**: `determinism` (x86, scalar == AVX2) and `determinism-arm` (`ubuntu-24.04-arm`, scalar == NEON), plus `no-alloc` (counting allocator), `unsafe-inventory` (grep gate), and `avx512-compiles` (the gated kernel type-checked on x86). 272 tests.
 
 **Gate:** *SIMD kernels with a scalar twin CI proves equal; allocation-free hot loop; adaptive nprobe; unsafe inventoried; per-ISA end-to-end numbers.*
 
