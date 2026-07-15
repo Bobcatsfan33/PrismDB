@@ -590,6 +590,8 @@ Directive 5 — re-run the C-1 sweeps against the SIMD engine — did exactly wh
 
 ## S7 — GPU-ready, GPU-off (the gate is **not** claimed)
 
+**Proof:** [CI run #29423076591](https://github.com/Bobcatsfan33/PrismDB/actions/runs/29423076591) — green on `main`, including the S7 device gate (selection-identity, route-flip pagination, fault-degrades-to-CPU), the fp16 accuracy-contract check (tolerance ≥ 2× the gap, selection stable), the unsafe-inventory grep gate, and a `cuda`-feature compile check. 288 tests. The GPU gate itself is **not** among these — there is no GPU to run it.
+
 **Directive 2 named the honest outcome up front, and this is it.** CI GPU capacity is a sprint deliverable, and this environment cannot deliver it — no CUDA hardware, no cloud credentials to provision a runner. Per the architect's own fallback, **S7 pivots to "GPU-ready, GPU-off" and does not claim the GPU gate** ([D-053](DECISIONS.md)).
 
 What that means precisely: everything **device-agnostic** is built and tested against the CPU reference of the GPU route; the CUDA kernel and the runner — the two things that need hardware and money — are **not** faked. Contract first, as always: [the determinism contract's device edition](DETERMINISM-CONTRACT.md) (§8–§12) was written before any of it.
