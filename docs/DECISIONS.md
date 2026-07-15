@@ -648,3 +648,40 @@ CI GPU capacity is a sprint deliverable, and this environment cannot deliver it:
 So it does not. What ships is **everything device-agnostic**, fully built and tested against the CPU reference: the route abstraction, selection-identity, fault containment, per-tenant admission, the fp16 accuracy contract, and the cost-model *mechanism*. What does **not** ship is the CUDA kernel (declared behind the `cuda` feature, not compiled — writing untestable FFI would be the faked completeness the project refuses) and the GPU runner (provisioning-as-code in `infra/gpu-runner/`, reviewable and one `terraform apply` from real, but **not applied**). The crossover thresholds are placeholders marked device-conditional and un-derived, because deriving them requires measuring a GPU. `Route::Cuda` and the GPU are **off by default** — the AVX-512 rule, device edition: an instruction set, or a device, that CI cannot execute does not ship enabled.
 
 The 4-bit-shuffle CPU kernel — the genuine SIMD speedup S6's NEON finding pointed at — is filed as an issue with that finding attached, not built. One new execution substrate per sprint (directive 7).
+
+## D-054 — Plan-invariance: three strategies, one candidate set, by construction
+**S8. Directive 1, the sprint's central gate — [D-033](DECISIONS.md) in its plan edition.**
+
+A semantic query with a predicate runs three ways — **interleaved** (filter fused into the distance scan), **scalar-first** (filter, then distance the survivors), **semantic-first** (distance, then predicate only the rows near enough to enter the heap). They are three physical strategies for **one logical query**, and the plan may cost differently but **may not answer differently** ([query contract §9](QUERY-CONTRACT.md)).
+
+It holds *by construction*, not by luck: all three offer the **identical passing rows, ranked by the identical PQ distance, to the identical bounded top-k**. They differ only in *when* the predicate runs relative to the distance — which changes the work, never the set. The gate forces every strategy on the golden, layout-variant, and boundary-tie corpora and asserts byte-identical event ids and order; a second test proves the *work* genuinely diverges (scalar-first computes far fewer distances, semantic-first far fewer predicate evals) so the strategies are not a distinction without a difference.
+
+**Consequence: the cursor need not pin the plan.** Unlike the route — whose *scores* differ, so its cursor pins it ([D-052](DECISIONS.md)) — the plan changes no score, so a page-2 keyset boundary is identical whichever strategy computed it. The gate paginates while flipping the plan between pages and the pages tile the answer exactly. We proved it before relying on it, per the directive.
+
+## D-055 — The optimizer consumes receipts; its regret is worst-cell, not average
+**S8. Directives 2 and 3.**
+
+The plan choice is a cost decision over one estimate — **selectivity**, the fraction of probed rows the predicate admits. A selective predicate favours scalar-first (distance only survivors); a permissive one favours semantic-first (the distance narrows, the predicate is barely consulted). The estimate is deliberately **crude** (directive 7: choose among three strategies well, do not research cardinality estimation) — a bounded sample of real rows, not a histogram — and it carries a receipt saying so.
+
+The metric is **worst-cell regret, not average** (directive 3): across the selectivity matrix, the chosen plan must be within `PLAN_REGRET_BOUND_PCT = 15%` of the best fixed plan's *actual* cost in **every** cell. An optimizer that wins on average by losing badly in one cell is worse than a fixed heuristic for the customer in that cell. Cost is a **deterministic proxy from the actual counters** (`distances_computed · w_d + predicate_evals · w_p`), so the gate has no wall-clock noise — it measures whether the crude estimate is good enough to pick within the bound.
+
+**The regret gate earned its keep immediately.** It caught a real cost-model bug: semantic-first's predicate saving materializes only when the heap *fills*, which takes ~`cap/selectivity` probed rows — modelling `cap` instead of `cap/sel` mis-picked semantic-first at low selectivity, for 76% regret. The worst-cell metric surfaced it where an average would have buried it.
+
+**The cost-model coefficients are policy, informed by a microbench, not bound to a stopwatch.** The honest finding ([`cost-model.json`](../testing/evidence/cost-model.json)): a real interpreted `predicate::eval` costs *as much as or more than* a SIMD-batched ADC distance, which is why "distance-first, predicate-lazily" tends to win. A constant bound to an exact timing would be a flaky gate, so `DIST_COST_MILLI`/`PRED_COST_MILLI` are committed as stable in-magnitude values with the microbench as documentation; engine-conditional per C-6.
+
+**The GPU axis stays inert.** `GPU_MIN_CANDIDATES` is `usize::MAX` and `gpu_available()` is false, so the planner never steers on a coefficient that has no evidence — the GPU route is cost-model-ineligible until the runner produces real crossover receipts, at which point the optimizer ingests them as data with zero code change (directive 2).
+
+## D-056 — Query semantics stated in the contract before the code
+**S8. Directive 4.** [query contract §10–§14](QUERY-CONTRACT.md) extends the S3 contract (never contradicts it) with:
+
+- **Null semantics** — an unwritten attribute is *absent*, not a three-valued `NULL`; a comparison against absence is false. Deliberately two-valued, because SQL `NULL`-propagation in a filter that decides tenant visibility is a footgun. The surprising corner (`!=` on an absent attribute) is stated loudly rather than discovered.
+- **Tie semantics** — C-4's `event_id` rule, now a SQL guarantee: `ORDER BY score DESC, event_id ASC`, always, a query may not override it.
+- **Threshold × top-k** — the result is the top-k of the rows clearing the threshold: threshold first, `LIMIT` second, applied to the *exact* score, never the PQ distance.
+- **Generation selection** — same-space parts merge, cross-space is refused, and the error is written to **teach**: it names both spaces, explains that a cosine of 0.8 in one is not a cosine of 0.8 in the other, and offers the three fixes (name a space, declare a bridge, finish the migration). Invariant 9 surfacing where a SQL user first meets it.
+
+## D-057 — EXPLAIN carries estimates and actuals; the Flight door is the same door
+**S8. Directives 5 and 6.**
+
+**EXPLAIN** reports the optimizer's estimate alongside the query's actual for the four controls and the physical work, plus the chosen route and plan **with the reason** (§14). A calibration harness tracks the estimate-vs-actual selectivity error across the matrix in CI, so cost-model drift is a visible number, not a slow surprise — and it caught its own subtlety: `actual_selectivity` from counters is strategy-dependent (semantic-first observes a biased near-subset), so the harness measures the *true* rate from a forced-interleaved run.
+
+**The Flight SQL door is the same door** ([D-057 detail in `flight.rs`], directive 6): the tenant conjunction is injected *below* it, its counters are byte-identical to the direct API and the SQL text door on every query, and its decode obeys S1's bounded-allocation discipline (every length capped, every violation named; garbage never panics). **What ships is the door's server-side query path, not the Arrow IPC / gRPC transport** — real Arrow Flight needs the `arrow`/`tonic`/`prost` ecosystem the serde-only charter ([D-002](DECISIONS.md)) excludes, and a network server the roadmap defers to S14. That transport, and the dependency decision it forces, belong to the sprint that needs it; building an untested wire format now would be the faked completeness the project refuses. The *same-door* property — the thing that matters for correctness — is built and proven three-way today.

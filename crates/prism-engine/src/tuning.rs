@@ -119,6 +119,23 @@ pub fn constants() -> Vec<Constant> {
             value: crate::drift::DRIFT_FIRE_MULTIPLE as i64,
             kind: Kind::Policy,
         },
+        // S8. The plan cost model. Policy, informed by the cost-model microbench (documented in
+        // testing/evidence/cost-model.json), not bound to a noisy timing.
+        Constant {
+            name: "DIST_COST_MILLI",
+            value: crate::plan::DIST_COST_MILLI as i64,
+            kind: Kind::Policy,
+        },
+        Constant {
+            name: "PRED_COST_MILLI",
+            value: crate::plan::PRED_COST_MILLI as i64,
+            kind: Kind::Policy,
+        },
+        Constant {
+            name: "PLAN_REGRET_BOUND_PCT",
+            value: crate::plan::PLAN_REGRET_BOUND_PCT as i64,
+            kind: Kind::Policy,
+        },
         Constant {
             name: "MIN_PAGEABLE_ROWS",
             value: crate::evidence::MIN_PAGEABLE_ROWS as i64,

@@ -122,6 +122,9 @@ impl Engine {
             adaptive: true,
             adaptive_margin: None,
             force_route: None,
+            plan: None,
+            threshold: None,
+            explain: false,
         })
     }
 

@@ -143,3 +143,60 @@ In a shared bucket, part-level metadata naturally describes the *bucket*, not th
 If that is unacceptable for a given tenant, they get a **dedicated bucket** — and a dedicated bucket holding two tenants is *refused at commit*, because if it were accepted, every isolation claim resting on dedicated buckets would be false and nothing would notice. S14's envelope encryption closes the disk layer properly.
 
 This is a deliberate, logged decision ([D-030](DECISIONS.md)), not an oversight. A seam you have written down is a seam you can close later; a seam you have not is a breach you find out about from someone else.
+
+---
+
+# The semantics edition (S8)
+
+**Status:** S8 owns the full query semantics the S3 contract deferred — nulls, ties, ordering, threshold-vs-top-k, and model-version/generation selection. Everything below **extends** §1–§8; per §5's binding sentence, *S8 may extend these semantics, it may not contradict them.* Every S8 gate test cites the clause it exercises.
+
+## 9. Plan-invariance — the physical strategy is invisible to the answer
+
+A semantic query can be executed three ways — **scalar-first** (filter, then distance the survivors), **semantic-first** (distance the probed rows, then filter), and **interleaved** (the fused scan) — and they are three *physical strategies for one logical query*. This is [D-033](DECISIONS.md) in its plan edition, the sibling of the route's [selection-identity](DETERMINISM-CONTRACT.md):
+
+> **The chosen plan may cost differently; it may not answer differently.** Every strategy returns byte-identical event ids in byte-identical order.
+
+It holds *by construction*: all three compute the **identical candidate set** — the top-`candidates` predicate-satisfying rows by PQ distance among the `nprobe` probed centroids — and then rerank it identically. They differ only in *when* the predicate is evaluated relative to the distance, which changes the work done, never the set produced. The tie-break that makes this exact is C-4's, now stated at the SQL level (§11).
+
+So, once proven, **a cursor need not pin the plan** (unlike the route, which pins because its *scores* differ — §D-052). The plan changes no score, so a page-2 keyset boundary is identical whichever strategy computed it. The gate proves it: paginate while forcing the plan to flip between pages, and the pages tile the answer exactly.
+
+## 10. NULL semantics
+
+A row's attribute is **absent** (the key was never written) or **present**. There is no stored SQL `NULL` distinct from absence — an unwritten attribute *is* the absence.
+
+- A predicate on an absent attribute is **false**, never NULL-propagating. `attributes['x'] = 'y'` on a row without `x` does not match; `attributes['x'] != 'y'` on a row without `x` also does not match. Absence satisfies no comparison — a row must *have* the attribute to be compared. This is deliberately **not** three-valued logic: SQL's `NULL`-propagation is a footgun in a filter that decides tenant visibility, and a two-valued "absent matches nothing" is the safe reading.
+- `AND` / `OR` / `NOT` are ordinary two-valued boolean operators over that base. `NOT (absent = 'y')` is `NOT false` = `true` **only if the row is otherwise in scope** — but since the comparison is false, its negation is true, so `WHERE attributes['x'] != 'y'` returns rows that *have* `x` unequal to `y` **and** rows that lack `x`. A caller who means "has x, and it isn't y" must say `attributes['x'] IS PRESENT AND attributes['x'] != 'y'`.
+- **This is a place the two-valued choice surprises people, so it is stated loudly rather than discovered.**
+
+## 11. Tie semantics — C-4, at the SQL level
+
+The total order is §1's, and it is now stated as a SQL guarantee: **`ORDER BY score DESC, event_id ASC`, always, ties broken on `event_id`.** A query may not override it with its own `ORDER BY` (S8's SQL still refuses one, per S3); the order is the contract's, because pagination and plan-invariance both rest on it. Exact-score ties are common — real telemetry repeats bodies — and they break on the row's *identity*, never on its physical position or on which plan or route computed it. This is [charter C-4](DECISIONS.md) surfacing in SQL: the answer is a function of the data.
+
+## 12. Threshold and top-k interact, and the interaction is defined
+
+A semantic query may carry a **similarity threshold** (return only rows scoring above `τ`) and a **top-k** (`LIMIT`). When both are present:
+
+> The result is **the top-k of the rows that clear the threshold** — threshold first, then `LIMIT`, in that order.
+
+A threshold that admits fewer than `k` rows returns fewer than `k`; that is not an error, it is the honest count of rows that met the bar. A threshold that admits more than `k` returns exactly `k`, the nearest. The threshold is applied to the **exact rerank score**, never the PQ distance — the approximate distance decides who is reranked, and a threshold on an approximate score would admit rows the exact score rejects. `LIMIT` without a threshold is the S0 behaviour, unchanged.
+
+## 13. Model-version / generation selection, and the error that teaches
+
+A store mid-migration holds parts in more than one generation, and possibly more than one embedding **space** (§ invariant 9). SQL selection semantics:
+
+- A query with no space named searches the **active** generation's space. Parts in a deprecated generation of the *same space* are included — their scores are comparable — and their per-generation ADC tables merge at exact-score time.
+- Parts in a **different embedding space** are never silently merged. A query that would span two spaces is **refused**, and the error names both spaces and the fix. The message is written to *teach*, because this is invariant 9 surfacing where a SQL user will first meet it:
+
+  ```
+  this query spans two embedding spaces — hash-embedder:v1 and hash-embedder:v2 —
+  whose scores are not comparable (a cosine of 0.8 in one is not a cosine of 0.8 in
+  the other). PrismDB will not merge them into one ranking. Either name one space with
+  `USING SPACE 'hash-embedder:v2'`, declare a bridge to fuse their ranks
+  (`prism bridge declare`), or finish the re-embed migration so a single space remains.
+  ```
+
+- A **bridge** ([D-039](DECISIONS.md)) makes a cross-space query answerable by rank fusion, and a bridged SQL result is labelled as such in its `EXPLAIN`, never mistakable for a native ranking.
+
+## 14. EXPLAIN carries estimates *and* actuals
+
+`EXPLAIN` reports, for all four controls (`nprobe`, candidate width, rerank width, `k`) and for bytes / parts / ranges: the optimizer's **estimate** and the query's **actual**, plus the chosen route and plan **with the reason** — the receipt id and the threshold that decided it. The estimate-vs-actual error is tracked across the selectivity matrix in CI (the calibration harness), so cost-model drift is a visible number, not a slow surprise. An optimizer that cannot say *why* it chose a plan is an optimizer nobody can debug.

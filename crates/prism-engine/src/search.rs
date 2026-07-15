@@ -55,6 +55,130 @@ impl Engine {
         self.search_at(&snap, q)
     }
 
+    /// Choose the physical execution strategy for a query (S8), or honour a forced one.
+    ///
+    /// The choice is a pure cost decision, and it turns on one estimate: **selectivity** — the
+    /// fraction of probed rows the predicate admits. A selective predicate favours *scalar-first*
+    /// (distance only the survivors); a permissive one favours *semantic-first* (the distance does
+    /// the narrowing). The selectivity estimate is deliberately **crude** (directive 7: choose
+    /// among three strategies well, do not research cardinality estimation) and carries a receipt
+    /// saying so; S16's benchmarks will show where estimation actually hurts.
+    pub(crate) fn choose_plan(
+        &self,
+        q: &Query,
+        eligible: &[&prism_part::part::PartReader],
+        forced: Option<crate::plan::Strategy>,
+    ) -> crate::plan::PlanChoice {
+        use crate::plan::{estimate_cost, PlanChoice, Strategy};
+
+        if let Some(s) = forced {
+            return PlanChoice {
+                strategy: s,
+                reason: "forced by the caller (test / advanced)".into(),
+                estimated_selectivity: f64::NAN,
+            };
+        }
+
+        // No predicate: there is nothing to filter, so filter-order is moot and interleaved (the
+        // fused default) is the honest choice.
+        if q.predicate.is_none()
+            && q.tenant.is_none()
+            && q.time_from.is_none()
+            && q.time_to.is_none()
+        {
+            return PlanChoice {
+                strategy: Strategy::Interleaved,
+                reason: "no predicate to filter; interleaved".into(),
+                estimated_selectivity: 1.0,
+            };
+        }
+
+        let sel = self.estimate_selectivity(q, eligible);
+        // Estimate the probed row count: nprobe centroids' worth of rows across eligible parts. A
+        // rough upper bound is fine -- the DECISION turns on selectivity, and the row count scales
+        // all three costs together.
+        let probed_rows: usize = eligible
+            .iter()
+            .flat_map(|r| r.manifest.centroid_ranges.iter())
+            .map(|cr| cr.row_count)
+            .take(q.nprobe.max(1) * eligible.len().max(1))
+            .sum::<usize>()
+            .max(1);
+
+        let (best, _) = Strategy::ALL
+            .iter()
+            .map(|&s| (s, estimate_cost(s, probed_rows, sel, q.candidates)))
+            .min_by_key(|&(_, cost)| cost)
+            .unwrap();
+
+        PlanChoice {
+            strategy: best,
+            reason: format!("{}: est. selectivity {sel:.3}", best.name()),
+            estimated_selectivity: sel,
+        }
+    }
+
+    /// Estimate the fraction of probed rows the predicate admits. **Crude on purpose** (directive
+    /// 7), and honest about it: a tenant-scoped query in a shared bucket is estimated from the
+    /// tenant's row share; a general predicate gets a fixed prior. `testing/evidence/cost-model.json`
+    /// records that this is a placeholder, and the calibration harness tracks its error so S16
+    /// knows whether it is worth improving.
+    fn estimate_selectivity(&self, q: &Query, eligible: &[&prism_part::part::PartReader]) -> f64 {
+        let mut sel = 1.0f64;
+
+        // A tenant predicate in a shared bucket: the tenant's share of the bucket's rows. This one
+        // we can actually estimate from the per-tenant stats already in the manifest (S4).
+        if let Some(tenant) = &q.tenant {
+            let mut tenant_rows = 0usize;
+            let mut total_rows = 0usize;
+            for r in eligible {
+                total_rows += r.manifest.row_count;
+                if let Ok(s4) = r.manifest.s4() {
+                    if let Some(st) = s4.stats_for(tenant) {
+                        tenant_rows += st.rows;
+                    }
+                }
+            }
+            if total_rows > 0 {
+                sel *= (tenant_rows as f64 / total_rows as f64).clamp(0.0, 1.0);
+            }
+        }
+
+        // A general predicate: estimate the pass rate from a BOUNDED SAMPLE. Not a histogram (that
+        // is cardinality-estimation research, out of scope -- directive 7), just a cheap sample of
+        // real rows: read at most `PLAN_SAMPLE_ROWS` evenly spaced rows from the first eligible
+        // part, evaluate the predicate, and use the pass rate. Crude, but grounded in the data
+        // rather than a fixed prior -- which is what the regret gate needs. `cost-model.json`
+        // records the sample size and that this is a placeholder for real statistics.
+        if let Some(p) = &q.predicate {
+            const PLAN_SAMPLE_ROWS: usize = 512;
+            if let Some(r) = eligible.first() {
+                if let Ok(view) = crate::rowsource::PartRows::new(r, Some(p)) {
+                    let n = r.manifest.row_count;
+                    if n > 0 {
+                        let sample = PLAN_SAMPLE_ROWS.min(n);
+                        let step = (n / sample).max(1);
+                        let mut seen = 0usize;
+                        let mut passed = 0usize;
+                        let mut row = 0usize;
+                        while row < n && seen < sample {
+                            if prism_types::predicate::eval(p, &view, row).unwrap_or(false) {
+                                passed += 1;
+                            }
+                            seen += 1;
+                            row += step;
+                        }
+                        if seen > 0 {
+                            sel *= (passed as f64 / seen as f64).clamp(0.0, 1.0);
+                        }
+                    }
+                }
+            }
+        }
+
+        sel.clamp(0.0001, 1.0)
+    }
+
     /// Search a **specific** snapshot.
     ///
     /// This is what makes pagination correct. A paginated query is a query whose lifetime
@@ -191,14 +315,19 @@ impl Engine {
                             return self.search_bridged(snap, q, &spaces, b);
                         }
                     }
+                    // The error is written to TEACH (docs/QUERY-CONTRACT.md §13): this is invariant
+                    // 9 surfacing where a SQL user first meets it, and a terse "spaces differ" would
+                    // leave them guessing why their perfectly reasonable query was refused.
+                    let mut names: Vec<&str> = spaces.iter().map(|s| s.as_str()).collect();
+                    names.sort();
+                    let (a, b) = (names[0], names.get(1).copied().unwrap_or(""));
                     return Err(PrismError::Invariant(format!(
-                        "eligible parts span {} embedding spaces ({:?}). Scores from \
-                         different embedding spaces are not comparable, so this query \
-                         will not merge them. Name one with `--space <model:version>`, \
-                         declare a bridge (`prism bridge declare`), or finish the re-embed \
-                         migration so a single space remains.",
-                        spaces.len(),
-                        spaces
+                        "this query spans two embedding spaces — {a} and {b} — whose scores are \
+                         not comparable (a cosine of 0.8 in one is not a cosine of 0.8 in the \
+                         other). PrismDB will not merge them into one ranking. Either name one \
+                         space with `USING SPACE '{b}'`, declare a bridge to fuse their ranks \
+                         (`prism bridge declare`), or finish the re-embed migration so a single \
+                         space remains."
                     )));
                 }
             }
@@ -213,6 +342,7 @@ impl Engine {
                 counters: c,
                 generations: Vec::new(),
                 bridge: None,
+                explain: None,
                 snapshot_id: snap.snapshot_id.clone(),
             });
         }
@@ -279,6 +409,19 @@ impl Engine {
             .max()
             .unwrap_or(0);
         let mut dists = vec![0.0f32; max_range_rows];
+
+        // --- choose the physical strategy (S8) ---
+        //
+        // The strategy is invisible to the answer (plan-invariance, docs/QUERY-CONTRACT.md §9), so
+        // the optimizer chooses on cost alone. A forced plan (test override, or a per-query hint)
+        // wins, so the plan-invariance gate can prove every strategy answers identically.
+        let plan_choice = {
+            let forced = crate::plan::forced_plan_override()
+                .or_else(|| q.plan.as_deref().and_then(crate::plan::Strategy::parse));
+            self.choose_plan(q, &eligible, forced)
+        };
+        let strategy = plan_choice.strategy;
+        c.plan = strategy.name().to_string();
 
         for (pi, r) in eligible.iter().enumerate() {
             c.parts_opened += 1;
@@ -349,57 +492,116 @@ impl Engine {
 
                 let m = r.manifest.pq_m;
 
-                // Batch the distance math for the whole range through the selected kernel, into
-                // the reused buffer. This is the one place SIMD acts; everything downstream --
-                // the fused mask, the tie-break, the bounded heap -- is unchanged, so selection
-                // semantics are exactly what they were, only the distances arrived faster.
-                prism_quantizer::kernel::adc_scan(
-                    isa,
-                    ctx.adc.table(),
-                    m,
-                    &codes,
-                    &mut dists[..range.row_count],
-                );
-
-                for (i, &dist) in dists[..range.row_count].iter().enumerate() {
-                    let row = range.first_row + i;
-
-                    // Fused scalar mask. Allocation-free: it runs once per
-                    // scanned row, so it must not be the expensive part of the
-                    // scan it exists to make cheaper.
+                // The scalar mask, one closure so all three strategies apply the *same* predicate
+                // to the *same* rows. `pe` counts general-predicate evaluations (the expensive
+                // part; tenant and time are cheap columnar checks).
+                let mask = |row: usize, pe: &mut usize| -> Result<bool> {
                     if let Some(t) = &q.tenant {
                         if !scalars.tenant_is(row, t) {
-                            continue;
+                            return Ok(false);
                         }
                     }
                     if let Some(f) = q.time_from {
                         if times[row] < f {
-                            continue;
+                            return Ok(false);
                         }
                     }
                     if let Some(t) = q.time_to {
                         if times[row] > t {
-                            continue;
+                            return Ok(false);
                         }
                     }
-                    // The general predicate, fused into the same loop. Evaluated last,
-                    // because tenant and time are cheap and prune whole parts.
                     if let (Some(p), Some(view)) = (&q.predicate, &rows_view) {
+                        *pe += 1;
                         if !prism_types::predicate::eval(p, view, row)? {
-                            continue;
+                            return Ok(false);
                         }
                     }
-                    c.rows_passing_filter += 1;
+                    Ok(true)
+                };
 
-                    // Offer the row to the bounded top-k. `Candidate` is `Copy` and owns nothing;
-                    // the tie-break borrows the event id out of `part_scalars`, so this whole
-                    // insertion — the millions-of-times hot path — allocates not one byte (§4).
-                    topk.offer(crate::topk::Candidate {
-                        dist,
-                        part: pi as u32,
-                        row: row as u32,
-                    });
+                let mut pe = 0usize; // predicate evals this range
+                let mut dc = 0usize; // distances computed this range
+
+                // **Three strategies, one candidate set (docs/QUERY-CONTRACT.md §9).** Every branch
+                // offers exactly the predicate-passing rows, with their PQ distance, to the same
+                // bounded top-k. They differ only in when the predicate runs relative to the
+                // distance -- which changes the work, never the set. Plan-invariance is therefore
+                // by construction, and the gate proves it.
+                match strategy {
+                    crate::plan::Strategy::Interleaved => {
+                        // Distance every probed row (batched SIMD), filter inline.
+                        prism_quantizer::kernel::adc_scan(
+                            isa,
+                            ctx.adc.table(),
+                            m,
+                            &codes,
+                            &mut dists[..range.row_count],
+                        );
+                        dc += range.row_count;
+                        for (i, &dist) in dists[..range.row_count].iter().enumerate() {
+                            let row = range.first_row + i;
+                            if !mask(row, &mut pe)? {
+                                continue;
+                            }
+                            c.rows_passing_filter += 1;
+                            topk.offer(crate::topk::Candidate {
+                                dist,
+                                part: pi as u32,
+                                row: row as u32,
+                            });
+                        }
+                    }
+                    crate::plan::Strategy::ScalarFirst => {
+                        // Filter first; compute a distance ONLY for survivors. When the predicate is
+                        // selective, most distances are never computed.
+                        for i in 0..range.row_count {
+                            let row = range.first_row + i;
+                            if !mask(row, &mut pe)? {
+                                continue;
+                            }
+                            c.rows_passing_filter += 1;
+                            let dist = ctx.adc.distance(&codes[i * m..(i + 1) * m]);
+                            dc += 1;
+                            topk.offer(crate::topk::Candidate {
+                                dist,
+                                part: pi as u32,
+                                row: row as u32,
+                            });
+                        }
+                    }
+                    crate::plan::Strategy::SemanticFirst => {
+                        // Distance first; evaluate the predicate ONLY for rows near enough to enter
+                        // the selection. When the distance already narrows hard, the predicate is
+                        // barely consulted. `would_admit` is conservative -- it never skips a row
+                        // that could enter -- so the offered set is identical.
+                        prism_quantizer::kernel::adc_scan(
+                            isa,
+                            ctx.adc.table(),
+                            m,
+                            &codes,
+                            &mut dists[..range.row_count],
+                        );
+                        dc += range.row_count;
+                        for (i, &dist) in dists[..range.row_count].iter().enumerate() {
+                            if !topk.would_admit(dist) {
+                                continue;
+                            }
+                            let row = range.first_row + i;
+                            if !mask(row, &mut pe)? {
+                                continue;
+                            }
+                            c.rows_passing_filter += 1;
+                            topk.offer(crate::topk::Candidate {
+                                dist,
+                                part: pi as u32,
+                                row: row as u32,
+                            });
+                        }
+                    }
                 }
+                c.predicate_evals += pe;
+                c.distances_computed += dc;
             }
         }
 
@@ -549,6 +751,15 @@ impl Engine {
                 .then(a.event_id.cmp(&b.event_id))
         });
 
+        // Similarity threshold (docs/QUERY-CONTRACT.md §12): keep only rows whose EXACT rerank
+        // score clears the bar, THEN apply `k`. Threshold first, LIMIT second. Applied to the
+        // exact score, never the approximate PQ distance -- a threshold on an approximate score
+        // would admit rows the exact score rejects. Fewer than `k` clearing the bar is the honest
+        // count, not an error.
+        if let Some(tau) = q.threshold {
+            scored.retain(|s| s.score >= tau);
+        }
+
         // --- 6. materialize only what we return ---
         //
         // Bodies are the most expensive column and the least useful one to a
@@ -611,12 +822,46 @@ impl Engine {
         // What the disk actually moved, as opposed to what the plan asked for.
         c.physical_bytes_read = eligible.iter().map(|r| r.io_bytes()).sum();
 
+        // EXPLAIN (S8, §14): estimates alongside actuals, so cost-model drift is a visible number.
+        let explain = if q.explain {
+            // Pass rate among rows the predicate was ACTUALLY evaluated on. For interleaved and
+            // scalar-first that is every scanned row, so it is the true selectivity; semantic-first
+            // evaluates a biased near subset, so its number is only a lower bound -- EXPLAIN says
+            // which plan produced it, so the reader knows.
+            let actual_selectivity = if c.predicate_evals > 0 {
+                c.rows_passing_filter as f64 / c.predicate_evals as f64
+            } else if c.rows_scanned_pq > 0 {
+                // No general predicate: selectivity is the tenant/time pass rate over scanned rows.
+                c.rows_passing_filter as f64 / c.rows_scanned_pq as f64
+            } else {
+                1.0
+            };
+            Some(prism_types::Explain {
+                chosen_plan: c.plan.clone(),
+                plan_reason: plan_choice.reason.clone(),
+                chosen_route: c.rerank_route.clone(),
+                estimated_selectivity: plan_choice.estimated_selectivity,
+                actual_selectivity,
+                estimated_nprobe: q.nprobe,
+                actual_nprobe: c.probes_taken,
+                actual_candidates: c.candidates_considered,
+                actual_rerank: c.rerank_width,
+                actual_k: hits.len(),
+                actual_parts_opened: c.parts_opened,
+                actual_ranges_scanned: c.ranges_scanned,
+                actual_bytes_read: c.physical_bytes_read,
+            })
+        } else {
+            None
+        };
+
         Ok(SearchResult {
             hits,
             clusters,
             counters: c,
             generations: gen_ids.into_iter().collect(),
             bridge: None,
+            explain,
             snapshot_id: snap.snapshot_id.clone(),
         })
     }
@@ -712,6 +957,7 @@ impl Engine {
                 "{:?} across {} <-> {} ({})",
                 bridge.policy, bridge.from_space, bridge.to_space, bridge.validation
             )),
+            explain: None,
             snapshot_id: snap.snapshot_id.clone(),
         })
     }

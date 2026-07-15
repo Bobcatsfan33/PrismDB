@@ -24,5 +24,5 @@ pub use error::{PrismError, Result};
 pub use event::{DeadLetter, Event, MAX_BODY_BYTES};
 pub use limits::{Quota, RejectReason};
 pub use predicate::{CmpOp, Literal, Predicate, RowSource, Value};
-pub use query::{ClusterSummary, Counters, Hit, Query, SearchResult};
+pub use query::{ClusterSummary, Counters, Explain, Hit, Query, SearchResult};
 pub use vector::validate_and_normalize;

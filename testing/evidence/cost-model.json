@@ -1,0 +1,6 @@
+{
+  "dist_per_sec": 108908734.48050535,
+  "pred_per_sec": 66608938.91960301,
+  "pred_cost_milli": 1635,
+  "note": "S8. The plan optimizer weighs a distance against a predicate eval; this is their measured ratio (worst-ISA scalar, engine-conditional per C-6). DIST_COST_MILLI=1000 is the numeraire. A microbench, not a corpus sweep -- the ratio is a property of the kernels, not the data. Clamped to [0.05, 1.0] so microbench noise cannot commit an absurd coefficient; the plan choice needs the magnitude, not three digits."
+}

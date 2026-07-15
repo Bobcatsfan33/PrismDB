@@ -292,6 +292,24 @@
       "value": 5,
       "kind": "policy",
       "rationale": "How many times the calibrated novelty rate must be exceeded before a drift alarm fires. The baseline is calibrated so that ~1% of normal traffic is novel; five times the expected rate is not noise, it is a different distribution. Firing at 2x would page somebody every time a tenant deployed a new prompt, and an alarm that pages on deploys is an alarm that gets muted."
+    },
+    {
+      "name": "DIST_COST_MILLI",
+      "value": 1000,
+      "kind": "policy",
+      "rationale": "The numeraire of the plan cost model (S8): cost is measured in units of one ADC distance, so this is 1.0 (x1000). testing/evidence/cost-model.json measures the absolute distances/sec for documentation; the plan choice needs only the ratio to PRED_COST_MILLI."
+    },
+    {
+      "name": "PRED_COST_MILLI",
+      "value": 1000,
+      "kind": "policy",
+      "rationale": "The cost of one general-predicate evaluation, relative to a distance (S8). The honest microbench finding (cost-model.json): a real interpreted predicate::eval costs as much as or MORE than a SIMD-batched ADC distance (~2.7x on the dev machine), so the predicate is the expensive per-row op and 'distance-first, predicate-lazily' (semantic-first) tends to win. Committed as a stable in-magnitude value (equal to a distance) rather than an exact ratio -- a constant bound to a stopwatch is a flaky gate. Engine-conditional (C-6): a compiled predicate path would slash it."
+    },
+    {
+      "name": "PLAN_REGRET_BOUND_PCT",
+      "value": 15,
+      "kind": "policy",
+      "rationale": "The worst-cell regret bound (S8, directive 3): the chosen plan must be within 15% of the best fixed plan's actual cost in EVERY cell of the selectivity matrix, not on average. An optimizer that wins on average by losing badly in one cell is worse than a fixed heuristic for the customer in that cell. Measurement cannot pick this -- it is a statement of how much regret we are willing to ship. 15% is wide enough for a crude sampled selectivity estimate (directive 7) to meet, tight enough that a plainly-wrong choice fails the gate."
     }
   ]
 }

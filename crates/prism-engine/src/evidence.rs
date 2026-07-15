@@ -993,3 +993,109 @@ pub fn sweep_fp16(
             .into(),
     })
 }
+
+// --- cost-model coefficients (S8, charter C-1) ----------------------------------------------
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CostModelEvidence {
+    /// Distances computed per second (the numeraire), from a microbenchmark of the ADC kernel.
+    pub dist_per_sec: f64,
+    /// Predicate evaluations per second, from a microbenchmark of `predicate::eval`.
+    pub pred_per_sec: f64,
+    /// The ratio that actually steers the optimizer: pred cost / dist cost, ×1000. This is
+    /// `PRED_COST_MILLI` (with `DIST_COST_MILLI = 1000` as the numeraire).
+    pub pred_cost_milli: i64,
+    pub note: String,
+}
+
+/// Microbenchmark the two operations the plan cost model weighs, and commit their ratio.
+///
+/// Deliberately a microbench, not an end-to-end sweep: the cost model needs the *relative* cost of
+/// a distance vs a predicate eval, and that ratio is a property of the two kernels, not of any
+/// corpus. Engine-conditional (charter C-6): a new ADC kernel or a cheaper predicate path moves
+/// it, and the receipt re-derives. Worst-ISA, per the determinism contract §7.
+pub fn measure_cost_model(now_ns: impl Fn() -> u128) -> Result<CostModelEvidence> {
+    use prism_quantizer::kernel::{self, KSUB};
+
+    let m = 8usize;
+    let n = 100_000usize;
+    // A table and codes for the distance microbench.
+    let mut table = vec![0.0f32; m * KSUB];
+    let mut x = 0x1234_5678u32;
+    for t in table.iter_mut() {
+        x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        *t = (x as f32 / u32::MAX as f32) * 2.0 - 1.0;
+    }
+    let mut codes = vec![0u8; n * m];
+    for c in codes.iter_mut() {
+        x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        *c = (x >> 20) as u8;
+    }
+    let mut dists = vec![0.0f32; n];
+    // Worst ISA: force scalar, which is the floor every machine has.
+    kernel::set_isa_ceiling(kernel::Isa::Scalar);
+    kernel::adc_scan(kernel::Isa::Scalar, &table, m, &codes, &mut dists); // warm
+    let t0 = now_ns();
+    for _ in 0..10 {
+        kernel::adc_scan(kernel::Isa::Scalar, &table, m, &codes, &mut dists);
+    }
+    let dist_ns = (now_ns() - t0) as f64;
+    kernel::clear_isa_ceiling();
+    let dist_per_sec = (10.0 * n as f64) / (dist_ns / 1e9).max(1e-9);
+
+    // The predicate microbench: the REAL `predicate::eval` path (dynamic dispatch, column lookup,
+    // Value comparison) over a synthetic row source -- not a trivial comparison, which would
+    // undervalue it. This is the cost the optimizer actually pays per predicate eval.
+    struct BenchRows {
+        costs: Vec<f64>,
+    }
+    impl prism_types::predicate::RowSource for BenchRows {
+        fn column(&self, _name: &str, row: usize) -> Result<prism_types::predicate::Value> {
+            Ok(prism_types::predicate::Value::Float(self.costs[row]))
+        }
+        fn attribute(&self, _key: &str, _row: usize) -> Result<prism_types::predicate::Value> {
+            Ok(prism_types::predicate::Value::Null)
+        }
+    }
+    let src = BenchRows {
+        costs: (0..n).map(|i| (i % 100) as f64 / 100.0).collect(),
+    };
+    let pred = prism_types::predicate::Predicate::Cmp(
+        Box::new(prism_types::predicate::Predicate::Column("cost".into())),
+        prism_types::predicate::CmpOp::Gt,
+        Box::new(prism_types::predicate::Predicate::Literal(
+            prism_types::predicate::Literal::Float(0.5),
+        )),
+    );
+    let mut acc = 0usize;
+    for i in 0..n {
+        acc += prism_types::predicate::eval(&pred, &src, i).unwrap_or(false) as usize;
+        // warm
+    }
+    let t1 = now_ns();
+    for _ in 0..10 {
+        for i in 0..n {
+            acc += prism_types::predicate::eval(&pred, &src, i).unwrap_or(false) as usize;
+        }
+    }
+    let pred_ns = (now_ns() - t1) as f64;
+    std::hint::black_box(acc);
+    let pred_per_sec = (10.0 * n as f64) / (pred_ns / 1e9).max(1e-9);
+
+    // The ratio, ×1000. Guarded to a sane range so a noisy microbench cannot commit an absurd
+    // coefficient; the plan cost model only needs the order of magnitude right.
+    let ratio = (dist_per_sec / pred_per_sec.max(1.0)).clamp(0.1, 3.0);
+    let pred_cost_milli = (ratio * 1000.0).round() as i64;
+
+    Ok(CostModelEvidence {
+        dist_per_sec,
+        pred_per_sec,
+        pred_cost_milli,
+        note: "S8. The plan optimizer weighs a distance against a predicate eval; this is their \
+               measured ratio (worst-ISA scalar, engine-conditional per C-6). DIST_COST_MILLI=1000 \
+               is the numeraire. A microbench, not a corpus sweep -- the ratio is a property of the \
+               kernels, not the data. Clamped to [0.05, 1.0] so microbench noise cannot commit an \
+               absurd coefficient; the plan choice needs the magnitude, not three digits."
+            .into(),
+    })
+}

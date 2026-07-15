@@ -159,6 +159,23 @@ pub struct Query {
     #[serde(default)]
     pub adaptive_margin: Option<f32>,
 
+    /// Force the physical execution strategy (S8). `None` lets the optimizer choose on cost. The
+    /// plan-invariance gate forces each strategy to prove they answer identically. Stringly-typed
+    /// so `prism-types` need not depend on the engine's `Strategy` enum.
+    #[serde(default)]
+    pub plan: Option<String>,
+
+    /// A similarity threshold: return only rows whose exact rerank score is at or above this
+    /// (docs/QUERY-CONTRACT.md §12). Applied to the exact score, after rerank, before `k`. `None`
+    /// is the S0 behaviour (top-k, no threshold).
+    #[serde(default)]
+    pub threshold: Option<f32>,
+
+    /// Ask the engine to attach an [`Explain`] (S8, §14): the optimizer's estimates alongside the
+    /// actuals. Off by default -- EXPLAIN is a diagnostic, not free.
+    #[serde(default)]
+    pub explain: bool,
+
     /// Force the rerank route (S7). `None` lets the cost model decide — which, with the GPU off,
     /// is always CPU. The selection-identity and route-flip gates set this to prove the route is
     /// invisible to the answer. A stringly-typed pass-through so `prism-types` need not depend on
@@ -188,6 +205,9 @@ impl Default for Query {
             adaptive: true,
             adaptive_margin: None,
             force_route: None,
+            plan: None,
+            threshold: None,
+            explain: false,
         }
     }
 }
@@ -248,6 +268,21 @@ pub struct Counters {
     /// being used is a GPU you are paying for and not getting.
     #[serde(default)]
     pub route_degraded: bool,
+    /// Which physical strategy scanned this query (S8): `interleaved`, `scalar-first`, or
+    /// `semantic-first`. Observable so the plan is inspectable, but the *answer* does not depend
+    /// on it -- that is plan-invariance (docs/QUERY-CONTRACT.md §9).
+    #[serde(default)]
+    pub plan: String,
+    /// Distances actually computed. The strategy-varying cost: scalar-first computes a distance
+    /// only for predicate survivors, so this is far below `rows_scanned_pq` when the predicate is
+    /// selective; semantic-first and interleaved compute one per probed row.
+    #[serde(default)]
+    pub distances_computed: usize,
+    /// Predicate evaluations actually run. Semantic-first evaluates the predicate only for rows
+    /// near enough to enter the selection, so this is far below `rows_scanned_pq` when the
+    /// distance already narrows hard.
+    #[serde(default)]
+    pub predicate_evals: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -289,7 +324,34 @@ pub struct SearchResult {
     /// output a lie by omission.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bridge: Option<String>,
+    /// The optimizer's estimates alongside the query's actuals (S8, docs/QUERY-CONTRACT.md §14).
+    /// Present when the caller asked to EXPLAIN. An optimizer that cannot say *why* it chose a plan
+    /// is one nobody can debug, so the reason is carried, not just the choice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub explain: Option<Explain>,
     pub snapshot_id: String,
+}
+
+/// What the optimizer estimated, and what actually happened (S8). Every control carries both, so
+/// cost-model drift is a visible number (the calibration harness), not a slow surprise.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct Explain {
+    pub chosen_plan: String,
+    pub plan_reason: String,
+    pub chosen_route: String,
+    /// The optimizer's selectivity estimate for the predicate, and the actual fraction of scanned
+    /// rows that passed. Their gap is what the calibration harness tracks.
+    pub estimated_selectivity: f64,
+    pub actual_selectivity: f64,
+    /// Estimate and actual for the four controls, and for the physical work.
+    pub estimated_nprobe: usize,
+    pub actual_nprobe: usize,
+    pub actual_candidates: usize,
+    pub actual_rerank: usize,
+    pub actual_k: usize,
+    pub actual_parts_opened: usize,
+    pub actual_ranges_scanned: usize,
+    pub actual_bytes_read: usize,
 }
 
 #[cfg(test)]

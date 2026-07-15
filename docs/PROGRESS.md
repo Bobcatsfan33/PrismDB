@@ -629,11 +629,36 @@ S6's block-size panic (the manifest had grown out from under the receipt) is now
 
 ---
 
-## S8 — next
+## S8 — complete
 
-**Query semantics.** The full SQL surface the S3 query contract promised but deferred: nulls, ties, model-version behaviour, and the cost-based optimizer — which now has a real second axis to optimize over, the **route**, whose cost model S7 built the mechanism for and left un-derived. S8 may *extend* the query contract; it may not contradict it.
+**Gate:** *full SQL semantics — nulls, ties, ordering, threshold-vs-top-k, generation selection — and a cost-based optimizer that beats any fixed plan without ever changing an answer.* Contract first: [query contract §9–§14](QUERY-CONTRACT.md) was written before the code.
 
-**Carry into S8:**
-- The route cost model is the optimizer's first real routing decision; its thresholds are the C-1 sweep waiting on a GPU runner.
-- Pagination now pins *two* things in the cursor — snapshot and route. Any new plan dimension S8 adds (a chosen index, a join order) must ask the same question: does a cursor have to pin it?
-- The determinism contract now has a strong form (CPU/ISA) and a weak form (device); S8's optimizer must never let a cost-based route choice change an answer, only its speed.
+### 1. Plan-invariance — the sprint's central gate
+
+Three physical strategies — interleaved, scalar-first, semantic-first — for **one logical query** ([D-054](DECISIONS.md)). They cost differently; they answer **byte-identically**, because all three offer the *identical candidate set* (the top-`candidates` predicate-passing rows by PQ distance) to the *identical* top-k, differing only in when the predicate runs. The gate forces each strategy on golden + layout-variant + boundary-tie corpora; a companion test proves the *work* genuinely diverges (scalar-first computes far fewer distances, semantic-first far fewer predicate evals). **Because the plan changes no score, a cursor need not pin it** — and the gate proves it by paginating while flipping the plan between pages.
+
+### 2. The optimizer — receipts, and worst-cell regret
+
+The plan choice turns on a **crude sampled selectivity** estimate (directive 7: choose among three strategies well, do not research cardinality estimation), and the metric is **worst-cell regret ≤ 15%, not average** ([D-055](DECISIONS.md)) — the chosen plan within the bound of the best fixed plan in *every* cell of the selectivity matrix, measured as a deterministic counter proxy. **It caught a real cost-model bug immediately:** semantic-first's predicate saving materializes only once the heap fills (~`cap/selectivity` rows), and modelling `cap` instead gave 76% regret at low selectivity — the worst-cell metric surfaced where an average would have buried it.
+
+The cost coefficients are policy informed by a microbench ([`cost-model.json`](../testing/evidence/cost-model.json)), with an honest surprise: a real interpreted `predicate::eval` costs *more* than a SIMD-batched distance, which is why semantic-first often wins. The **GPU axis stays inert** — `usize::MAX` threshold, `gpu_available()` false — so the planner never steers on a coefficient with no evidence (directive 2).
+
+### 3. Query semantics, stated to teach
+
+Nulls (absent, two-valued, not `NULL`-propagating), ties (C-4 at the SQL level), threshold × top-k (threshold first, on the exact score), and generation selection — with a **cross-space error written to teach**: it names both spaces, explains that a cosine of 0.8 in one is not a cosine of 0.8 in the other, and offers the three fixes ([D-056](DECISIONS.md)).
+
+### 4. EXPLAIN + calibration, and a third door
+
+EXPLAIN carries estimates *and* actuals for the four controls plus the chosen route/plan and the reason; a calibration harness tracks estimate-vs-actual selectivity error in CI so drift is a visible number ([D-057](DECISIONS.md)). And the **Flight SQL door is the same door** — tenant injected below it, byte-identical counters across direct/SQL/Flight, bounded decode (every length capped and named, garbage never panics). **Its server-side query path ships; the Arrow IPC/gRPC transport does not** — that needs the arrow ecosystem the serde-only charter excludes and a network server the roadmap defers to S14. The same-door property, which is what matters for correctness, is proven three-way today.
+
+### Findings
+
+- **The regret gate caught a cost-model bug** (semantic-first heap-fill dynamics) that an average-regret metric would have hidden.
+- **A real predicate eval is costlier than a SIMD distance** — the honest reason "distance-first" wins, documented rather than assumed.
+- **The calibration harness caught its own subtlety** — `actual_selectivity` is strategy-dependent, so it measures the true rate from a forced-interleaved run.
+
+---
+
+## S9 — next
+
+**Semantic aggregation.** `GROUP BY` meaning, and novelty/drift, over an arbitrarily large *filtered set* — not the S0 top-k survivors, the flagship aggregate. The three-strategy machinery generalizes: an aggregate must be plan-invariant too, and the drift baselines S5 built are its inputs.

@@ -270,6 +270,9 @@ fn cmd_search(a: &Args) -> Result<()> {
         adaptive: !a.has("no-adaptive"),
         adaptive_margin: None,
         force_route: None,
+        plan: None,
+        threshold: None,
+        explain: false,
     };
 
     if a.has("exact") {
@@ -372,6 +375,18 @@ fn cmd_evidence(a: &Args) -> Result<()> {
             if let Some(out) = a.opt("out") {
                 std::fs::write(out, serde_json::to_string_pretty(&ev)?)?;
                 eprintln!("prism: wrote {out}");
+            }
+            emit(&ev)
+        }
+        Some("cost-model") => {
+            let ev = prism_engine::evidence::measure_cost_model(|| {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            })?;
+            if let Some(out) = a.opt("out") {
+                std::fs::write(out, serde_json::to_string_pretty(&ev)?)?;
             }
             emit(&ev)
         }

@@ -102,6 +102,23 @@ impl<'a> TopK<'a> {
         self.heap.len()
     }
 
+    /// Could a candidate with this distance *possibly* enter the selection? True if the heap is not
+    /// yet full, or the distance is no worse than the current worst kept (`<=`, so ties are
+    /// admitted for the id tie-break to decide). **Conservative on purpose** — it never says no to
+    /// a distance that could enter — so the semantic-first strategy can use it to skip the
+    /// predicate for rows that cannot make the cut, without ever changing which rows do
+    /// (docs/QUERY-CONTRACT.md §9).
+    #[inline]
+    pub fn would_admit(&self, dist: f32) -> bool {
+        if self.heap.len() < self.cap {
+            return true;
+        }
+        match self.heap.first() {
+            Some(worst) => dist.total_cmp(&worst.dist) != std::cmp::Ordering::Greater,
+            None => true,
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.heap.is_empty()
     }

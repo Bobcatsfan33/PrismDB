@@ -706,3 +706,66 @@ fn offset_is_refused_and_says_why() {
     assert!(e.contains("OFFSET is not supported"), "{e}");
     assert!(e.contains("duplicates and drops rows"), "{e}");
 }
+
+/// **The Flight SQL door is the same door (S8, directive 6).** A query answered through the direct
+/// API, the SQL text door, and the Flight SQL door returns byte-identical counters — the "same
+/// door" property, now three-way. And the tenant is injected below the Flight door: a Flight query
+/// naming another tenant cannot escape its own.
+#[test]
+fn the_flight_door_is_the_same_door() {
+    use prism_engine::flight::FlightSqlRequest;
+
+    let (engine, root) = store("flight", 800);
+
+    let sql = "SELECT event_id FROM events WHERE embedding ≈≈ 'the tool call timed out' LIMIT 10";
+
+    // All three doors run the identical logical query: the plan the SQL door compiles, the Query
+    // the direct API takes (from that same plan), and the Flight message carrying the same text.
+    let plan = compile(sql, &sess("t1")).unwrap();
+    let via_direct = engine
+        .search(&engine.plan_to_query(&plan).unwrap())
+        .unwrap();
+    // SQL text door.
+    let via_sql = engine.run_sql(&plan, None).unwrap();
+    // Flight SQL door.
+    let msg = FlightSqlRequest {
+        query: sql.into(),
+        params: vec![],
+    }
+    .encode();
+    let via_flight = engine.run_flight_sql(&msg, "t1").unwrap();
+
+    // The counters are byte-identical across all three doors: if any door grew its own scan, its
+    // counters would diverge before its rows did.
+    let cj = |c: &prism_types::Counters| serde_json::to_value(c).unwrap();
+    assert_eq!(
+        cj(&via_sql.counters),
+        cj(&via_flight.counters),
+        "SQL vs Flight counters diverge"
+    );
+    assert_eq!(
+        cj(&via_direct.counters),
+        cj(&via_flight.counters),
+        "direct vs Flight counters diverge"
+    );
+
+    // The tenant is injected below the Flight door: a Flight query for t1 sees only t1's rows,
+    // regardless of what the statement says, and it cannot reach t0's.
+    let t1_ids: std::collections::BTreeSet<String> = via_flight
+        .rows
+        .iter()
+        .map(|r| r[0].1.as_str().unwrap().to_string())
+        .collect();
+    let via_flight_t0 = engine.run_flight_sql(&msg, "t0").unwrap();
+    let t0_ids: std::collections::BTreeSet<String> = via_flight_t0
+        .rows
+        .iter()
+        .map(|r| r[0].1.as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        t1_ids.is_disjoint(&t0_ids) || t1_ids.is_empty() || t0_ids.is_empty(),
+        "a Flight query for one tenant returned another tenant's rows -- the tenant conjunction \
+         was not injected below the door"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
