@@ -10,9 +10,9 @@ Sprint gates from [PRISM.md](PRISM.md) Part IV. **A sprint is done when its gate
 | **S3** | Minimal SQL + scalar analytics | scalar-subset parity against an oracle; hybrid smoke queries identical through SQL | ✅ **complete** |
 | **S4** | Hybrid partitioning + typed columns + data skipping | selective benchmarks read only eligible partitions; cross-tenant reads impossible even with malformed metadata | ✅ **complete** |
 | **S5** | Immutable generations | queries available throughout a two-generation migration; rollback is catalog-only; no part decodes with the wrong codebook | ✅ **complete** |
-| S6 | CPU scan engine | bit/epsilon equivalence to the scalar oracle; zero heap allocation in the block loop | ⬜ |
-| S7 | GPU compressed scan + rerank | GPU meets recall/tolerance vs the CPU oracle; p99 bounded under saturation; speedups end-to-end | ⬜ |
-| S8 | Cost-based hybrid optimizer + full SQL semantics | SQL ≡ direct-executor results; fuzzing cannot bypass tenant policy; plan selection beats any fixed plan | ⬜ |
+| **S6** | CPU scan engine | bit/epsilon equivalence to the scalar oracle; zero heap allocation in the block loop | ✅ **complete** |
+| **S7** | GPU compressed scan + rerank | GPU meets recall/tolerance vs the CPU oracle; p99 bounded under saturation; speedups end-to-end | 🟡 **GPU-ready, GPU-off** — device-agnostic machinery built + tested against a CPU reference of the GPU route; the GPU gate is **not** claimed (no GPU runner) |
+| **S8** | Cost-based hybrid optimizer + full SQL semantics | SQL ≡ direct-executor results; fuzzing cannot bypass tenant policy; plan selection beats any fixed plan | ✅ **complete** |
 | S9 | Semantic GROUP BY at scale + novelty/drift | 100M-row filtered set < 10s single node; ARI ≥ 0.8 vs oracle; injected-novelty precision/recall ≥ 0.9 | ⬜ |
 | S10 | Merge scheduler + mutations under load | sustained ingest → steady part count and merge debt; kills during merge/delete never expose partial results | ⬜ |
 | S11 | Object storage + local cache | cold/warm/thrash SLOs; cache corruption repaired from remote; rerank fetch bytes bounded by the plan | ⬜ |
@@ -630,6 +630,8 @@ S6's block-size panic (the manifest had grown out from under the receipt) is now
 ---
 
 ## S8 — complete
+
+**Proof:** [CI run #29434139708](https://github.com/Bobcatsfan33/PrismDB/actions/runs/29434139708) — all 25 jobs green on `main`, including the S8 plan-invariance gate (every strategy byte-identical on golden + layout-variant + boundary-tie, plus paginate-under-plan-flip), the worst-cell regret gate (≤ 15% in every selectivity cell), the selectivity calibration harness, the Flight-SQL same-door parity + bounded-decode fuzz, and the full suite in debug **and** release. 298 tests.
 
 **Gate:** *full SQL semantics — nulls, ties, ordering, threshold-vs-top-k, generation selection — and a cost-based optimizer that beats any fixed plan without ever changing an answer.* Contract first: [query contract §9–§14](QUERY-CONTRACT.md) was written before the code.
 
