@@ -19,6 +19,7 @@ pub mod sample;
 pub mod search;
 pub mod source;
 pub mod sql;
+pub mod topk;
 pub mod tsv;
 pub mod tuning;
 pub mod wal;

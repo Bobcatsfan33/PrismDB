@@ -134,6 +134,68 @@ jobs:
       # discipline applied one layer down, to partition metadata.
       - run: cargo test --release -p prism-cli --test partition -- --nocapture
 
+  determinism:
+    name: the S6 gate — the answer does not depend on the ISA
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Every kernel this runner's CPU supports (scalar + AVX2 on GitHub x86) must answer every
+      # golden query BYTE-IDENTICALLY -- not epsilon-close scores, the same ordered ids and scores
+      # -- over the layout-variant fixtures, plus a boundary-tie stress corpus where a one-ulp
+      # disagreement would flip selection. Also masks the CPU down to scalar and proves the
+      # fallback answers identically. The aarch64 runner below covers NEON.
+      - run: cargo test --release -p prism-cli --test determinism -- --nocapture
+      - run: cargo test --release -p prism-quantizer --lib kernel -- --nocapture
+
+  determinism-arm:
+    name: the S6 gate on ARM (NEON)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The other half of the ISA matrix: scalar vs NEON must be byte-identical. The x86 runner
+      # cannot execute NEON and this one cannot execute AVX2, so between them every shipping kernel
+      # is proven equal to the reference on real silicon.
+      - run: cargo test --release -p prism-cli --test determinism -- --nocapture
+      - run: cargo test --release -p prism-quantizer --lib kernel -- --nocapture
+
+  no-alloc:
+    name: the hot loop allocates nothing (determinism contract §4)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # A counting allocator proves the block scan and the bounded top-k perform ZERO heap
+      # allocations across a full golden run, once their buffers are sized. Single-threaded so the
+      # process-global counter is not polluted by another test's allocations.
+      - run: cargo test --release -p prism-engine --test alloc -- --test-threads=1 --nocapture
+
+  unsafe-inventory:
+    name: every unsafe block is documented (determinism contract §6)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Grep-level: the count of `unsafe` tokens in crates/*/src must equal the number
+      # docs/UNSAFE-INVENTORY.md accounts for. Adding an unsafe block without documenting its
+      # safety argument turns this red.
+      - run: ./scripts/check-unsafe-inventory.sh
+
+  avx512-compiles:
+    name: the experimental AVX-512 kernel still compiles
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # AVX-512 ships OFF (no CI runner can execute it yet -- determinism contract §3), but it is
+      # written to the same contract and must not rot. Building with the feature type-checks the
+      # intrinsics on x86 without running them.
+      - run: cargo build -p prism-quantizer --features experimental-avx512
+
   generations:
     name: the S5 gate — migration, wrong codebook, bridges, DEGRADED alarms
     runs-on: ubuntu-latest

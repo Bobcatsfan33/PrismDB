@@ -542,11 +542,55 @@ Every tuned entry now carries `generation_conditional: true`, and every receipt 
 
 ---
 
-## S6 — next
+## S6 — complete
 
-**CPU engine.** SIMD kernels — ADC scan, fused scalar masks, exact rerank — each with a **scalar twin that CI proves equal**, per the charter. Plus [issue #1](https://github.com/Bobcatsfan33/PrismDB/issues/1), adaptive `nprobe`: scale the probe count when the centroid distance margins are tight, rather than paying a fixed six probes on every query.
+**Gate:** *SIMD kernels with a scalar twin CI proves equal; allocation-free hot loop; adaptive nprobe; unsafe inventoried; per-ISA end-to-end numbers.*
 
-**Carry into S6:**
-- **The scan just got 39% more expensive** (`nprobe` 4 → 6), and it is now honest. S6 is where that gets paid back in the kernel rather than in the geometry.
-- **Adaptive `nprobe` matters more than it did.** The tail is what forced 6 probes; a query sitting in the middle of a cluster does not need them, and the margin is measurable at probe time.
-- **Every kernel needs its scalar twin**, and the twin is the one that already exists. The equality test is not a formality: an ADC table is a lookup, and a SIMD lookup that disagrees with the scalar one in the last ulp will move a candidate across the heap boundary and change an answer — which, after C-4, is now a thing we have a permanent gate for.
+Contract first, as always: [docs/DETERMINISM-CONTRACT.md](DETERMINISM-CONTRACT.md) was written before the first kernel, and charter **C-5** gives it weight — *the answer is a function of the data, not of which instruction set computed it.*
+
+### 1. Bit-identical, not epsilon-close — and why that was achievable
+
+The determinism gate is the strong form: every kernel returns **byte-identical answers**, the same ordered ids and the same scores, over the layout-variant fixtures. Not a tolerance.
+
+That is achievable because of how the ADC distance is *defined* ([D-044](DECISIONS.md)): a per-row ascending sum with no FMA, vectorized **across rows — one row per lane**. Each lane runs the identical scalar chain, and lane-wise IEEE addition is correctly rounded and identical to scalar, so the gather-and-add is bit-identical on AVX2, NEON and AVX-512. The rerank dot product stays scalar on every ISA (it runs over tens of rows, not millions), so it too is ISA-invariant. **A whole query is therefore bit-identical across ISAs.**
+
+The x86 CI runner proves scalar == AVX2; the ARM runner proves scalar == NEON; between them every shipping kernel is checked against the reference on real silicon. A boundary-tie stress corpus proves selection-invariance where a one-`ulp` disagreement would flip which tied row survives the bounded heap.
+
+**Honest speed finding:** at this engine's shape (`m=8`, `dim=64`) the NEON kernel with manual gather is *not faster* than the compiler's autovectorization of the scalar loop — baseline NEON 28.2 ms vs scalar 27.8. The sprint's deliverable is **bit-identity and the contract that enforces it**, not a speedup; the headline quotes the worst ISA (NEON) per C-5. A real win wants wider `m` or a hardware gather, and will still have to pass this gate.
+
+### 2. The hot loop allocates nothing — proven
+
+A counting allocator offers the real `TopK` 50,000 rows and the real kernel a full range and asserts **zero** allocations. This forced the candidate top-k to hold `(part, row)` indices instead of an owned `event_id: String`, borrowing the id out of the resident scalar column for the tie-break ([D-045](DECISIONS.md)) — allocation-free *and* faster, having dropped a string clone per candidate.
+
+### 3. Adaptive probing — monotone, and honest about the corpus
+
+A boundary query probes *above* the base `nprobe`, never below ([issue #1](https://github.com/Bobcatsfan33/PrismDB/issues/1)). So recall can only improve and every existing receipt stays valid as a floor — which is why the receipts are measured with adaptive off. The margin (0.05) is corpus-conditional: on the hash corpus the floor at the shipping base is already met, so measurement can only see *cost*, and a policy cost bound selects the value while the mechanism is *validated* by recovering a deliberately-starved base's tail ([D-046](DECISIONS.md)). The cost-reduction direction waits for a real corpus ([issue #3](https://github.com/Bobcatsfan33/PrismDB/issues/3)).
+
+### 4. `unsafe` starts, and is inventoried
+
+SIMD intrinsics and mmap are the first `unsafe` in the codebase. Every block is in [UNSAFE-INVENTORY.md](UNSAFE-INVENTORY.md) with its safety argument and its covering test, and a CI grep gate fails if an `unsafe` token exists without an entry. mmap is read-only over immutable parts; a **truncated file under mmap** names its column and block *by construction* — the map's length is the file's real length, every access is bounds-checked against it, and the `SIGBUS` is unreachable because the check fires first ([D-047](DECISIONS.md)). A fault test truncates a real framed column at many lengths and proves the process survives.
+
+### 5. The re-run that caught a latent bug
+
+Directive 5 — re-run the C-1 sweeps against the SIMD engine — did exactly what it exists to do. Every **recall**-derived constant reconfirmed *exactly* (`nprobe=6`, `candidates=50`, `rerank=50`, `restarts=5`), because the kernels are bit-identical: the answers did not move, only their speed. But the block-size sweep **panicked** — no candidate fit the manifest budget — because S4/S5 had grown the manifest with fixed-overhead extensions, and the sweep was budgeting the whole manifest instead of just the **block directory** it cares about. Corrected to budget the directory term alone, `BLOCK_SIZE` re-derived **4 KiB → 2 KiB** ([D-048](DECISIONS.md)). A receipt that describes an engine which no longer exists is not evidence, and the re-run is what keeps that from happening.
+
+### 6. Per-ISA numbers, worst-quoted
+
+`baselines.json` grew an `isa` dimension — end-to-end p50/p95/scan-rate per instruction set, never kernel-only. The headline latency is the **worst** supported ISA's, because a number that is only true on your fastest machine is false on the one your customer runs.
+
+### Findings
+
+- **The block-size budget was budgeting fixed overhead**, not the directory that scales — invisible until S4/S5 extensions grew the manifest and the re-run panicked.
+- **NEON manual-gather does not beat scalar autovectorization** at `m=8` — reported honestly rather than hidden behind a kernel-only number.
+- **AVX-512 ships off**: no CI runner can execute it, so it stays behind `experimental-avx512` and is compile-checked only, per C-5's "an ISA CI cannot execute does not ship enabled."
+
+---
+
+## S7 — next
+
+**GPU engine.** GPU ADC-scan and rerank kernels, each with the **scalar twin CI proves equal** — the same determinism contract, now across the CPU/GPU boundary, where bit-identity is *much* harder (GPU floating-point, FMA contraction, and reduction order differ from CPU). This is where the weak-form fallback (C-5 §2) likely earns its place: a logged decision that GPU scores may differ from CPU but **selection may not**, proved on the boundary-tie corpus. Plus graceful CPU fallback when no GPU is present — the same feature-detection-is-a-gate discipline as S6's ISA masking.
+
+**Carry into S7:**
+- The determinism contract already has the vocabulary S7 needs: strong form, weak form, the boundary-tie stress corpus, worst-device-quoted numbers.
+- The kernel dispatch (`Isa` + ceiling + `available()`) generalizes to a device dimension; GPU is "another ISA" that the masking gate must be able to force off.
+- GPU almost certainly **cannot** be bit-identical (FMA is the default and often unavoidable in GPU matmul). So S7 will likely be the first **weak-form** kernel, and D-044's honest framing — bit-identity where achievable, selection-invariance where not — is the precedent.

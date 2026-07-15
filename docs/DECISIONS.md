@@ -525,3 +525,70 @@ What we bought for the 39%:
 - Stratification by tenant means the loudest tenant no longer writes the codebook on everyone else's behalf.
 
 A number that goes up when you stop fooling yourself is the correct number.
+
+## C-5 — The answer is a function of the data, not of which instruction set computed it
+**S6. Architect's standing rule, and the float edition of [D-033](DECISIONS.md)/[C-4](DECISIONS.md).**
+
+The [determinism contract](DETERMINISM-CONTRACT.md) is written before the first SIMD kernel and carries charter weight:
+
+> Identical event IDs, identical ordering — **the same answer, byte for byte** — across scalar, AVX2, AVX-512 and NEON, on the layout-variant golden fixtures.
+
+Not "scores within tolerance". A database that answers a question differently depending on which CPU ran the query is not one database, it is a family of subtly disagreeing ones — and the disagreement surfaces exactly where a bounded top-k turns a one-`ulp` score difference into a different *selection*.
+
+**The strong form is achievable, not aspired to**, because of how the two float reductions are defined:
+
+- **The ADC scan** is defined as `Σ table[j·256 + code[j]]`, summed strictly ascending, no FMA, no reordering. The reduction is *per row*, so the SIMD parallelism lives **across rows, one row per lane** — each lane runs the identical scalar chain, and lane-wise IEEE addition is correctly rounded and identical to scalar. Bit-identical on every ISA, no epsilon ([D-044](DECISIONS.md)).
+- **The rerank dot product** is defined as the scalar sequential sum, and computed *only* by the scalar reference on every ISA — because its natural SIMD form is a horizontal tree reduction, a different order, and it runs over tens of rows, not millions. So it is ISA-invariant by being the same code.
+
+Consequently **a whole query is bit-identical across ISAs**, which is what makes the C-1 receipts survive the sprint (C-5's own §5): the answers did not move, only their speed.
+
+The **weak-form fallback** — scores may differ but *selection* may not, proved on a boundary-tie stress corpus — exists for a future 4-bit-shuffle kernel whose `uint8` arithmetic cannot be IEEE-bit-identical. S6 ships entirely strong-form; the weak form is the gate the first such kernel must pass, accepted only with a logged decision.
+
+Two mechanical rules ride along: **an ISA CI cannot execute does not ship enabled** (AVX-512 is behind `experimental-avx512` until a runner can run it), and **the quoted p50 is the worst supported ISA's, never the best's**.
+
+## D-044 — SIMD kernels are bit-identical by vectorizing across rows, not within a row
+**S6.**
+
+The obvious way to SIMD a PQ scan — the 4-bit-shuffle trick — quantizes the lookup table to `uint8` and uses saturating byte adds. It is fast and it is **not IEEE arithmetic**, so it cannot be bit-identical to a float reference. That is a real kernel, and it is not the one S6 ships.
+
+S6 ships the **honest** kernel: vertical vectorization. Process L rows per iteration, one per lane; for each sub-quantizer `j`, gather the L table values and add them into L accumulators. Each lane accumulates its row's `m` values in the identical ascending order the scalar reference uses, and the only floating-point operation is a lane-wise add — which IEEE-754 requires to be correctly rounded and identical to the scalar add. **The gather changes which value is added, never how.** So every lane is bit-identical to scalar, on AVX2 (hardware gather), NEON (manual gather — no NEON gather instruction), and AVX-512.
+
+`kernel::tests::every_available_kernel_is_bit_identical_to_the_reference` compares **bits**, not values, across awkward tails and several `m`. The whole-query gate (`determinism.rs`) compares answers over the frozen corpus on every ISA the machine supports; the x86 and ARM CI runners between them cover every shipping kernel on real silicon.
+
+**Honest speed finding:** on this engine's shape (`m = 8`, `dim = 64`), the NEON kernel with manual gather is **not faster** than the compiler's autovectorization of the scalar loop — the baseline reports NEON at 28.2 ms vs scalar 27.8, and the headline quotes the worse (NEON) per C-5. The sprint's deliverable is *bit-identity and the contract that enforces it*, not a speedup; a genuine win wants a wider `m` or a real hardware gather, and it will still have to pass this gate.
+
+## D-045 — The candidate top-k holds indices, not owned event ids
+**S6. What the allocation-free requirement forced, and it was an improvement.**
+
+The determinism contract §4 requires the block scan and the top-k to allocate **zero** times across a full golden run. The scan already did (it writes distances into a reused buffer). The top-k did not: its `Candidate` owned an `event_id: String`, allocated on every insert.
+
+So `Candidate` became `Copy` — `{ dist, part, row }`, owning nothing — and the tie-break borrows the event id out of the already-resident scalar column via a closure the bounded heap holds. A row entering the top-k now allocates nothing. This required a purpose-built `TopK` (an explicit binary max-heap whose comparator reaches *outside* the element) rather than `BinaryHeap<T: Ord>`, whose comparator cannot see external state — and it is faster besides, having dropped a string clone per candidate.
+
+A counting allocator (`crates/prism-engine/tests/alloc.rs`, its own `#[global_allocator]` so the shipped binary is untouched) offers the real `TopK` 50,000 rows and asserts zero allocations, and offers the real kernel a full range and asserts zero.
+
+## D-046 — Adaptive probing is monotone-only in v1, and its margin is corpus-conditional
+**S6, [issue #1](https://github.com/Bobcatsfan33/PrismDB/issues/1).**
+
+A query near a cluster boundary has its true neighbours split across centroids, so the base `nprobe` reaches some and misses the rest. Adaptive probing widens the probe count for exactly those queries: a centroid beyond the base is also probed when its distance is within `(1 + ADAPTIVE_MARGIN)` of the base's boundary.
+
+**v1 is monotone-only: it may add probes above the base, never subtract.** So recall can only improve, and **every existing `nprobe`/width receipt stays valid as a floor** — which is why the receipts are measured with adaptive *off*. The cost-reduction direction (fewer probes on easy queries) is deferred to the real-embedding corpus, because it tunes against cluster geometry the hash embedder cannot represent.
+
+The margin is a **tuned** constant with a C-3 wrinkle: on the hash corpus the recall floor at the shipping base is *already met flat*, so measurement cannot pick the margin by benefit — every margin gives identical shipping recall. It can only see cost. So the value (0.05) is selected by a **policy cost bound** (adaptive must not exceed 1.5× the flat probe count at the shipping base), with the mechanism *validated* by showing it recovers a deliberately-starved base's tail — proof the heuristic fires on real boundary queries. The sweep also *proves monotonicity* by refusing any margin that lowers shipping recall. Corpus- and generation-conditional; the benefit-driven derivation is [issue #3](https://github.com/Bobcatsfan33/PrismDB/issues/3).
+
+## D-047 — mmap makes truncation a named error by bounds-checking, not by a signal handler
+**S6.**
+
+The framed column read path now maps files read-only instead of `pread`-ing them. Parts are immutable, so a read-only mapping is the easy case — with one sharp edge: **a truncated file under mmap `SIGBUS`es on access**, and a `SIGBUS` is a process death that cannot be caught, reported, or attributed.
+
+The [S1 truncation discipline](DECISIONS.md) — a truncated part names its column, block and byte range — survives **by construction, not by a signal handler**: the map's length *is* the file's real length, every access goes through a bounds check against it, and a range past the end is the same named `Corrupt` error it always was. The `SIGBUS` is unreachable because the check fires first. `fuzz::a_truncated_framed_column_under_mmap_names_itself_and_never_sigbuses` truncates a real framed column at many lengths and asserts every read either succeeds or names itself — and that the process survives, which is the whole point.
+
+The mmap FFI is declared in-crate (`mmap`/`munmap`, the stable POSIX ABI) rather than pulling `libc`, keeping the dependency tree at serde ([D-002](DECISIONS.md)). Every `unsafe` block is in [UNSAFE-INVENTORY.md](UNSAFE-INVENTORY.md), enforced by a CI grep gate.
+
+## D-048 — `BLOCK_SIZE` re-derived 4 KiB → 2 KiB, and the budget was budgeting the wrong bytes
+**S6. Directive 5 (re-run C-1 sweeps against the SIMD engine) surfaced a latent bug.**
+
+Re-running the block-size sweep against the current engine **panicked**: no candidate fit the 4-byte/row manifest budget. The cause was not SIMD — it was that S4 and S5 had added per-tenant stats and lineage extensions to the manifest, all **fixed overhead independent of block size**, and the sweep was budgeting the *whole manifest*. At a 2,000-row corpus that fixed overhead now swamps the budget.
+
+But the budget was only ever about the **block directory** — the term that is read on every open *and scales with block size*. The extensions do not scale with block size and do not belong in it. So the budget now isolates the directory term by a delta (manifest size at this block size minus the floor at the largest block size, which cancels the fixed overhead), and under the corrected budget the sweep re-derives cleanly to **2 KiB** — interior to the grid, reading fewer bytes than 4 KiB.
+
+This is exactly what C-5 §5 predicted a re-run would do: *reconfirm or re-derive, either way the evidence matches the shipping engine.* Every recall-derived constant (`nprobe`, widths, restarts, adaptive) **reconfirmed exactly**, because the kernels are bit-identical; only the byte-cost-derived `BLOCK_SIZE` moved, and it moved because the *manifest* cost model changed, which measurement caught the moment it was asked to.
