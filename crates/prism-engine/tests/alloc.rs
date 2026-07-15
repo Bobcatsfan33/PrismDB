@@ -13,18 +13,38 @@
 //! indices instead of owned event ids: a row flowing through the hot path touches no allocator.
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::cell::Cell;
 
 struct Counting;
 
-static ARMED: AtomicBool = AtomicBool::new(false);
-static ALLOCS: AtomicUsize = AtomicUsize::new(0);
+// **Thread-local, not global.** Tests run on parallel threads sharing this process's allocator,
+// and the harness itself allocates on every thread. A global armed flag would count another
+// thread's (or the harness's) allocations against whichever test happened to be measuring —
+// which is exactly what failed the first time this gate ran in parallel. A thread-local counter
+// counts only allocations on the *armed thread*, and the code under test runs entirely on the
+// calling thread, so the measurement is exact regardless of what any other thread is doing. No
+// serialization, no `--test-threads=1` needed.
+//
+// `Cell<bool>`/`Cell<usize>` with `const` init never allocate, so the allocator can touch them
+// without reentering itself.
+thread_local! {
+    static ARMED: Cell<bool> = const { Cell::new(false) };
+    static ALLOCS: Cell<usize> = const { Cell::new(0) };
+}
+
+fn bump() {
+    // If the thread-local is being initialized, `try_with` returns Err rather than allocating
+    // reentrantly. Not armed during init, so nothing is missed.
+    let _ = ARMED.try_with(|a| {
+        if a.get() {
+            let _ = ALLOCS.try_with(|c| c.set(c.get() + 1));
+        }
+    });
+}
 
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if ARMED.load(Ordering::Relaxed) {
-            ALLOCS.fetch_add(1, Ordering::Relaxed);
-        }
+        bump();
         System.alloc(layout)
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
@@ -32,9 +52,7 @@ unsafe impl GlobalAlloc for Counting {
     }
     // realloc counts too: growing a Vec is exactly the allocation the hot loop must not do.
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        if ARMED.load(Ordering::Relaxed) {
-            ALLOCS.fetch_add(1, Ordering::Relaxed);
-        }
+        bump();
         System.realloc(ptr, layout, new_size)
     }
 }
@@ -42,18 +60,13 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static GLOBAL: Counting = Counting;
 
-// Tests in one binary share this process's allocator and run on parallel threads, so a second
-// test allocating while a first is ARMED would be miscounted as the first's. One lock, held for
-// the whole body of every test here, makes the measurement single-threaded and honest.
-static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// Run `f` under the armed allocator and return how many allocations it made.
+/// Run `f` under the armed allocator and return how many allocations it made **on this thread**.
 fn count<R>(f: impl FnOnce() -> R) -> (R, usize) {
-    ALLOCS.store(0, Ordering::Relaxed);
-    ARMED.store(true, Ordering::Relaxed);
+    ALLOCS.with(|c| c.set(0));
+    ARMED.with(|a| a.set(true));
     let r = f();
-    ARMED.store(false, Ordering::Relaxed);
-    (r, ALLOCS.load(Ordering::Relaxed))
+    ARMED.with(|a| a.set(false));
+    (r, ALLOCS.with(|c| c.get()))
 }
 
 use prism_engine::topk::{Candidate, TopK};
@@ -83,7 +96,6 @@ fn codes(n: usize, m: usize) -> Vec<u8> {
 /// the distance buffer is sized.
 #[test]
 fn the_block_scan_allocates_nothing() {
-    let _serial = SERIAL.lock().unwrap();
     let m = 8;
     let n = 20_000;
     let t = table(m);
@@ -114,7 +126,6 @@ fn the_block_scan_allocates_nothing() {
 /// sized to `cap`.
 #[test]
 fn the_bounded_top_k_allocates_nothing() {
-    let _serial = SERIAL.lock().unwrap();
     // Stable owned ids the borrow closure can point at. Built BEFORE arming.
     let ids: Vec<String> = (0..50_000).map(|i| format!("e{i:08}")).collect();
     let id_of = |_p: u32, row: u32| -> &str { ids[row as usize].as_str() };
@@ -122,7 +133,7 @@ fn the_bounded_top_k_allocates_nothing() {
     // Distances chosen so the heap churns: many rows are nearer than the current worst, forcing
     // real sift work (not just early rejection). A mix of ties exercises the id tie-break too.
     let dists: Vec<f32> = (0..50_000u32)
-        .map(|i| ((i * 2_654_435_761) % 997) as f32)
+        .map(|i| (i.wrapping_mul(2_654_435_761) % 997) as f32)
         .collect();
 
     let cap = 200;
@@ -154,7 +165,6 @@ fn the_bounded_top_k_allocates_nothing() {
 /// their absence.
 #[test]
 fn the_counter_is_not_asleep() {
-    let _serial = SERIAL.lock().unwrap();
     let (_, allocs) = count(|| {
         let v: Vec<u8> = Vec::with_capacity(4096);
         v.len()
@@ -168,7 +178,6 @@ fn the_counter_is_not_asleep() {
 /// A scalar-only ceiling still allocates nothing in the scan.
 #[test]
 fn the_scalar_fallback_also_allocates_nothing() {
-    let _serial = SERIAL.lock().unwrap();
     kernel::set_isa_ceiling(Isa::Scalar);
     let m = 8;
     let n = 5_000;

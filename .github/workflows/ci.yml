@@ -170,9 +170,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # A counting allocator proves the block scan and the bounded top-k perform ZERO heap
-      # allocations across a full golden run, once their buffers are sized. Single-threaded so the
-      # process-global counter is not polluted by another test's allocations.
-      - run: cargo test --release -p prism-engine --test alloc -- --test-threads=1 --nocapture
+      # allocations across a full golden run, once their buffers are sized. The counter is
+      # THREAD-LOCAL, so parallel test threads (and the harness's own allocations) do not pollute
+      # it -- it counts only allocations on the armed thread, which is where the code under test
+      # runs.
+      - run: cargo test --release -p prism-engine --test alloc -- --nocapture
+      - run: cargo test -p prism-engine --test alloc -- --nocapture
 
   unsafe-inventory:
     name: every unsafe block is documented (determinism contract §6)
