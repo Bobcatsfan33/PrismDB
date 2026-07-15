@@ -199,6 +199,48 @@ jobs:
       # intrinsics on x86 without running them.
       - run: cargo build -p prism-quantizer --features experimental-avx512
 
+  device:
+    name: the S7 gate — the route is invisible to the answer (GPU-ready, GPU-off)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # S7 ships GPU-ready, GPU-off: no CUDA hardware, no GPU runner, so the GPU gate is NOT
+      # claimed. What IS tested against the CPU reference of the GPU route: selection-identity (the
+      # CPU and gpu-reference routes return byte-identical event ids in byte-identical order,
+      # scores within tolerance) over golden + boundary-tie corpora; a cursor surviving a route
+      # flip between pages; and a device fault at every phase degrading to CPU with the CPU answer.
+      - run: cargo test --release -p prism-cli --test device -- --nocapture
+      - run: cargo test --release -p prism-engine --lib gpu -- --nocapture
+      - run: cargo test --release -p prism-types --lib half -- --nocapture
+      # The device FFI must still compile behind its feature (it is not run -- no device).
+      - run: cargo build -p prism-engine --features cuda
+
+  fp16-contract:
+    name: the fp16 rerank accuracy contract holds (D-049)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release
+      # Re-derive the fp16 receipt and assert: the committed tolerance is at least twice the worst
+      # fp16-vs-fp32 score gap (so no >tolerance pair can invert), and selection is stable. A lossy
+      # encoding that reorders the answer is a different database, not a smaller one.
+      - name: fp16 tolerance covers the gap, and selection is stable
+        run: |
+          ./target/release/prism evidence fp16 --out /tmp/fp16.json >/dev/null
+          python3 - <<'PY2'
+          import json
+          d = json.load(open("/tmp/fp16.json"))
+          print(json.dumps(d, indent=2))
+          assert d["selection_stable"], f"fp16 reordered the answer: {d['unstable_queries']}"
+          assert d["committed_tolerance"] >= 2 * d["max_score_gap"], \
+              f"tolerance {d['committed_tolerance']} < 2x max gap {2*d['max_score_gap']}: a >tolerance pair could invert"
+          print("fp16 contract holds: tolerance covers 2x the gap, selection stable.")
+          PY2
+
   generations:
     name: the S5 gate — migration, wrong codebook, bridges, DEGRADED alarms
     runs-on: ubuntu-latest

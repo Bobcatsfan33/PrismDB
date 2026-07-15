@@ -6,7 +6,7 @@ Every `unsafe` block in the shipping crates is listed here with its safety argum
 
 The rule this enforces: an `unsafe` block is a place where the compiler stops checking and a human promise takes over. A promise nobody wrote down is a promise nobody can review.
 
-**Total `unsafe` tokens in `crates/*/src`: 12.**
+**Total `unsafe` tokens (code, not comments) in `crates/*/src`: 11.**
 
 ---
 
@@ -41,3 +41,7 @@ Parts are immutable, so a read-only mapping cannot race a writer; the only hazar
 `scripts/check-unsafe-inventory.sh` counts `unsafe` tokens in `crates/*/src` and compares against the number this document claims (the **Total** line above). A mismatch — a new `unsafe` block, or a removed one this file still lists — fails CI. It is deliberately crude: the point is that *adding* `unsafe` forces a diff to this file, where a reviewer sees the safety argument, not that a script understands the argument.
 
 When you add or remove an `unsafe` block, update the table **and** the total, in the same change.
+
+## S7 note — the device boundary adds no `unsafe` yet
+
+S7 is "GPU-ready, GPU-off": there is no CUDA hardware and no GPU CI runner, so the real CUDA FFI is declared behind `#[cfg(feature = "cuda")]` (in `crates/prism-engine/src/gpu/mod.rs`) and **not compiled** — it adds zero `unsafe` to the shipping build, and the count stays 11. When a runner exists and the CUDA kernels land, every `cuLaunchKernel` / `cuMemAlloc` / `cuMemcpy` call site joins this inventory **with its error-recovery path** (directive 8): each maps a CUDA error to a `DeviceFault` the engine degrades from, never a panic. The kernels stay behind the one narrow `gpu` module — the `Isa` dispatch pattern — so a device pointer or a CUDA error never reaches query-planning code. If this inventory ever sprawls into the planner, the abstraction boundary is wrong.

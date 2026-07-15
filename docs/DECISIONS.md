@@ -84,6 +84,17 @@ Three obligations, all permanent:
 
 **Why a layout-variant test and not a code review:** each of these sites was individually self-consistent and deterministic. `(part, row)` *is* a deterministic tie-break, and the comment on the candidate heap said exactly that, and it was true, and it was the bug. Determinism in a layout is not the same property as being a function of the data, and only running the same data through two layouts can tell them apart.
 
+## C-6 — C-1 receipts re-derive at the end of every sprint that materially changes the engine
+**S7. Architect's standing rule, arising from [D-048](DECISIONS.md).**
+
+A receipt is evidence only if it describes the engine that actually ships. S6 proved this the hard way: re-running the block-size sweep against the SIMD engine *panicked*, because the manifest had grown since the receipt was written — the evidence had silently stopped matching the code ([D-048](DECISIONS.md)).
+
+> **At the end of every sprint that materially changes the engine, the format, or a corpus, every C-1 receipt is re-derived.** It is a line in the sprint checklist, not a thing anyone remembers to do.
+
+"Materially changes" is any of: a new or altered kernel or reduction; a format or manifest change; a new codebook generation; a new or reversioned corpus; a new execution substrate. The re-derivation either **reconfirms** (the constants did not move — which, when the change is bit-identical like SIMD, is the *prediction*, checked) or **re-derives** (they moved, and the new value ships with the engine that produced it). Either way the committed evidence and the shipping engine agree, which is the whole point of C-1.
+
+This subsumes the earlier per-amendment obligations — C-3's "re-sweep on a real-embedding corpus" and the generation-conditional re-sweep — into one ritual: **if the engine changed, the receipts are suspect until re-run.**
+
 ---
 
 ## D-001 — `docs/PRISM.md` is the canonical v2 text — *verified*
@@ -592,3 +603,48 @@ Re-running the block-size sweep against the current engine **panicked**: no cand
 But the budget was only ever about the **block directory** — the term that is read on every open *and scales with block size*. The extensions do not scale with block size and do not belong in it. So the budget now isolates the directory term by a delta (manifest size at this block size minus the floor at the largest block size, which cancels the fixed overhead), and under the corrected budget the sweep re-derives cleanly to **2 KiB** — interior to the grid, reading fewer bytes than 4 KiB.
 
 This is exactly what C-5 §5 predicted a re-run would do: *reconfirm or re-derive, either way the evidence matches the shipping engine.* Every recall-derived constant (`nprobe`, widths, restarts, adaptive) **reconfirmed exactly**, because the kernels are bit-identical; only the byte-cost-derived `BLOCK_SIZE` moved, and it moved because the *manifest* cost model changed, which measurement caught the moment it was asked to.
+
+## D-049 — fp16 rerank is the first negotiated accuracy contract
+**S7. Directive 4, and the precedent for every lossy encoding after it.**
+
+Storing rerank vectors in fp16 halves the exact-tier storage bill — the biggest open cost question in the system — at the price of approximation. That is a [D-003](DECISIONS.md) event, a change in *what a stored byte means*, and it is handled the way D-003 built the format to handle it: the rerank-tier descriptor declares `encoding_id` and `accuracy_contract_id`, and the reader **dispatches on the pair**, refusing any pairing it does not implement.
+
+**fp32-exact remains the only default.** fp16 is opt-in behind `encoding_id = 2 / accuracy_contract_id = 2`, and a build that does not implement the contract refuses the part rather than guessing at what its scores mean. Three things were updated in the *same change*, deliberately, to set the precedent: the **contract text** (the descriptor + the tolerance constant), the **evidence** (`testing/evidence/fp16.json`), and the **unknown-encoding fixture** (both the unit test and the fuzz sweep now treat encoding 2 as *known* and moved the "unknown" probe to encoding 3). Add a lossy encoding without updating its fixture and the fixture silently stops testing anything.
+
+**The honest finding: fp16 is not strict-order-stable, and it cannot be.** Any lossy encoding reorders rows whose exact scores fall within its rounding error — that is unavoidable. So "selection stability" is defined as the *achievable* guarantee: **fp16 never inverts a pair whose fp32 scores differ by more than the tolerance.** Rows within the tolerance of each other are, by the contract, interchangeable — opting into fp16 *is* agreeing that such rows may reorder.
+
+That guarantee is not asserted, it is *derived*: if the tolerance exceeds **twice** the worst per-score gap, then two rows separated by more than the tolerance in fp32 have fp16 scores that still differ, same sign, so fp16 cannot invert them. Measured worst gap on the golden corpus is `4.6e-4`, so the floor is `9.2e-4`; the committed tolerance is `2e-3`, with headroom. The receipt proves selection stability holds at that tolerance, and the tolerance is a C-1 tuned constant bound to it.
+
+## D-050 — the rerank route is invisible to the answer; selection-identity, not score-identity
+**S7. Directives 2–3, and the reason pagination survives a route change.**
+
+A GPU reduces sums in a different order than a CPU — tree, not sequential — so its scores differ in the last bits. A GPU **cannot** be bit-identical to a CPU, and pretending otherwise is how S7 would have shipped a lie. So the device edition of the determinism contract weakens §2's strong form to exactly what is achievable and sufficient:
+
+> **Scores may differ within a documented tolerance; the returned event ids and their order may not.**
+
+This is **selection-identity**, the device analogue of the weak form, and it rests on [charter C-4](DECISIONS.md) already being law: distance ties break on `event_id`, never on a score's last bit, so a sub-tolerance score difference cannot reorder the answer. The gate proves it on the golden, layout-variant, and boundary-tie corpora — the CPU route and the CPU-reference-of-the-GPU route return **byte-identical event-id lists**, scores within tolerance.
+
+**The `GpuReference` route is not a pretend GPU.** It is the *definition* the real CUDA kernel will have to prove itself equal to — the scalar-kernel-for-SIMD pattern, one substrate up — and it models the one thing that matters for correctness: a different, deterministic reduction order (pairwise), so the selection-identity gate exercises a *real* score difference rather than a no-op. The suite refuses to pass if the two routes ever produce bit-identical scores, because then the tolerance path was never tested.
+
+## D-051 — a device fault degrades to CPU; per-tenant admission lands with the kernels
+**S7. Directive 6.**
+
+A CUDA error — OOM, launch failure, device lost mid-query — **degrades to the CPU path with a logged event.** Never a failed query, never a wrong answer, never corrupted engine state. The GPU is an accelerator, not a dependency: a query answerable on the CPU is always answered. This is why the rerank fetches every candidate's vector *first* and reranks second — a device fault is then a pure recompute on the already-fetched vectors, no re-read. Fault injection walks all four phase boundaries (upload, kernel, selection, download) and asserts each returns the *CPU answer*, degraded and logged.
+
+**Device-memory admission is per tenant, and lands with the kernels.** A device OOM caused by tenant A must not fail tenant B — the same starvation isolation the ingest path enforces, now on the device. A query's device footprint is admitted against a per-tenant share *before* upload, and a tenant over its share is degraded to CPU rather than permitted to eat into another tenant's guaranteed portion. The reservation releases on drop, so a query cannot leak device memory even if it errors mid-flight.
+
+## D-052 — the cursor pins the route
+**S7. What the route-flip pagination gate forced, and it is the right design.**
+
+Directive 3's gate — *paginate with the route forced to flip between pages* — failed the obvious implementation, and the failure is instructive. The cursor stores a **score** for keyset pagination, and scores differ by route; page 1 on the GPU ends at a GPU score, page 2 on the CPU compares CPU scores against it, and the boundary row is included or excluded wrongly — a duplicate or a gap.
+
+The fix is the one the cursor already uses for the snapshot: **pin the route.** A paginated query is *one logical query*, so its route — like its snapshot — is fixed at the first page and carried in the cursor. On resume the pinned route wins over any planner or test override, so the boundary scores on both sides of a page break come from the *same* route and cannot disagree. Flipping the external route between pages is then invisible: the cursor holds the route steady, and the pages tile the answer exactly — no duplicate, no gap. "A cursor must survive a route change" is satisfied by the cursor *being* what survives it.
+
+## D-053 — S7 ships "GPU-ready, GPU-off", and does not claim the gate
+**S7. Directive 2's explicit fallback, taken honestly.**
+
+CI GPU capacity is a sprint deliverable, and this environment cannot deliver it: no CUDA hardware, no cloud credentials to provision a runner. The architect anticipated exactly this — *"if the runner cannot be secured this sprint, S7 pivots to 'GPU-ready, GPU-off' and does not claim the gate."*
+
+So it does not. What ships is **everything device-agnostic**, fully built and tested against the CPU reference: the route abstraction, selection-identity, fault containment, per-tenant admission, the fp16 accuracy contract, and the cost-model *mechanism*. What does **not** ship is the CUDA kernel (declared behind the `cuda` feature, not compiled — writing untestable FFI would be the faked completeness the project refuses) and the GPU runner (provisioning-as-code in `infra/gpu-runner/`, reviewable and one `terraform apply` from real, but **not applied**). The crossover thresholds are placeholders marked device-conditional and un-derived, because deriving them requires measuring a GPU. `Route::Cuda` and the GPU are **off by default** — the AVX-512 rule, device edition: an instruction set, or a device, that CI cannot execute does not ship enabled.
+
+The 4-bit-shuffle CPU kernel — the genuine SIMD speedup S6's NEON finding pointed at — is filed as an issue with that finding attached, not built. One new execution substrate per sprint (directive 7).

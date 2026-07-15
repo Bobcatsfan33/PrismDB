@@ -588,11 +588,50 @@ Directive 5 — re-run the C-1 sweeps against the SIMD engine — did exactly wh
 
 ---
 
-## S7 — next
+## S7 — GPU-ready, GPU-off (the gate is **not** claimed)
 
-**GPU engine.** GPU ADC-scan and rerank kernels, each with the **scalar twin CI proves equal** — the same determinism contract, now across the CPU/GPU boundary, where bit-identity is *much* harder (GPU floating-point, FMA contraction, and reduction order differ from CPU). This is where the weak-form fallback (C-5 §2) likely earns its place: a logged decision that GPU scores may differ from CPU but **selection may not**, proved on the boundary-tie corpus. Plus graceful CPU fallback when no GPU is present — the same feature-detection-is-a-gate discipline as S6's ISA masking.
+**Directive 2 named the honest outcome up front, and this is it.** CI GPU capacity is a sprint deliverable, and this environment cannot deliver it — no CUDA hardware, no cloud credentials to provision a runner. Per the architect's own fallback, **S7 pivots to "GPU-ready, GPU-off" and does not claim the GPU gate** ([D-053](DECISIONS.md)).
 
-**Carry into S7:**
-- The determinism contract already has the vocabulary S7 needs: strong form, weak form, the boundary-tie stress corpus, worst-device-quoted numbers.
-- The kernel dispatch (`Isa` + ceiling + `available()`) generalizes to a device dimension; GPU is "another ISA" that the masking gate must be able to force off.
-- GPU almost certainly **cannot** be bit-identical (FMA is the default and often unavoidable in GPU matmul). So S7 will likely be the first **weak-form** kernel, and D-044's honest framing — bit-identity where achievable, selection-invariance where not — is the precedent.
+What that means precisely: everything **device-agnostic** is built and tested against the CPU reference of the GPU route; the CUDA kernel and the runner — the two things that need hardware and money — are **not** faked. Contract first, as always: [the determinism contract's device edition](DETERMINISM-CONTRACT.md) (§8–§12) was written before any of it.
+
+### 1. The route is invisible to the answer — selection-identity, not score-identity
+
+A GPU sums in a different order than a CPU, so its scores differ in the last bits; a GPU **cannot** be bit-identical, and S7 does not pretend it can. So the contract weakens to what is achievable and sufficient: **scores may differ within a documented tolerance; the returned event ids and order may not** ([D-050](DECISIONS.md)). This rests on [charter C-4](DECISIONS.md) already being law — ties break on `event_id`, not on a score's last bit.
+
+The `GpuReference` route is the **CPU-executed definition** the real CUDA kernel will have to match — the scalar-kernel-for-SIMD pattern, one substrate up. It reduces in a genuinely different (pairwise) order, so the selection-identity gate exercises a *real* score difference; the suite refuses to pass if the two routes ever produce bit-identical scores, because then the tolerance was never tested.
+
+### 2. A cursor survives a route flip — the gate that forced the right design
+
+Directive 3's gate — paginate while the route flips between pages — failed the obvious implementation: the cursor stores a **score** for keyset pagination, scores differ by route, and the page boundary breaks. The fix is the one the cursor already uses for the snapshot: **pin the route** ([D-052](DECISIONS.md)). A paginated query is one logical query; its route is fixed at page 1 and carried in the cursor, so flipping the external route between pages is invisible and the pages tile the answer exactly — no duplicate, no gap.
+
+### 3. A device fault degrades to CPU; admission is per tenant
+
+A CUDA error at any phase — upload, kernel, selection, download — **degrades to the CPU path with a logged event**, never a failed query or a wrong answer ([D-051](DECISIONS.md)). The rerank fetches every candidate's vector first and reranks second, so a fault is a pure recompute. And device-memory admission is **per tenant**: tenant A's OOM cannot fail tenant B, the ingest path's starvation isolation now on the device. Both are fully tested against the reference's injected faults and a fake device budget.
+
+### 4. fp16 rerank — the first negotiated accuracy contract
+
+Storing rerank vectors in fp16 halves the exact-tier storage bill, at the price of approximation — a [D-003](DECISIONS.md) event, not a kernel detail ([D-049](DECISIONS.md)). fp32-exact stays the only default; fp16 is opt-in behind `encoding_id=2 / accuracy_contract_id=2`, and a build that does not implement the pair **refuses the part** rather than guessing. Contract text, evidence, and the unknown-encoding fixture were updated in one change, setting the precedent.
+
+**The honest finding: fp16 is not strict-order-stable, and cannot be** — any lossy encoding reorders rows within its rounding error. So the guarantee is the achievable one, and it is *derived*, not asserted: with the tolerance set above **twice** the worst per-score gap, fp16 can never invert a pair separated by more than the tolerance. Measured worst gap `4.6e-4` → floor `9.2e-4` → committed `2e-3` with headroom. The receipt proves selection stability at that tolerance; the CI job re-checks both conditions.
+
+### 5. Charter C-6 — receipts re-derive at sprint end
+
+S6's block-size panic (the manifest had grown out from under the receipt) is now a standing rule: **every C-1 receipt re-derives at the end of any sprint that materially changes the engine, the format, or a corpus** ([C-6](DECISIONS.md)). It subsumes the corpus- and generation-conditional obligations into one checklist line. This sprint's re-run reconfirmed every recall constant (the device path is CPU today, so nothing moved) and added the fp16 receipt.
+
+### What is deliberately NOT here
+
+- **The CUDA kernel.** Declared behind the `cuda` feature, *not compiled in CI* — writing untestable FFI is the faked completeness the project refuses. `Route::Cuda` is off by default.
+- **The GPU runner.** Provisioning-as-code in [`infra/gpu-runner/`](../infra/gpu-runner/) — real Terraform + cloud-init, one `terraform apply` from a live runner — but **not applied**, because there are no credentials. When it lands, the CUDA kernels graduate through the same selection-identity gate the reference passes today.
+- **The crossover thresholds.** Placeholders marked device-conditional and un-derived; deriving them requires measuring a GPU (charter C-6, filed).
+- **The 4-bit-shuffle CPU kernel** — the genuine speedup S6's NEON finding pointed at — filed as [issue #4](https://github.com/Bobcatsfan33/PrismDB/issues/4), not built. One substrate per sprint (directive 7).
+
+---
+
+## S8 — next
+
+**Query semantics.** The full SQL surface the S3 query contract promised but deferred: nulls, ties, model-version behaviour, and the cost-based optimizer — which now has a real second axis to optimize over, the **route**, whose cost model S7 built the mechanism for and left un-derived. S8 may *extend* the query contract; it may not contradict it.
+
+**Carry into S8:**
+- The route cost model is the optimizer's first real routing decision; its thresholds are the C-1 sweep waiting on a GPU runner.
+- Pagination now pins *two* things in the cursor — snapshot and route. Any new plan dimension S8 adds (a chosen index, a join order) must ask the same question: does a cursor have to pin it?
+- The determinism contract now has a strong form (CPU/ISA) and a weak form (device); S8's optimizer must never let a cost-based route choice change an answer, only its speed.

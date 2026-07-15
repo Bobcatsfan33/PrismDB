@@ -92,3 +92,45 @@ The mmap path is read-only over immutable parts — the easy case — with one s
 The baseline report ([`baselines.json`](../baselines.json)) grows an **ISA dimension**. Every number is measured **end to end** — transfer, scan, selection, rerank — never kernel-only, because a kernel-only number is a roofline wearing a stopwatch, and the charter forbids rooflines dressed as measurements.
 
 And the p50 quoted anywhere — a README, a release note, this repo's own claims — is **the worst supported ISA's**, never the best's. A number that is only true on your fastest machine is a number that is false on the machine your customer runs.
+
+---
+
+# The device edition (S7)
+
+**Status:** written in S7, before the first GPU kernel — and S7 ships with **no GPU kernel and no GPU in CI**, because this environment has neither CUDA hardware nor the cloud credentials to provision a runner. Per the architect's own fallback, **S7 is "GPU-ready, GPU-off": it does not claim the GPU gate.** What it builds is everything *device-agnostic* — the route abstraction, the fault-containment path, the fp16 accuracy contract, per-tenant device admission — all tested against a **CPU reference of the GPU route**, which is the definition the real CUDA kernel will one day have to prove itself equal to, exactly as the scalar ADC kernel is the definition every SIMD kernel proves itself equal to (§1).
+
+The device edition adds two requirements, weaker than §2's strong form and deliberately so, because a GPU **cannot** be bit-identical to a CPU — FMA contraction, a different reduction order, and non-associative parallel sums are the default and often unavoidable in GPU arithmetic.
+
+## 8. Run-to-run determinism on the same device
+
+> Same query, same snapshot, **same answer, every time** — on a given device.
+
+A GPU kernel that sums with atomics accumulates in **nondeterministic order**, so two runs of the same query return two different scores and, at a tie boundary, two different answers. That is forbidden. Each kernel launch config pins a **fixed reduction order** — a fixed grid/block shape and a deterministic tree reduction, never `atomicAdd` into a shared accumulator — so the device is a *function*, not a distribution. The reference route (the CPU definition) is trivially deterministic; the gate is on the real kernel, and it is checked by running the same query many times and asserting one answer.
+
+## 9. Selection-identity between the CPU and GPU routes
+
+> Scores may differ within a **documented tolerance**; the returned **event IDs and their order may not.**
+
+This is the device analogue of §2's weak form, and it is the property the whole sprint turns on. The GPU route computes the same distances and cosines as the CPU route, in a different arithmetic, so its scores differ in the last few bits. But **selection** — which rows survive the scan, which order they rerank into — must be **identical**, because selection is what a bounded top-k *decides* and it is what a user sees. Two routes that select differently are two databases wearing one API.
+
+Selection-identity rests on [charter C-4](DECISIONS.md), already law: distance ties break on `event_id`, never on a score's last bit. So a score difference below the tolerance cannot reorder the answer, because the tie-break is on the id. The gate checks it on the golden, layout-variant, and boundary-tie corpora: the CPU route and the GPU-reference route return **byte-identical event-id lists**, and the scores agree within the declared tolerance.
+
+**Why this is what pagination requires.** A cursor pins a snapshot and a position in the total order ([query contract](QUERY-CONTRACT.md) §2). If routing the query to the GPU on page 2 changed the order, the cursor from page 1 — computed on the CPU — would point into a different sequence, and the client would see duplicates or gaps. **The route must be invisible to the answer.** So the gate paginates a result set while **forcing the route to flip between pages**, and asserts the pages still tile the snapshot exactly: no duplicate, no gap. A cursor must survive a route change, or routing is not allowed to exist.
+
+## 10. fp16 rerank is a negotiated accuracy contract, not a kernel detail
+
+Storing rerank vectors in fp16 halves the exact-tier storage bill — the biggest open cost question in the system — at the price of approximation. That is a [D-003](DECISIONS.md) event, a change in *what a stored byte means*, not a kernel optimization, and it is handled the way D-003 built the format to handle it: **the part's rerank-tier descriptor declares its `encoding_id` and its `accuracy_contract_id`, and the reader dispatches on the pair.**
+
+**fp32-exact remains the only default.** fp16 ships behind an explicit `accuracy_contract_id` whose tolerance and whose **selection-stability evidence** are committed as a receipt — the first *negotiated* accuracy contract in the system, and the precedent for every lossy encoding after it. The rule the precedent sets: a lossy encoding may enter the format only with (a) its contract text stating the tolerance, (b) a committed receipt proving selection stability on the golden corpus at that tolerance, and (c) the unknown-encoding fixture updated in the same change, so a build that does *not* implement the contract still refuses the part loudly rather than guessing.
+
+## 11. A device fault degrades to CPU; it never fails a query
+
+A CUDA error — out of memory, a launch failure, the device lost mid-query — **degrades to the CPU path with a logged event.** Never a failed query, never a wrong answer, never corrupted engine state. The GPU is an accelerator, not a dependency; a query that could be answered on the CPU is always answered. Fault-injection tests cover device loss at **every phase boundary** — upload, kernel, selection, download — and assert the query still returns the CPU answer.
+
+And **device-memory admission is per tenant, and lands with the kernels, not after.** A device OOM caused by tenant A's oversized query must not fail tenant B's — the same starvation-isolation property the ingest path already enforces, now on the device. A tenant's device footprint is admitted against a per-tenant budget before a byte is uploaded.
+
+## 12. The crossover is a cost model, and its numbers are the worst device's
+
+Routing CPU-vs-GPU is a **measured** decision, not a heuristic: the thresholds (bytes to transfer, candidate width, selectivity, queue depth) are C-1 tuned constants with C-3 policy bounds, measured **end to end** — transfer, launch, selection, rerank — never kernel time, because a kernel-only number is a roofline and the charter forbids rooflines. The published matrix **includes where GPU loses** — a selective query with a small candidate set pays the upload and launch cost for a scan too short to amortize it, and loses; the honest matrix says so. And the quoted number is the **worst device's**, exactly as §7's is the worst ISA's.
+
+**In S7 these thresholds cannot be derived**, because deriving them requires measuring a GPU, and there is none. So the cost-model *mechanism* is built and the thresholds are constants marked **device-conditional and un-derived**, with the sweep filed to run the moment a runner exists. Charter **C-6** makes that re-derivation a standing obligation, not a hope.
