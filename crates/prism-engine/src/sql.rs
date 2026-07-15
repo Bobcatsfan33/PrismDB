@@ -109,6 +109,10 @@ impl Engine {
             group_k: None,
             predicate: plan.filter.clone(),
             space: None,
+            // SQL queries adapt too; the compiled Query is the same door as the direct API
+            // (docs/QUERY-CONTRACT.md §5), and adaptive probing is part of that door.
+            adaptive: true,
+            adaptive_margin: None,
         })
     }
 

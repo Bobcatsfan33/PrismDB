@@ -1,6 +1,6 @@
 {
   "constant": "BLOCK_SIZE",
-  "chosen_block_size": 4096,
+  "chosen_block_size": 2048,
   "rule": "the block size minimising physically-read bytes across the golden query set (whole blocks, frame headers and block over-read included, as measured by the reader itself), SUBJECT TO the manifest block directory staying under 4 bytes per row. The constraint is what stops the sweep collapsing onto its own smallest candidate: the directory is read in full on every part open, including opens that prune the part away, so at 512-byte blocks a billion-row part would carry a ~16 GB directory. Ties go to the smaller block, because smaller blocks localize damage more tightly.",
   "corpus_rows": 2000,
   "dim": 64,
@@ -10,93 +10,102 @@
   "sweep": [
     {
       "block_size": 512,
-      "manifest_bytes": 32112,
-      "bytes_read": 51111704,
-      "read_amplification": 32.575144037118235,
-      "total_bytes": 54451352,
-      "query_p50_ms": 5.786875,
+      "manifest_bytes": 43781,
+      "bytes_read": 51530958,
+      "read_amplification": 29.51967292375095,
+      "total_bytes": 56084182,
+      "query_p50_ms": 7.486458,
       "recall_at_10": 0.998077,
-      "manifest_bytes_per_row": 16.056
+      "directory_bytes_per_row": 13.808,
+      "manifest_bytes_per_row": 21.8905
     },
     {
       "block_size": 1024,
-      "manifest_bytes": 17888,
-      "bytes_read": 52885632,
-      "read_amplification": 33.70572579411615,
-      "total_bytes": 54745984,
-      "query_p50_ms": 5.743375,
+      "manifest_bytes": 29749,
+      "bytes_read": 54610614,
+      "read_amplification": 31.283863642612943,
+      "total_bytes": 57704510,
+      "query_p50_ms": 7.709708,
       "recall_at_10": 0.998077,
-      "manifest_bytes_per_row": 8.944
+      "directory_bytes_per_row": 6.792,
+      "manifest_bytes_per_row": 14.8745
     },
     {
       "block_size": 2048,
-      "manifest_bytes": 10768,
-      "bytes_read": 58078240,
-      "read_amplification": 37.01514301738643,
-      "total_bytes": 59198112,
-      "query_p50_ms": 6.063667,
+      "manifest_bytes": 22597,
+      "bytes_read": 61712174,
+      "read_amplification": 35.352014839188655,
+      "total_bytes": 64062262,
+      "query_p50_ms": 8.138542000000001,
       "recall_at_10": 0.998077,
-      "manifest_bytes_per_row": 5.384
+      "directory_bytes_per_row": 3.216,
+      "manifest_bytes_per_row": 11.2985
     },
     {
       "block_size": 4096,
-      "manifest_bytes": 7232,
-      "bytes_read": 69159456,
-      "read_amplification": 44.0775608015092,
-      "total_bytes": 69911584,
-      "query_p50_ms": 6.820875,
+      "manifest_bytes": 18901,
+      "bytes_read": 76271566,
+      "read_amplification": 43.69240877886034,
+      "total_bytes": 78237270,
+      "query_p50_ms": 9.140417,
       "recall_at_10": 0.998077,
-      "manifest_bytes_per_row": 3.616
+      "directory_bytes_per_row": 1.368,
+      "manifest_bytes_per_row": 9.4505
     },
     {
       "block_size": 8192,
-      "manifest_bytes": 5472,
-      "bytes_read": 91745480,
-      "read_amplification": 58.472365267934535,
-      "total_bytes": 92314568,
-      "query_p50_ms": 8.385874999999999,
+      "manifest_bytes": 17381,
+      "bytes_read": 99563766,
+      "read_amplification": 57.03541951183744,
+      "total_bytes": 101371390,
+      "query_p50_ms": 10.775666,
       "recall_at_10": 0.998077,
-      "manifest_bytes_per_row": 2.736
+      "directory_bytes_per_row": 0.608,
+      "manifest_bytes_per_row": 8.6905
     },
     {
       "block_size": 16384,
-      "manifest_bytes": 4608,
-      "bytes_read": 136840576,
-      "read_amplification": 87.21293019935757,
-      "total_bytes": 137319808,
-      "query_p50_ms": 11.672291,
+      "manifest_bytes": 16725,
+      "bytes_read": 141182150,
+      "read_amplification": 80.87664294290717,
+      "total_bytes": 142921550,
+      "query_p50_ms": 13.744,
       "recall_at_10": 0.998077,
-      "manifest_bytes_per_row": 2.304
+      "directory_bytes_per_row": 0.28,
+      "manifest_bytes_per_row": 8.3625
     },
     {
       "block_size": 65536,
-      "manifest_bytes": 4096,
-      "bytes_read": 387640768,
-      "read_amplification": 247.05601386835264,
-      "total_bytes": 388066752,
-      "query_p50_ms": 29.726459000000002,
+      "manifest_bytes": 16261,
+      "bytes_read": 365400294,
+      "read_amplification": 209.32071872450803,
+      "total_bytes": 367091438,
+      "query_p50_ms": 30.839167,
       "recall_at_10": 0.998077,
-      "manifest_bytes_per_row": 2.048
+      "directory_bytes_per_row": 0.048,
+      "manifest_bytes_per_row": 8.1305
     },
     {
       "block_size": 262144,
-      "manifest_bytes": 3968,
-      "bytes_read": 1377360448,
-      "read_amplification": 877.8364146229542,
-      "total_bytes": 1377773120,
-      "query_p50_ms": 100.44066699999999,
+      "manifest_bytes": 16165,
+      "bytes_read": 798554086,
+      "read_amplification": 457.45424392546494,
+      "total_bytes": 800235246,
+      "query_p50_ms": 60.133542,
       "recall_at_10": 0.998077,
-      "manifest_bytes_per_row": 1.984
+      "directory_bytes_per_row": 0.0,
+      "manifest_bytes_per_row": 8.0825
     },
     {
       "block_size": 1048576,
-      "manifest_bytes": 3952,
-      "bytes_read": 2694945344,
-      "read_amplification": 1717.5759343292714,
-      "total_bytes": 2695356352,
-      "query_p50_ms": 194.0015,
+      "manifest_bytes": 16165,
+      "bytes_read": 798554086,
+      "read_amplification": 457.45424392546494,
+      "total_bytes": 800235246,
+      "query_p50_ms": 60.102208,
       "recall_at_10": 0.998077,
-      "manifest_bytes_per_row": 1.976
+      "directory_bytes_per_row": 0.0,
+      "manifest_bytes_per_row": 8.0825
     }
   ],
   "note": "Measured, not modelled: a real store is built at each candidate size and the real golden query set is run against it. Re-derive with `prism evidence block-size` whenever the corpus, the index geometry, or the column layout changes. The value is a DEFAULT, not a law — every part records its own block size, so a store built at one size stays readable whatever this default later becomes."

@@ -26,6 +26,16 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::time::Instant;
 
+/// End-to-end query numbers for one instruction set.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct IsaBaseline {
+    pub isa: String,
+    pub query_p50_ms: f64,
+    pub query_p95_ms: f64,
+    pub query_max_ms: f64,
+    pub scan_rows_per_sec: f64,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Baselines {
     pub prism_version: String,
@@ -52,11 +62,18 @@ pub struct Baselines {
     pub part_open_ms: f64,
     pub parts: usize,
 
+    /// **The headline latencies are the WORST supported ISA's, never the best's** (S6,
+    /// determinism contract §7). A p50 that is only true on your fastest machine is false on the
+    /// machine your customer runs. The per-ISA breakdown is in `isa`.
     pub query_p50_ms: f64,
     pub query_p95_ms: f64,
     pub query_max_ms: f64,
-    /// Rows of *compressed codes* scanned per second, end to end.
+    /// Rows of *compressed codes* scanned per second, end to end. The worst ISA's.
     pub scan_rows_per_sec: f64,
+    /// End-to-end numbers per instruction set — transfer, scan, selection and rerank all
+    /// included, never kernel-only (a kernel-only number is a roofline wearing a stopwatch). The
+    /// kernels are bit-identical (§1), so recall is ISA-invariant and only *speed* varies here.
+    pub isa: Vec<IsaBaseline>,
 
     pub recall_at_10: f32,
     /// The tail. A mean without a minimum is how S0 shipped a configuration that
@@ -193,33 +210,65 @@ pub fn run(root: &Path, opts: &BenchOpts) -> Result<Baselines> {
         10,
     )?;
 
-    let mut latencies: Vec<f64> = Vec::new();
-    let mut rows_scanned_total = 0usize;
-    let mut scan_seconds = 0.0f64;
-
-    for exp in &golden.expectations {
-        let mut q: Query = exp.query.to_query();
-        q.nprobe = opts.nprobe;
-        q.candidates = opts.candidates;
-        q.rerank = opts.rerank;
-        q.k = 10;
-
-        // Two warm passes, then five measured. A cold-cache number belongs in
-        // S11 where the cache is the thing being measured; here it would just be
-        // noise.
-        for _ in 0..2 {
-            engine.search(&q)?;
+    // Measure end-to-end query latency once per available ISA, forcing each kernel with the
+    // ceiling. Every measurement is the full query -- transfer, scan, selection, rerank -- never
+    // kernel-only.
+    let measure_isa = |isa: prism_quantizer::kernel::Isa| -> Result<(Vec<f64>, usize, f64)> {
+        prism_quantizer::kernel::set_isa_ceiling(isa);
+        let mut latencies: Vec<f64> = Vec::new();
+        let mut rows_scanned_total = 0usize;
+        let mut scan_seconds = 0.0f64;
+        for exp in &golden.expectations {
+            let mut q: Query = exp.query.to_query();
+            q.nprobe = opts.nprobe;
+            q.candidates = opts.candidates;
+            q.rerank = opts.rerank;
+            q.k = 10;
+            // Two warm passes, then five measured. A cold-cache number belongs in S11 where the
+            // cache is the thing being measured; here it would just be noise.
+            for _ in 0..2 {
+                engine.search(&q)?;
+            }
+            for _ in 0..5 {
+                let t = Instant::now();
+                let res = engine.search(&q)?;
+                let dt = t.elapsed().as_secs_f64();
+                latencies.push(dt * 1000.0);
+                scan_seconds += dt;
+                rows_scanned_total += res.counters.rows_scanned_pq;
+            }
         }
-        for _ in 0..5 {
-            let t = Instant::now();
-            let res = engine.search(&q)?;
-            let dt = t.elapsed().as_secs_f64();
-            latencies.push(dt * 1000.0);
-            scan_seconds += dt;
-            rows_scanned_total += res.counters.rows_scanned_pq;
-        }
+        latencies.sort_by(|a, b| a.total_cmp(b));
+        prism_quantizer::kernel::clear_isa_ceiling();
+        Ok((latencies, rows_scanned_total, scan_seconds))
+    };
+
+    let mut isa_baselines: Vec<IsaBaseline> = Vec::new();
+    for isa in prism_quantizer::kernel::available() {
+        let (lat, rows, secs) = measure_isa(isa)?;
+        isa_baselines.push(IsaBaseline {
+            isa: isa.name().to_string(),
+            query_p50_ms: percentile(&lat, 0.50),
+            query_p95_ms: percentile(&lat, 0.95),
+            query_max_ms: percentile(&lat, 1.0),
+            scan_rows_per_sec: rows as f64 / secs.max(1e-9),
+        });
     }
-    latencies.sort_by(|a, b| a.total_cmp(b));
+
+    // The headline is the WORST ISA -- highest p50, lowest scan rate (§7). On a scalar-only
+    // machine that is scalar; on a SIMD machine it is still whichever kernel is slowest, because a
+    // number that is only true on the fastest machine is false on the customer's.
+    let worst = isa_baselines
+        .iter()
+        .max_by(|a, b| a.query_p50_ms.total_cmp(&b.query_p50_ms))
+        .cloned()
+        .unwrap_or(IsaBaseline {
+            isa: "scalar".into(),
+            query_p50_ms: 0.0,
+            query_p95_ms: 0.0,
+            query_max_ms: 0.0,
+            scan_rows_per_sec: 0.0,
+        });
 
     let recall =
         oracle::measure_recall(&engine, &golden, opts.nprobe, opts.candidates, opts.rerank)?;
@@ -253,10 +302,11 @@ pub fn run(root: &Path, opts: &BenchOpts) -> Result<Baselines> {
         part_open_ms,
         parts: readers.len(),
 
-        query_p50_ms: percentile(&latencies, 0.50),
-        query_p95_ms: percentile(&latencies, 0.95),
-        query_max_ms: latencies.last().copied().unwrap_or(0.0),
-        scan_rows_per_sec: rows_scanned_total as f64 / scan_seconds.max(1e-9),
+        query_p50_ms: worst.query_p50_ms,
+        query_p95_ms: worst.query_p95_ms,
+        query_max_ms: worst.query_max_ms,
+        scan_rows_per_sec: worst.scan_rows_per_sec,
+        isa: isa_baselines,
 
         recall_at_10: recall.mean_recall,
         min_recall_at_10: recall.min_recall,

@@ -250,6 +250,7 @@ fn cmd_search(a: &Args) -> Result<()> {
         "group",
         "space",
         "exact",
+        "no-adaptive",
     ])?;
     let engine = open(a)?;
     let q = Query {
@@ -264,6 +265,10 @@ fn cmd_search(a: &Args) -> Result<()> {
         group_k: a.parse_some("group")?,
         predicate: None,
         space: a.opt("space").map(String::from),
+        // Adaptive probing is on unless explicitly disabled. `--no-adaptive` pins the flat base
+        // nprobe, which is what the receipts measure (the floor adaptive probing sits on).
+        adaptive: !a.has("no-adaptive"),
+        adaptive_margin: None,
     };
 
     if a.has("exact") {
@@ -366,6 +371,48 @@ fn cmd_evidence(a: &Args) -> Result<()> {
             if let Some(out) = a.opt("out") {
                 std::fs::write(out, serde_json::to_string_pretty(&ev)?)?;
                 eprintln!("prism: wrote {out}");
+            }
+            emit(&ev)
+        }
+        Some("adaptive") => {
+            // ADAPTIVE_MARGIN (issue #1). Demonstrated at a starved base; monotone at shipping.
+            let root = std::env::temp_dir().join(format!("prism-adaptive-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            let manifest: serde_json::Value =
+                serde_json::from_slice(&std::fs::read("testing/golden/MANIFEST.json")?)?;
+            let version = manifest["current"].as_str().unwrap_or("v1").to_string();
+            let engine = Engine::init(
+                &root,
+                StoreConfig {
+                    format_version: STORE_VERSION,
+                    dim: 64,
+                    nlist: 32,
+                    pq_m: 8,
+                    seed: 1234,
+                    kmeans_restarts: prism_quantizer::kmeans::KMEANS_RESTARTS,
+                    block_size: prism_part::format::DEFAULT_BLOCK_SIZE,
+                    partitions: Default::default(),
+                    promote: Vec::new(),
+                },
+            )?;
+            engine.ingest(
+                tsv::parse(&std::fs::read_to_string(format!(
+                    "testing/golden/{version}/corpus.tsv"
+                ))?)?,
+                1_760_000_000_000,
+            )?;
+            let golden = prism_engine::oracle::build(&engine, &version, 2000, 1234, 10)?;
+            let ev = prism_engine::evidence::sweep_adaptive(
+                &engine,
+                &golden,
+                &version,
+                a.parse_opt("starved-base", 2usize)?,
+                prism_types::query::DEFAULT_NPROBE,
+                a.parse_opt("p1-floor", 0.8f32)?,
+            )?;
+            std::fs::remove_dir_all(&root).ok();
+            if let Some(out) = a.opt("out") {
+                std::fs::write(out, serde_json::to_string_pretty(&ev)?)?;
             }
             emit(&ev)
         }

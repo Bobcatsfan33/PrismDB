@@ -250,6 +250,10 @@ pub fn measure_recall(
         q.nprobe = nprobe;
         q.candidates = candidates;
         q.rerank = rerank;
+        // The receipts measure the FLAT floor that adaptive probing sits on top of. Adaptive is
+        // monotone -- it only adds probes -- so a floor derived with it OFF stays valid with it
+        // on (S6, issue #1).
+        q.adaptive = false;
 
         let res = engine.search(&q)?;
         let approx: std::collections::BTreeSet<&str> = res

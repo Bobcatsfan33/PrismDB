@@ -11,14 +11,30 @@
   "dim": 64,
   "nlist": 32,
   "pq_m": 8,
-  "ingest_rows_per_sec": 4687.83908971323,
-  "ingest_seconds": 4.266358042,
-  "part_open_ms": 2.1338749999999997,
+  "ingest_rows_per_sec": 4606.292457733494,
+  "ingest_seconds": 4.341886709,
+  "part_open_ms": 2.193625,
   "parts": 16,
-  "query_p50_ms": 26.518584,
-  "query_p95_ms": 30.188208,
-  "query_max_ms": 36.668667,
-  "scan_rows_per_sec": 156466.5181704669,
+  "query_p50_ms": 26.34425,
+  "query_p95_ms": 31.577916,
+  "query_max_ms": 38.002709,
+  "scan_rows_per_sec": 188244.79584028397,
+  "isa": [
+    {
+      "isa": "scalar",
+      "query_p50_ms": 26.34425,
+      "query_p95_ms": 31.577916,
+      "query_max_ms": 38.002709,
+      "scan_rows_per_sec": 188244.79584028397
+    },
+    {
+      "isa": "neon",
+      "query_p50_ms": 26.132958000000002,
+      "query_p95_ms": 32.40725,
+      "query_max_ms": 41.231625,
+      "scan_rows_per_sec": 188086.7000082267
+    }
+  ],
   "recall_at_10": 1.0,
   "min_recall_at_10": 1.0,
   "p1_recall_at_10": 1.0,

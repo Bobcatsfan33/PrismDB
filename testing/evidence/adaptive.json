@@ -1,0 +1,86 @@
+{
+  "corpus_version": "v1",
+  "generation_id": "d93625d4300c0a30",
+  "starved_base": 2,
+  "shipping_base": 6,
+  "p1_floor": 0.8,
+  "flat_starved_p1_recall": 0.5,
+  "sweep": [
+    {
+      "margin": 0.0,
+      "starved_p1_recall": 0.5,
+      "starved_zero_recall_queries": 0,
+      "starved_mean_probes": 7.538461538461538,
+      "shipping_p1_recall": 1.0,
+      "shipping_mean_probes": 22.615384615384617
+    },
+    {
+      "margin": 0.02,
+      "starved_p1_recall": 0.5,
+      "starved_zero_recall_queries": 0,
+      "starved_mean_probes": 8.173076923076923,
+      "shipping_p1_recall": 1.0,
+      "shipping_mean_probes": 25.153846153846153
+    },
+    {
+      "margin": 0.05,
+      "starved_p1_recall": 0.6,
+      "starved_zero_recall_queries": 0,
+      "starved_mean_probes": 9.317307692307692,
+      "shipping_p1_recall": 1.0,
+      "shipping_mean_probes": 29.16346153846154
+    },
+    {
+      "margin": 0.1,
+      "starved_p1_recall": 0.6,
+      "starved_zero_recall_queries": 0,
+      "starved_mean_probes": 11.038461538461538,
+      "shipping_p1_recall": 1.0,
+      "shipping_mean_probes": 36.50961538461539
+    },
+    {
+      "margin": 0.15,
+      "starved_p1_recall": 0.7,
+      "starved_zero_recall_queries": 0,
+      "starved_mean_probes": 13.89423076923077,
+      "shipping_p1_recall": 1.0,
+      "shipping_mean_probes": 45.64423076923077
+    },
+    {
+      "margin": 0.2,
+      "starved_p1_recall": 0.7,
+      "starved_zero_recall_queries": 0,
+      "starved_mean_probes": 17.0,
+      "shipping_p1_recall": 1.0,
+      "shipping_mean_probes": 51.68269230769231
+    },
+    {
+      "margin": 0.3,
+      "starved_p1_recall": 0.7,
+      "starved_zero_recall_queries": 0,
+      "starved_mean_probes": 23.41346153846154,
+      "shipping_p1_recall": 1.0,
+      "shipping_mean_probes": 58.61538461538461
+    },
+    {
+      "margin": 0.5,
+      "starved_p1_recall": 1.0,
+      "starved_zero_recall_queries": 0,
+      "starved_mean_probes": 38.14423076923077,
+      "shipping_p1_recall": 1.0,
+      "shipping_mean_probes": 60.19230769230769
+    }
+  ],
+  "chosen_margin": 0.05,
+  "chosen_margin_x1000": 50,
+  "shipping_flat_probes": 22.615384615384617,
+  "shipping_probe_budget": 1.5,
+  "rule": "the SMALLEST margin at which adaptive probing, applied to a base deliberately STARVED below the tail floor, recovers that floor with no query returning nothing. The starved base is the only place this corpus can show the mechanism working: at the shipping base the floor is already met, so there is nothing to recover, and the real payoff (fewer probes on easy queries) is deferred to a real-embedding corpus (issue #3). The sweep also PROVES monotonicity -- it refuses any margin that lowers shipping recall -- so every existing nprobe/width receipt stays valid as a floor.",
+  "note": "S6, issue #1. v1 is monotone-only: adaptive probing adds probes for boundary queries and never subtracts, so recall can only improve. Corpus- AND generation-conditional: the cluster geometry that decides which queries sit on a boundary is exactly what the hash embedder cannot represent faithfully.",
+  "policy_bounds": [
+    {
+      "bound": "adaptive probing at the shipping base must stay within 1.5x                  the flat probe count",
+      "why_measurement_cannot_see_it": "On this corpus the p1 recall floor at the shipping base is ALREADY met flat, so                  every margin yields identical shipping recall and measurement cannot pick the                  margin by benefit. It can only see COST, which a larger margin always raises. So                  a worst-case cost ceiling selects the value, and the real benefit-driven                  derivation waits for a real-embedding corpus where boundary queries actually miss                  (issue #3)."
+    }
+  ]
+}

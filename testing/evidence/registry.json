@@ -42,15 +42,15 @@
         }
       ],
       "generation_conditional": true,
-      "generation_conditional_reason": "A new codebook generation changes the PQ geometry, so this constant may not transfer across one. Re-sweep on a new generation -- the same standing obligation as re-sweeping on a real-embedding corpus (charter C-3, issue #3). S5 proved this is not hypothetical: the C-4 fix to the training sample changed the codebook, and DEFAULT_NPROBE stopped clearing its own floor until the codebook was fixed too."
+      "generation_conditional_reason": "A new codebook generation changes the PQ geometry, so this constant may not transfer across one. Re-sweep on a new generation -- the same standing obligation as re-sweeping on a real-embedding corpus (charter C-3, issue #3)."
     },
     {
       "name": "BLOCK_SIZE",
-      "value": 4096,
+      "value": 2048,
       "kind": "tuned",
       "evidence": "testing/evidence/block-size.json",
       "evidence_key": "chosen_block_size",
-      "rule": "the block size minimising physically-read bytes across the golden query set (whole blocks, frame headers and over-read included, measured by the reader itself), subject to the manifest block directory staying under 4 bytes/row so a billion-row part remains cheap to open. Was 64 KiB in S1 by convention; measurement showed that cost a 247x read amplification.",
+      "rule": "the block size minimising physically-read bytes across the golden query set (whole blocks, frame headers and over-read, measured by the reader), subject to the block DIRECTORY staying under 4 bytes/row. The budget is on the directory term ALONE, isolated by subtracting the fixed manifest overhead (the S4/S5 per-tenant-stats and lineage extensions, which do not scale with block size) -- before S6 the manifest was small enough that whole-manifest was a fine proxy, but the extensions broke that. Re-derived from 4096 to 2048 in S6 when the sweep was re-run against the current engine (determinism contract \u00a75): the corrected directory budget makes 2048 eligible, and it reads fewer bytes than 4096.",
       "corpus_version": "v1",
       "corpus_conditional": true,
       "corpus_conditional_reason": "derived on the deterministic hash-embedder corpus, whose motifs are unusually well-separated. On a real embedding space this value may move -- issue #3.",
@@ -61,7 +61,7 @@
         }
       ],
       "generation_conditional": true,
-      "generation_conditional_reason": "A new codebook generation changes the PQ geometry, so this constant may not transfer across one. Re-sweep on a new generation -- the same standing obligation as re-sweeping on a real-embedding corpus (charter C-3, issue #3). S5 proved this is not hypothetical: the C-4 fix to the training sample changed the codebook, and DEFAULT_NPROBE stopped clearing its own floor until the codebook was fixed too."
+      "generation_conditional_reason": "A new codebook generation changes the PQ geometry, so this constant may not transfer across one. Re-sweep on a new generation -- the same standing obligation as re-sweeping on a real-embedding corpus (charter C-3, issue #3)."
     },
     {
       "name": "DEFAULT_CANDIDATES",
@@ -80,7 +80,7 @@
         }
       ],
       "generation_conditional": true,
-      "generation_conditional_reason": "A new codebook generation changes the PQ geometry, so this constant may not transfer across one. Re-sweep on a new generation -- the same standing obligation as re-sweeping on a real-embedding corpus (charter C-3, issue #3). S5 proved this is not hypothetical: the C-4 fix to the training sample changed the codebook, and DEFAULT_NPROBE stopped clearing its own floor until the codebook was fixed too."
+      "generation_conditional_reason": "A new codebook generation changes the PQ geometry, so this constant may not transfer across one. Re-sweep on a new generation -- the same standing obligation as re-sweeping on a real-embedding corpus (charter C-3, issue #3)."
     },
     {
       "name": "DEFAULT_RERANK",
@@ -99,7 +99,7 @@
         }
       ],
       "generation_conditional": true,
-      "generation_conditional_reason": "A new codebook generation changes the PQ geometry, so this constant may not transfer across one. Re-sweep on a new generation -- the same standing obligation as re-sweeping on a real-embedding corpus (charter C-3, issue #3). S5 proved this is not hypothetical: the C-4 fix to the training sample changed the codebook, and DEFAULT_NPROBE stopped clearing its own floor until the codebook was fixed too."
+      "generation_conditional_reason": "A new codebook generation changes the PQ geometry, so this constant may not transfer across one. Re-sweep on a new generation -- the same standing obligation as re-sweeping on a real-embedding corpus (charter C-3, issue #3)."
     },
     {
       "name": "KMEANS_RESTARTS",
@@ -112,7 +112,7 @@
       "corpus_conditional": true,
       "corpus_conditional_reason": "derived on the deterministic hash-embedder corpus -- issue #3.",
       "generation_conditional": true,
-      "generation_conditional_reason": "A new codebook generation changes the PQ geometry, so this constant may not transfer across one. Re-sweep on a new generation -- the same standing obligation as re-sweeping on a real-embedding corpus (charter C-3, issue #3). S5 proved this is not hypothetical: the C-4 fix to the training sample changed the codebook, and DEFAULT_NPROBE stopped clearing its own floor until the codebook was fixed too.",
+      "generation_conditional_reason": "A new codebook generation changes the PQ geometry, so this constant may not transfer across one. Re-sweep on a new generation -- the same standing obligation as re-sweeping on a real-embedding corpus (charter C-3, issue #3).",
       "policy_bounds": [
         {
           "bound": "the grid is bounded at 25 restarts",
@@ -120,6 +120,26 @@
         }
       ],
       "note": "S5. This constant exists because of charter C-4. When the training sample stopped being keyed on physical position, recall fell below its floor -- k-means++ had been relying on a lucky first point handed to it by the corpus's natural order. The recall we had been reporting was, in part, a coincidence of the input order. Restarts make the codebook depend on the data instead of on a draw."
+    },
+    {
+      "name": "ADAPTIVE_MARGIN_X1000",
+      "value": 50,
+      "kind": "tuned",
+      "evidence": "testing/evidence/adaptive.json",
+      "evidence_key": "chosen_margin_x1000",
+      "rule": "the LARGEST adaptive margin that (a) stays within a worst-case cost budget at the shipping base -- adaptive probing must not exceed 1.5x the flat probe count -- and (b) demonstrably helps a deliberately STARVED base recover part of its tail, proving the heuristic fires on real boundary queries. On this corpus the recall floor at the shipping base is already met flat, so measurement cannot pick the margin by BENEFIT (every margin gives identical shipping recall); it can only see COST. So a policy cost bound selects the value. The sweep also PROVES monotonicity by refusing any margin that lowers shipping recall, which is what keeps every nprobe/width receipt valid as a floor. v1 is monotone-only: adaptive adds probes, never subtracts.",
+      "corpus_version": "v1",
+      "corpus_conditional": true,
+      "corpus_conditional_reason": "The cluster geometry that decides which queries sit on a boundary is exactly what the deterministic hash embedder cannot represent -- its motifs are unusually well-separated, so almost no query is genuinely on a boundary. issue #3.",
+      "generation_conditional": true,
+      "generation_conditional_reason": "A new codebook generation changes the PQ geometry, so this constant may not transfer across one. Re-sweep on a new generation -- the same standing obligation as re-sweeping on a real-embedding corpus (charter C-3, issue #3).",
+      "policy_bounds": [
+        {
+          "bound": "adaptive probing at the shipping base must stay within 1.5x the flat probe count",
+          "why_measurement_cannot_see_it": "On this corpus the p1 recall floor at the shipping base is ALREADY met flat, so every margin yields identical shipping recall and measurement cannot pick the margin by benefit. It can only see COST, which a larger margin always raises. The real benefit-driven derivation waits for a real-embedding corpus where boundary queries actually miss (issue #3)."
+        }
+      ],
+      "note": "S6, issue #1 (adaptive nprobe). MONOTONE ONLY in v1: the margin may add probes above DEFAULT_NPROBE for boundary queries and may never go below it, so recall can only improve. Stored x1000 because the ledger holds integers and the margin is 0.05."
     },
     {
       "name": "MAX_ATTRIBUTE_KEYS",
@@ -192,6 +212,12 @@
       "value": 50,
       "kind": "policy",
       "rationale": "docs/QUERY-CONTRACT.md \u00a74 -- the paginated result set IS the plan's rerank survivor set, so the default plan must be able to serve at least five pages at the default page size (5 x 10 = 50). Measurement cannot see this: on the golden corpus the recall floors do not bind at all, and without this bound the joint width sweep chooses rerank=10, making the first page the entire result and the cursor decorative."
+    },
+    {
+      "name": "ADAPTIVE_MAX_NPROBE",
+      "value": 16,
+      "kind": "policy",
+      "rationale": "The hard ceiling on adaptive probing (S6, issue #1). A query may never probe more than this many centroids however tight its margins, so a pathological query near many cluster boundaries cannot silently turn an approximate scan into a full one. It bounds WORST-CASE query cost, which measurement of average queries cannot see. Not the measured-best ceiling -- a statement about how much a single query is allowed to cost."
     },
     {
       "name": "MAX_STATEMENT_BYTES",

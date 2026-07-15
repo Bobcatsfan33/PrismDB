@@ -76,6 +76,14 @@ pub fn constants() -> Vec<Constant> {
             value: prism_quantizer::kmeans::KMEANS_RESTARTS as i64,
             kind: Kind::Tuned,
         },
+        // S6, issue #1. Tuned, but selected by a policy cost bound on this corpus (the recall
+        // floor is already met), so the receipt carries its C-3 bound and a corpus-conditional
+        // tag. Stored x1000 because the ledger holds integers and the margin is 0.05.
+        Constant {
+            name: "ADAPTIVE_MARGIN_X1000",
+            value: (prism_types::query::ADAPTIVE_MARGIN * 1000.0).round() as i64,
+            kind: Kind::Tuned,
+        },
         // --- policy: a decision about behaviour, owes a rationale ---
         // S5. `TRAIN_SAMPLE_MAX` steered behaviour from S0 and was never registered -- an
         // existing hole in the ledger, found by the C-4 audit and closed here.
@@ -107,6 +115,12 @@ pub fn constants() -> Vec<Constant> {
         Constant {
             name: "MIN_PAGEABLE_ROWS",
             value: crate::evidence::MIN_PAGEABLE_ROWS as i64,
+            kind: Kind::Policy,
+        },
+        // S6, issue #1. The hard ceiling on adaptive probing -- a worst-case cost bound.
+        Constant {
+            name: "ADAPTIVE_MAX_NPROBE",
+            value: prism_types::query::ADAPTIVE_MAX_NPROBE as i64,
             kind: Kind::Policy,
         },
         Constant {

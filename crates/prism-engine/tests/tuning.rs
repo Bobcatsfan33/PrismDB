@@ -171,13 +171,32 @@ fn the_block_size_evidence_actually_justifies_the_choice() {
         rows.len()
     );
 
-    // The constraint: the manifest directory must stay openable at scale.
+    // The constraint: the block DIRECTORY must stay openable at scale. Budgeted on the directory
+    // term alone -- isolated by subtracting the fixed manifest overhead (the S4/S5 extensions that
+    // do not scale with block size) -- not on the whole manifest. Before S6 the manifest was small
+    // enough that whole-manifest was a fine proxy; the extensions broke that, and re-running the
+    // sweep against the current engine is exactly what surfaced it (determinism contract §5).
     const BUDGET: f64 = 4.0;
-    let eligible: Vec<&serde_json::Value> = rows
+    let floor = rows
         .iter()
-        .filter(|r| r["manifest_bytes_per_row"].as_f64().unwrap() <= BUDGET)
-        .collect();
+        .map(|r| r["manifest_bytes"].as_i64().unwrap())
+        .min()
+        .unwrap();
+    let corpus_rows = doc["corpus_rows"].as_f64().unwrap();
+    let dir_per_row = |r: &serde_json::Value| -> f64 {
+        (r["manifest_bytes"].as_i64().unwrap() - floor) as f64 / corpus_rows
+    };
+    let eligible: Vec<&serde_json::Value> =
+        rows.iter().filter(|r| dir_per_row(r) <= BUDGET).collect();
     assert!(!eligible.is_empty());
+    // And the receipt must record the directory metric it was judged on.
+    for r in rows {
+        let recorded = r["directory_bytes_per_row"].as_f64().unwrap();
+        assert!(
+            (recorded - dir_per_row(r)).abs() < 1e-6,
+            "the receipt's directory_bytes_per_row disagrees with the manifest delta it claims"
+        );
+    }
 
     // Among the block sizes that fit the budget, the chosen one really does read the
     // fewest bytes.
