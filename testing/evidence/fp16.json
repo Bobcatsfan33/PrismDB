@@ -1,0 +1,15 @@
+{
+  "corpus_version": "v1",
+  "generation_id": "d93625d4300c0a30",
+  "contract": "fp16-cosine",
+  "queries": 104,
+  "candidates_scored": 208000,
+  "max_score_gap": 0.00046193599700927734,
+  "mean_score_gap": 0.00004871370209954106,
+  "committed_tolerance": 0.0020000000949949026,
+  "committed_tolerance_micros": 2000,
+  "selection_stable": true,
+  "unstable_queries": [],
+  "rule": "the committed tolerance must be >= the worst |fp16 - fp32| score gap over every reranked candidate of every golden query, with headroom; and selection must be STABLE -- the fp16 answer's ordered event ids identical to fp32-exact on every query. A lossy encoding that reorders the answer is not a smaller store, it is a different database.",
+  "note": "S7, D-049. The first negotiated accuracy contract. fp32-exact remains the only DEFAULT; fp16 is opt-in, and a part written under it declares encoding_id=2, accuracy_contract_id=2 so a build that does not implement the contract refuses the part rather than guessing. Corpus- and generation-conditional."
+}

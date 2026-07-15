@@ -142,6 +142,26 @@
       "note": "S6, issue #1 (adaptive nprobe). MONOTONE ONLY in v1: the margin may add probes above DEFAULT_NPROBE for boundary queries and may never go below it, so recall can only improve. Stored x1000 because the ledger holds integers and the margin is 0.05."
     },
     {
+      "name": "FP16_COSINE_TOLERANCE_MICROS",
+      "value": 2000,
+      "kind": "tuned",
+      "evidence": "testing/evidence/fp16.json",
+      "evidence_key": "committed_tolerance_micros",
+      "rule": "the fp16-cosine accuracy contract's tolerance, in micro-units. Must be >= 2x the worst |fp16 - fp32| rerank score gap over every stored vector and every golden query, WITH HEADROOM. The 2x is not arbitrary: if the tolerance exceeds twice the max per-score gap, then two rows whose fp32 scores differ by more than the tolerance have fp16 scores that differ by more than (tolerance - 2*max_gap) > 0 with the same sign, so fp16 can NEVER invert a >tolerance-separated pair. That is exactly the selection-stability the contract promises: fp16 respects the fp32 order except among rows it (by contract) treats as tied. Measured max gap on the golden corpus is ~4.6e-4, so the floor is ~9.2e-4; 2e-3 is the committed value with headroom.",
+      "corpus_version": "v1",
+      "corpus_conditional": true,
+      "corpus_conditional_reason": "The fp16 rounding error depends on the magnitude distribution of the stored vectors, which the hash embedder does not represent faithfully. issue #3.",
+      "generation_conditional": true,
+      "generation_conditional_reason": "A new codebook re-embeds the vectors, changing their magnitudes and thus the fp16 gaps. Re-sweep on a new generation (charter C-6).",
+      "policy_bounds": [
+        {
+          "bound": "selection stability, not just a score bound",
+          "why_measurement_cannot_see_it": "A tolerance that merely bounded score error would still permit fp16 to reorder the answer, which is the thing a lossy encoding must NOT do silently. The binding constraint is that no >tolerance-separated pair inverts -- a property about ORDER, not magnitude -- and it is what makes fp16 a smaller store rather than a different database."
+        }
+      ],
+      "note": "S7, D-049. The first negotiated accuracy contract. fp32-exact remains the only default; fp16 is opt-in behind encoding_id=2 / accuracy_contract_id=2, and a build that does not implement the pair REFUSES the part. Contract text, evidence, and the unknown-encoding fixture were all updated in the same change."
+    },
+    {
       "name": "MAX_ATTRIBUTE_KEYS",
       "value": 64,
       "kind": "policy",

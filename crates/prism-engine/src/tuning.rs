@@ -84,6 +84,13 @@ pub fn constants() -> Vec<Constant> {
             value: (prism_types::query::ADAPTIVE_MARGIN * 1000.0).round() as i64,
             kind: Kind::Tuned,
         },
+        // S7, D-049. The fp16 rerank accuracy contract's tolerance. Tuned: measured as >= 2x the
+        // worst fp16-vs-fp32 score gap on the golden corpus, with headroom. Stored in micro-units.
+        Constant {
+            name: "FP16_COSINE_TOLERANCE_MICROS",
+            value: (prism_part::format::FP16_COSINE_TOLERANCE as f64 * 1e6).round() as i64,
+            kind: Kind::Tuned,
+        },
         // --- policy: a decision about behaviour, owes a rationale ---
         // S5. `TRAIN_SAMPLE_MAX` steered behaviour from S0 and was never registered -- an
         // existing hole in the ledger, found by the C-4 audit and closed here.

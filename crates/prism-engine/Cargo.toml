@@ -7,6 +7,11 @@ license.workspace = true
 repository.workspace = true
 description = "PrismDB engine: ingest, prune, centroid-range scan, exact rerank, semantic grouping, merge, re-embed."
 
+[features]
+# The real CUDA path. Off by default and not compiled in CI -- no GPU device or runner exists
+# yet (docs/DETERMINISM-CONTRACT.md device edition §3). "GPU-ready, GPU-off".
+cuda = []
+
 [dependencies]
 prism-types = { workspace = true }
 prism-quantizer = { workspace = true }

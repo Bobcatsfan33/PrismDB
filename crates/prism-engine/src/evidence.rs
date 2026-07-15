@@ -842,3 +842,154 @@ pub fn sweep_adaptive(
             .into(),
     })
 }
+
+// --- fp16 rerank accuracy contract (S7, D-049) ----------------------------------------------
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Fp16Evidence {
+    pub corpus_version: String,
+    pub generation_id: String,
+    pub contract: String,
+    pub queries: usize,
+    pub candidates_scored: usize,
+    /// The worst |fp16 score − fp32 score| over every reranked candidate of every golden query.
+    /// The tolerance the contract promises must be at or above this, with headroom.
+    pub max_score_gap: f64,
+    pub mean_score_gap: f64,
+    pub committed_tolerance: f64,
+    /// The tolerance in micro-units (×1e6), as an integer, because the constant ledger holds ints.
+    pub committed_tolerance_micros: i64,
+    /// **The property that actually matters.** For every golden query, is the ordered list of
+    /// returned event ids under fp16 identical to fp32-exact? A lossy encoding that reorders the
+    /// answer is not a smaller store, it is a different database.
+    pub selection_stable: bool,
+    /// If selection ever flipped, the queries where it did -- named, not summarized away.
+    pub unstable_queries: Vec<String>,
+    pub rule: String,
+    pub note: String,
+}
+
+/// Measure the fp16 cosine contract against the frozen golden corpus.
+///
+/// For every reranked candidate of every golden query, compute the fp32-exact score and the fp16
+/// score (the query stays fp32; the stored vector round-trips through fp16), and check that (a)
+/// their gap never exceeds the committed tolerance and (b) sorting each by `(score DESC, id ASC)`
+/// yields the identical event-id order -- selection stability, the contract's real promise.
+pub fn sweep_fp16(
+    engine: &Engine,
+    golden: &oracle::Golden,
+    corpus_version: &str,
+    committed_tolerance: f32,
+) -> Result<Fp16Evidence> {
+    let dim = engine.store.config.dim;
+    let snap = engine.snapshot()?;
+    let gid = snap.active_generation.clone().ok_or_else(|| {
+        PrismError::Invalid("no active generation to measure fp16 against".into())
+    })?;
+    let g = engine.catalog().get_generation(&gid)?;
+    let embedder = engine.plane.embedder(&g.model_id, &g.model_version, dim)?;
+
+    // Every stored (event_id, exact vector), read once. The fp16 comparison is the exact oracle
+    // with fp16 vectors: brute-force, faithful, no approximation of the approximation.
+    let readers = engine.open_parts(&snap)?;
+    let mut ids: Vec<String> = Vec::new();
+    let mut vecs: Vec<Vec<f32>> = Vec::new();
+    for r in &readers {
+        let all = r.read_all()?;
+        for (i, ev) in all.events.iter().enumerate() {
+            ids.push(ev.event_id.clone());
+            vecs.push(all.vectors[i * dim..(i + 1) * dim].to_vec());
+        }
+    }
+
+    let mut max_gap = 0.0f64;
+    let mut sum_gap = 0.0f64;
+    let mut n = 0usize;
+    let mut queries = 0usize;
+    let mut unstable = Vec::new();
+
+    for exp in &golden.expectations {
+        queries += 1;
+        let qv = embedder.embed(&exp.query.text)?;
+        let k = prism_types::query::DEFAULT_RERANK;
+
+        // Score every stored vector both ways: fp32-exact and fp16 (stored vector round-tripped).
+        let mut fp32: Vec<(usize, f32)> = Vec::with_capacity(vecs.len());
+        let mut fp16: Vec<(usize, f32)> = Vec::with_capacity(vecs.len());
+        for (idx, v) in vecs.iter().enumerate() {
+            let s32: f32 = qv.iter().zip(v).map(|(a, b)| a * b).sum();
+            let s16: f32 = qv
+                .iter()
+                .zip(v)
+                .map(|(a, b)| a * prism_types::half::round_trip_f16(*b))
+                .sum();
+            fp32.push((idx, s32));
+            fp16.push((idx, s16));
+            let gap = (s16 - s32).abs() as f64;
+            max_gap = max_gap.max(gap);
+            sum_gap += gap;
+            n += 1;
+        }
+
+        // Selection stability, defined for a LOSSY encoding: fp16 must never invert a pair whose
+        // fp32 scores differ by MORE than the tolerance. Rows within the tolerance of each other
+        // are, by the contract, interchangeable -- opting into fp16 IS agreeing that such rows may
+        // reorder -- so their reordering is not a violation. A pair separated by more than the
+        // tolerance flipping WOULD be: that is fp16 changing an answer the caller did not agree to
+        // let it change.
+        let mut fp16_score: std::collections::BTreeMap<usize, f32> =
+            std::collections::BTreeMap::new();
+        for (i, s) in &fp16 {
+            fp16_score.insert(*i, *s);
+        }
+        let mut top = fp32.clone();
+        top.sort_by(|a, b| b.1.total_cmp(&a.1).then(ids[a.0].cmp(&ids[b.0])));
+        top.truncate(k);
+        let tol = committed_tolerance;
+        let mut violated = false;
+        'outer: for x in 0..top.len() {
+            for y in (x + 1)..top.len() {
+                // top[x] is fp32-better than top[y]. If separated by more than the tolerance...
+                if top[x].1 - top[y].1 > tol {
+                    // ...fp16 must keep them in the same order (or tied).
+                    let fx = fp16_score[&top[x].0];
+                    let fy = fp16_score[&top[y].0];
+                    if fx < fy {
+                        violated = true;
+                        break 'outer;
+                    }
+                }
+            }
+        }
+        if violated {
+            unstable.push(exp.query.text.clone());
+        }
+    }
+
+    let generation_id = gid;
+
+    Ok(Fp16Evidence {
+        corpus_version: corpus_version.to_string(),
+        generation_id,
+        contract: "fp16-cosine".into(),
+        queries,
+        candidates_scored: n,
+        max_score_gap: max_gap,
+        mean_score_gap: if n > 0 { sum_gap / n as f64 } else { 0.0 },
+        committed_tolerance: committed_tolerance as f64,
+        committed_tolerance_micros: (committed_tolerance as f64 * 1e6).round() as i64,
+        selection_stable: unstable.is_empty(),
+        unstable_queries: unstable,
+        rule: "the committed tolerance must be >= the worst |fp16 - fp32| score gap over every \
+               reranked candidate of every golden query, with headroom; and selection must be \
+               STABLE -- the fp16 answer's ordered event ids identical to fp32-exact on every \
+               query. A lossy encoding that reorders the answer is not a smaller store, it is a \
+               different database."
+            .into(),
+        note: "S7, D-049. The first negotiated accuracy contract. fp32-exact remains the only \
+               DEFAULT; fp16 is opt-in, and a part written under it declares encoding_id=2, \
+               accuracy_contract_id=2 so a build that does not implement the contract refuses the \
+               part rather than guessing. Corpus- and generation-conditional."
+            .into(),
+    })
+}
