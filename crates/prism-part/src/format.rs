@@ -207,9 +207,30 @@ pub fn codec_name(id: u16) -> &'static str {
 /// Full IEEE-754 binary32, stored cold, never on the scan path.
 pub const RERANK_ENCODING_FLOAT32: u16 = 1;
 
+/// IEEE-754 binary16 (half precision) — 2 bytes/dim, half the exact-tier storage bill (S7). Lossy
+/// by construction, so it may enter the format *only* under a negotiated accuracy contract.
+pub const RERANK_ENCODING_FLOAT16: u16 = 2;
+
 /// The re-rank score is the exact cosine against the stored vector. Zero
 /// approximation error: the vector *is* the vector that was embedded.
 pub const RERANK_CONTRACT_EXACT: u16 = 1;
+
+/// The **fp16 cosine accuracy contract** (S7, [D-049](../../../docs/DECISIONS.md)) — the first
+/// negotiated accuracy contract in the system, and the precedent for every lossy encoding after
+/// it.
+///
+/// It promises: a rerank score computed from an fp16-stored vector differs from the fp32-exact
+/// score by no more than the contract's tolerance, and — the property that actually matters —
+/// **selection is stable**: the ordered set of returned event ids is identical to fp32-exact on
+/// the golden corpus at this tolerance. The tolerance and the selection-stability evidence are
+/// committed as a receipt (`testing/evidence/fp16.json`), and this build refuses any part whose
+/// accuracy contract it does not implement rather than guessing at what its scores mean.
+pub const RERANK_CONTRACT_FP16_COSINE: u16 = 2;
+
+/// The tolerance the fp16 cosine contract promises. **Tuned** (charter C-1): measured as the
+/// worst |fp16 − fp32| cosine gap over the golden corpus, with headroom, and committed in the
+/// receipt. An absolute bound because a cosine near zero has no relative scale.
+pub const FP16_COSINE_TOLERANCE: f32 = 2e-3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RerankDescriptor {
@@ -226,10 +247,20 @@ impl RerankDescriptor {
         }
     }
 
+    /// fp16 storage under the fp16-cosine accuracy contract (S7). Never a default -- fp32-exact
+    /// stays the default; a store opts into fp16 deliberately, accepting the contract's tolerance.
+    pub fn float16_cosine() -> Self {
+        RerankDescriptor {
+            encoding_id: RERANK_ENCODING_FLOAT16,
+            accuracy_contract_id: RERANK_CONTRACT_FP16_COSINE,
+        }
+    }
+
     /// Bytes on disk for one vector under this encoding.
     pub fn bytes_per_vector(&self, dim: usize) -> Result<usize> {
         match self.encoding_id {
             RERANK_ENCODING_FLOAT32 => Ok(dim * 4),
+            RERANK_ENCODING_FLOAT16 => Ok(dim * 2),
             other => Err(PrismError::Corrupt(format!(
                 "part declares rerank encoding id {other}, which this build cannot decode; \
                  refusing to guess at the meaning of its stored vectors"
@@ -253,6 +284,21 @@ impl RerankDescriptor {
                     .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
                     .collect())
             }
+            RERANK_ENCODING_FLOAT16 => {
+                if bytes.len() != dim * 2 {
+                    return Err(PrismError::Corrupt(format!(
+                        "rerank vector is {} bytes, expected {} for a {dim}-dim float16 vector",
+                        bytes.len(),
+                        dim * 2
+                    )));
+                }
+                // Widen each half back to f32. This IS the lossy value the rerank sees, and the
+                // fp16-cosine contract bounds how far the resulting score can be from fp32-exact.
+                Ok(bytes
+                    .chunks_exact(2)
+                    .map(|c| prism_types::half::f16_bits_to_f32(u16::from_le_bytes([c[0], c[1]])))
+                    .collect())
+            }
             other => Err(PrismError::Corrupt(format!(
                 "part declares rerank encoding id {other}, which this build cannot decode"
             ))),
@@ -269,6 +315,13 @@ impl RerankDescriptor {
                 }
                 Ok(out)
             }
+            RERANK_ENCODING_FLOAT16 => {
+                let mut out = Vec::with_capacity(v.len() * 2);
+                for x in v {
+                    out.extend_from_slice(&prism_types::half::f32_to_f16_bits(*x).to_le_bytes());
+                }
+                Ok(out)
+            }
             other => Err(PrismError::Invariant(format!(
                 "this build cannot write rerank encoding id {other}"
             ))),
@@ -278,10 +331,12 @@ impl RerankDescriptor {
     pub fn describe(&self) -> String {
         let enc = match self.encoding_id {
             RERANK_ENCODING_FLOAT32 => "float32",
+            RERANK_ENCODING_FLOAT16 => "float16",
             _ => "unknown",
         };
         let contract = match self.accuracy_contract_id {
             RERANK_CONTRACT_EXACT => "exact",
+            RERANK_CONTRACT_FP16_COSINE => "fp16-cosine",
             _ => "unknown",
         };
         format!("{enc}/{contract}")
@@ -289,18 +344,20 @@ impl RerankDescriptor {
 
     /// Refuse a descriptor this build cannot honour, at open time, loudly.
     pub fn validate(&self) -> Result<()> {
-        if self.encoding_id != RERANK_ENCODING_FLOAT32 {
+        // The (encoding, contract) pairs this build implements. A pair not on this list is refused
+        // at open time, loudly -- never decoded into numbers that mean something other than what
+        // the caller expects.
+        let known = matches!(
+            (self.encoding_id, self.accuracy_contract_id),
+            (RERANK_ENCODING_FLOAT32, RERANK_CONTRACT_EXACT)
+                | (RERANK_ENCODING_FLOAT16, RERANK_CONTRACT_FP16_COSINE)
+        );
+        if !known {
             return Err(PrismError::Corrupt(format!(
-                "part declares rerank encoding id {}, which this build cannot decode; \
-                 upgrade, or migrate the part to an encoding this build supports",
-                self.encoding_id
-            )));
-        }
-        if self.accuracy_contract_id != RERANK_CONTRACT_EXACT {
-            return Err(PrismError::Corrupt(format!(
-                "part declares rerank accuracy contract id {}, which this build does not \
-                 implement; its re-rank scores would not mean what the caller expects",
-                self.accuracy_contract_id
+                "part declares rerank encoding id {} with accuracy contract id {}, a pairing this \
+                 build does not implement; its re-rank scores would not mean what the caller \
+                 expects. Upgrade, or migrate the part to an encoding/contract this build supports.",
+                self.encoding_id, self.accuracy_contract_id
             )));
         }
         Ok(())
@@ -934,21 +991,45 @@ mod tests {
         assert_eq!(d.decode_vector(&bytes, 3).unwrap(), v);
 
         // An encoding this build does not implement is refused at open time,
-        // rather than producing numbers that mean nothing.
+        // rather than producing numbers that mean nothing. Encoding 2 (fp16) is now KNOWN, so the
+        // unknown-encoding fixture moved to encoding 3 -- the unknown-encoding fixture must be
+        // updated in the same change that adds an encoding (D-049), or it silently stops testing
+        // anything.
         let future = RerankDescriptor {
-            encoding_id: 2, // e.g. fp16, one day
+            encoding_id: 3, // reserved for a future encoding, not yet implemented
             accuracy_contract_id: 1,
         };
         assert!(future.validate().is_err());
         assert!(future.bytes_per_vector(64).is_err());
         assert!(future.decode_vector(&bytes, 3).is_err());
 
-        // So is an encoding we can decode with a contract we cannot honour.
+        // A known encoding paired with a contract this build cannot honour is also refused: the
+        // PAIR must be implemented, not just the encoding.
         let odd = RerankDescriptor {
             encoding_id: RERANK_ENCODING_FLOAT32,
             accuracy_contract_id: 99,
         };
-        let e = odd.validate().unwrap_err();
-        assert!(e.to_string().contains("accuracy contract"), "{e}");
+        assert!(odd.validate().is_err());
+        // fp16 with the EXACT contract is a lie -- fp16 cannot be exact -- and is refused.
+        let mislabelled = RerankDescriptor {
+            encoding_id: RERANK_ENCODING_FLOAT16,
+            accuracy_contract_id: RERANK_CONTRACT_EXACT,
+        };
+        assert!(mislabelled.validate().is_err());
+    }
+
+    #[test]
+    fn fp16_is_a_valid_lossy_encoding_under_its_contract() {
+        let d = RerankDescriptor::float16_cosine();
+        assert_eq!(d.describe(), "float16/fp16-cosine");
+        assert_eq!(d.bytes_per_vector(64).unwrap(), 128); // half of float32's 256
+        d.validate().unwrap();
+
+        // Round-trips through fp16: small integers are exact, and the decode is the LOSSY value a
+        // rerank sees -- which is the whole point, and what the accuracy contract bounds.
+        let v = vec![1.0f32, -2.0, 0.5, 0.0, 8.0];
+        let bytes = d.encode_vector(&v).unwrap();
+        assert_eq!(bytes.len(), v.len() * 2);
+        assert_eq!(d.decode_vector(&bytes, v.len()).unwrap(), v);
     }
 }

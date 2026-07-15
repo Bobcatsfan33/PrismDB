@@ -344,16 +344,20 @@ fn a_manifest_never_carries_a_nan_through_to_a_zone_map() {
 
 #[test]
 fn every_declared_rerank_encoding_either_decodes_or_refuses() {
-    // Exhaustive over the id space we could plausibly meet. Exactly one encoding
-    // is implemented; every other id must be refused rather than guessed at.
+    // Exhaustive over the id space we could plausibly meet. Two (encoding, contract) PAIRS are
+    // implemented; every other pairing must be refused rather than guessed at. The set of known
+    // pairs must be updated in lockstep with the format (D-049) -- this test is the
+    // unknown-encoding fixture in fuzz form.
     for enc in 0u16..=64 {
         for contract in 0u16..=4 {
             let d = RerankDescriptor {
                 encoding_id: enc,
                 accuracy_contract_id: contract,
             };
-            let known =
-                enc == format::RERANK_ENCODING_FLOAT32 && contract == format::RERANK_CONTRACT_EXACT;
+            let known = (enc == format::RERANK_ENCODING_FLOAT32
+                && contract == format::RERANK_CONTRACT_EXACT)
+                || (enc == format::RERANK_ENCODING_FLOAT16
+                    && contract == format::RERANK_CONTRACT_FP16_COSINE);
             assert_eq!(
                 d.validate().is_ok(),
                 known,

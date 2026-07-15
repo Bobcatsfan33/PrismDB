@@ -10,6 +10,7 @@ pub mod attributes;
 pub mod embed;
 pub mod error;
 pub mod event;
+pub mod half;
 pub mod hash;
 pub mod limits;
 pub mod predicate;
