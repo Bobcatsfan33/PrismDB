@@ -1382,42 +1382,28 @@ impl PartReader {
                     )));
                 }
 
-                // A truncated file must name itself. Letting `read_exact_at` fail
-                // would surface "failed to fill whole buffer" — a generic io
-                // error that tells an operator nothing about which bytes are
-                // missing, and which is exactly what the S1 gate forbids.
-                let on_disk = f.metadata()?.len();
+                // Map the column file read-only (S6). Parts are immutable, so a read-only mapping
+                // is safe, and a truncated file must still name itself — letting an out-of-range
+                // access `SIGBUS` would be a process death an operator cannot act on, and letting
+                // `read_exact_at` fail would surface "failed to fill whole buffer", a generic io
+                // error, both of which the S1 gate forbids. `Mmap::slice` bounds-checks against the
+                // file's real length and returns the named truncation error before any byte past
+                // the end is touched (see crates/prism-part/src/mmap.rs).
+                let map = crate::mmap::Mmap::open(&f)?;
 
                 let mut out = Vec::with_capacity(len);
                 for (i, b) in blocks.iter().enumerate().take(last + 1).skip(first) {
-                    let need = b
-                        .file_offset
-                        .checked_add((FRAME_HEADER_BYTES + b.payload_len as usize) as u64)
-                        .ok_or_else(|| {
-                            PrismError::Corrupt(format!(
-                                "part {} column `{column}` block {i}: byte range overflows",
-                                self.manifest.part_id
-                            ))
-                        })?;
-                    if need > on_disk {
-                        return Err(PrismError::Corrupt(format!(
-                            "part {} column `{column}` is truncated: block {i} needs bytes \
-                             {}..{need} of `{}`, but the file is only {on_disk} bytes",
-                            self.manifest.part_id, b.file_offset, c.file
-                        )));
-                    }
-
-                    let raw = io::read_range(
-                        &f,
-                        b.file_offset,
-                        FRAME_HEADER_BYTES + b.payload_len as usize,
-                    )?;
-                    // The whole block is read, header and all, whatever slice of it
-                    // the caller wanted. This is the over-read, and this is where it
-                    // becomes a number.
+                    let block_len = FRAME_HEADER_BYTES + b.payload_len as usize;
+                    let part_id = &self.manifest.part_id;
+                    let file = &c.file;
+                    // The whole block is sliced, header and all, whatever window of it the caller
+                    // wanted. This is the over-read, and this is where it becomes a number.
+                    let raw = map.slice(b.file_offset as usize, block_len, &|| {
+                        format!("part {part_id} column `{column}` block {i} of `{file}`")
+                    })?;
                     self.io_bytes.set(self.io_bytes.get() + raw.len());
                     let payload =
-                        format::read_block(&raw, i, b, column, &self.manifest.part_id, bs)?;
+                        format::read_block(raw, i, b, column, &self.manifest.part_id, bs)?;
 
                     // Slice the requested window out of this block.
                     //

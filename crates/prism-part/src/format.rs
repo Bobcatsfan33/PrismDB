@@ -80,7 +80,10 @@ pub const BYTE_ORDER_LITTLE: u8 = 0;
 /// read in full on every part open, including the opens that prune the part away, so
 /// 512-byte blocks would give a billion-row part a ~16 GB directory that every reader
 /// must load before it can decide the part is irrelevant.
-pub const DEFAULT_BLOCK_SIZE: u32 = 4 * 1024;
+// Re-derived from 4 KiB to 2 KiB in S6: the S4/S5 manifest extensions grew the fixed
+// per-part overhead, so the block-size sweep's budget was corrected to the DIRECTORY term alone
+// and re-run against the current engine (docs/DETERMINISM-CONTRACT.md §5; testing/evidence/block-size.json).
+pub const DEFAULT_BLOCK_SIZE: u32 = 2 * 1024;
 
 /// Retained as the v2 block size: v2 parts have no per-column block size field, so
 /// they are all this, forever.

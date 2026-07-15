@@ -366,3 +366,72 @@ fn every_declared_rerank_encoding_either_decodes_or_refuses() {
         }
     }
 }
+
+/// **The truncated-part-under-mmap fault test (S6, determinism contract §6).**
+///
+/// The framed column read path now maps the file read-only instead of `pread`-ing it. A truncated
+/// file under mmap `SIGBUS`es on access — a process death an operator cannot act on. The S1
+/// truncation discipline must survive the I/O change: a truncated part names its column and block,
+/// and it does so *before* any out-of-range byte is touched.
+///
+/// This truncates a real framed column file on disk at many lengths and asserts every read either
+/// succeeds or refuses with a **named `Corrupt` error** — never a `SIGBUS`, never a generic io
+/// error. If the mmap bounds check were missing, this test would crash the process instead of
+/// failing an assertion.
+#[test]
+fn a_truncated_framed_column_under_mmap_names_itself_and_never_sigbuses() {
+    let root = tmp("mmap-trunc");
+    let dir = build_part(&root, 400);
+
+    // The compressed-code column is framed (v2), so its reads go through the mmap path.
+    let col_file = std::fs::read_dir(dir.join("."))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .find(|n| n.starts_with("pq.codes"))
+        .expect("a framed pq_codes column file");
+    let path = dir.join(&col_file);
+    let full = std::fs::read(&path).unwrap();
+
+    // Truncate to many lengths, including inside the first block's header, mid-payload, and just
+    // short of the end. Every one must name itself or read cleanly, and the process must survive.
+    for &len in &[
+        0usize,
+        1,
+        4,
+        7,
+        16,
+        64,
+        100,
+        full.len() / 2,
+        full.len().saturating_sub(1),
+    ] {
+        std::fs::write(&path, &full[..len.min(full.len())]).unwrap();
+
+        let reader = match PartReader::open(&dir) {
+            Ok(r) => r,
+            Err(e) => {
+                // Refusing at open is fine, as long as it is a named Corrupt error.
+                assert!(
+                    matches!(e, PrismError::Corrupt(_)),
+                    "truncated to {len}: open failed with {e:?}, expected a named Corrupt error"
+                );
+                continue;
+            }
+        };
+
+        // Reading the whole column exercises the framed mmap path over every block.
+        match reader.read_column_checked("pq_codes") {
+            Ok(_) => {}
+            Err(PrismError::Corrupt(msg)) => {
+                assert!(
+                    msg.contains("pq_codes"),
+                    "truncated to {len}: the error must name the column, got: {msg}"
+                );
+            }
+            Err(e) => panic!("truncated to {len}: expected a named Corrupt error, got {e:?}"),
+        }
+        // If we reached here, the process did not SIGBUS -- which is the whole point.
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}

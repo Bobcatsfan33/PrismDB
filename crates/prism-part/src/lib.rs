@@ -19,6 +19,7 @@ pub mod fsck;
 pub mod generation;
 pub mod io;
 pub mod legacy_v1;
+pub mod mmap;
 pub mod part;
 pub mod partition;
 pub mod store;
