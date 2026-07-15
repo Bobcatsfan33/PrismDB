@@ -212,7 +212,7 @@ jobs:
       # within the 15% worst-cell regret bound in EVERY cell of the selectivity matrix; and the
       # estimate-vs-actual selectivity error stays calibrated (the drift harness).
       - run: cargo test --release -p prism-cli --test plan -- --nocapture
-      - run: cargo test --release -p prism-engine --lib flight:: -- --nocapture
+      - run: cargo test --release -p prism-engine --lib flight -- --nocapture
       # The three doors -- direct, SQL, Flight -- are byte-identical, and the Flight decode is
       # bounded (every length capped and named, garbage never panics).
       - run: cargo test --release -p prism-cli --test sql -- --nocapture
