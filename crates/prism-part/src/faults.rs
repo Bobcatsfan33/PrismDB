@@ -39,6 +39,52 @@ pub const KILL_POINTS: &[&str] = &[
     "ingest.after_publish_before_offset_commit",
 ];
 
+/// The points at which an out-of-space fault can be injected. Unlike [`KILL_POINTS`], these are
+/// **returned errors, not aborts**: ENOSPC is a condition the engine degrades on, so the fault
+/// must exercise the graceful path, not a crash. The merge contract (§3) requires each to fail
+/// with a named error, leave the store old-or-new-never-hybrid, and recover unaided.
+pub const SPACE_GUARDS: &[&str] = &[
+    // Writing a part's column files (ingest or merge output).
+    "part.columns",
+    // Writing the snapshot file in a catalog commit.
+    "catalog.snapshot",
+    // Swapping the CURRENT pointer in a catalog commit.
+    "catalog.current",
+];
+
+use prism_types::error::{PrismError, Result};
+use std::sync::Mutex;
+
+/// In-process out-of-space injection, for tests that assert the graceful degrade-and-recover path
+/// (which needs a returned error, so it runs in-process rather than as a killed subprocess).
+static INJECTED_ENOSPC: Mutex<Option<String>> = Mutex::new(None);
+
+/// Force the next [`guard_space`] at `point` to report the device is full; `None` clears it.
+/// Tests that use this must serialize (the injection is process-global).
+pub fn inject_out_of_space(point: Option<&str>) {
+    *INJECTED_ENOSPC.lock().expect("enospc lock") = point.map(str::to_string);
+}
+
+/// Fail with a **named** [`PrismError::OutOfSpace`] if an out-of-space fault is injected here —
+/// via [`inject_out_of_space`] (in-process) or `PRISM_FAULT_ENOSPC=<point>` (cross-process),
+/// mirroring how [`maybe_kill`] reads its env var every call.
+#[inline]
+pub fn guard_space(point: &str) -> Result<()> {
+    let injected = INJECTED_ENOSPC
+        .lock()
+        .expect("enospc lock")
+        .as_deref()
+        .map(|p| p == point)
+        .unwrap_or(false);
+    let via_env = std::env::var("PRISM_FAULT_ENOSPC").ok().as_deref() == Some(point);
+    if injected || via_env {
+        return Err(PrismError::OutOfSpace(format!(
+            "injected out-of-space fault at `{point}`"
+        )));
+    }
+    Ok(())
+}
+
 /// Abort if the process was asked to die here.
 #[inline]
 pub fn maybe_kill(point: &str) {

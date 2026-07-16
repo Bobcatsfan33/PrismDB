@@ -20,6 +20,11 @@ pub enum PrismError {
     Decode(String),
     /// Refused because it would violate a consistency invariant (Part II §7).
     Invariant(String),
+    /// The device is out of space (ENOSPC). A **first-class, named** condition, not a generic
+    /// I/O error — because a merge is the disk-hungriest thing the engine does and "the disk
+    /// filled" must be a decision it can degrade on, never a corruption it stumbles into
+    /// ([merge contract §3](../../../docs/MERGE-CONTRACT.md)).
+    OutOfSpace(String),
 }
 
 impl fmt::Display for PrismError {
@@ -31,6 +36,7 @@ impl fmt::Display for PrismError {
             PrismError::NotFound(m) => write!(f, "not found: {m}"),
             PrismError::Decode(m) => write!(f, "decode error: {m}"),
             PrismError::Invariant(m) => write!(f, "invariant violation: {m}"),
+            PrismError::OutOfSpace(m) => write!(f, "out of disk space: {m}"),
         }
     }
 }
@@ -39,6 +45,11 @@ impl std::error::Error for PrismError {}
 
 impl From<std::io::Error> for PrismError {
     fn from(e: std::io::Error) -> Self {
+        // ENOSPC (errno 28 on both Linux and macOS) is a first-class named condition, not a
+        // generic I/O error — so a real disk-full degrades exactly like an injected one.
+        if e.raw_os_error() == Some(28) {
+            return PrismError::OutOfSpace(e.to_string());
+        }
         PrismError::Io(e.to_string())
     }
 }

@@ -54,6 +54,10 @@ jobs:
       # Kills a real prism process at every declared durability boundary and
       # asserts the store opens to the old snapshot or the new one, never both.
       - run: cargo test --release -p prism-cli --test faults -- --nocapture
+      # S10: the disk filling is a named condition, never a corruption — ENOSPC injected at the
+      # part write, the snapshot commit, and the CURRENT swap degrades old-or-new and recovers;
+      # merge admission defers on a nearly-full disk (merge contract §3).
+      - run: cargo test --release -p prism-cli --test enospc -- --nocapture
 
   fuzz:
     name: format fuzzing

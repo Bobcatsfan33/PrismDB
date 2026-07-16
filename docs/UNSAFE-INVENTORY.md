@@ -6,7 +6,7 @@ Every `unsafe` block in the shipping crates is listed here with its safety argum
 
 The rule this enforces: an `unsafe` block is a place where the compiler stops checking and a human promise takes over. A promise nobody wrote down is a promise nobody can review.
 
-**Total `unsafe` tokens (code, not comments) in `crates/*/src`: 11.**
+**Total `unsafe` tokens (code, not comments) in `crates/*/src`: 13.**
 
 ---
 
@@ -33,6 +33,19 @@ Parts are immutable, so a read-only mapping cannot race a writer; the only hazar
 | `Mmap::open` | `ffi::mmap(...)` | `fd` is a live descriptor borrowed from `file` for the call. `PROT_READ | MAP_PRIVATE` is a private read-only map; we never write through the pointer. `len` is the file's real length, so every in-range byte is backed. The result is checked against `MAP_FAILED`. Ownership passes to the returned `Mmap`, whose `Drop` unmaps exactly `len`. | `mmap::tests::*`; `fuzz::a_truncated_framed_column_under_mmap_names_itself_and_never_sigbuses` |
 | `Mmap::slice` | `slice::from_raw_parts(ptr.add(offset), len)` | `offset..offset+len` is checked `<= self.len` immediately above, and `self.len` is the mapped (= file) length, so every byte is backed — an in-range access never touches an unbacked page, so it never `SIGBUS`es. The returned slice borrows `self`, so it cannot outlive the mapping. | the truncated-part fault test above (truncates at many lengths, asserts named errors, proves no `SIGBUS`) |
 | `Mmap::drop` | `ffi::munmap(ptr, len)` | `ptr`/`len` are exactly what `mmap` returned; `Drop` runs once, so no double-unmap; unmapping a live read-only mapping is always sound. | exercised on every part read in the suite (leak/behaviour would surface under the full run) |
+
+---
+
+## `crates/prism-part/src/disk.rs` — free-space measurement (2)
+
+**S10.** Merge admission needs the free bytes on the device ([merge contract §3](MERGE-CONTRACT.md)), which `std` does not expose and the serde-only charter forbids a crate for. A per-OS `statvfs`/`statfs` shim reads it directly. One block compiles per target (`cfg(linux)` / `cfg(macos)`); both tokens exist in the source, so the count is 2.
+
+| line | `unsafe` | safety argument | covered by |
+|---|---|---|---|
+| `real_available_bytes` (linux) | `ffi::statvfs(path, buf)` | `path` is a valid NUL-terminated `CString`; `buf` is a stack `[u8; 256]`, larger than glibc's `struct statvfs` (~112 B), so the kernel cannot write out of bounds. The two `u64` fields (`f_frsize` @8, `f_bavail` @32) are read at their fixed POSIX offsets only after a `0` return; a non-zero return yields `None`. No pointer escapes. | `disk::tests::*`; the S10 merge-admission gate on the Linux CI runner |
+| `real_available_bytes` (macos) | `ffi::statfs(path, buf)` | `path` is a valid NUL-terminated `CString`; `buf` is a stack `[u8; 4096]`, larger than the 64-bit-inode `struct statfs` (~2400 B), so the kernel cannot write out of bounds. `f_bsize` (u32 @0) and `f_bavail` (u64 @24) are read at their fixed offsets only after a `0` return; else `None`. No pointer escapes. | `disk::tests::*`; run natively on the dev host |
+
+A bad reading is not a hazard: on any syscall failure the shim returns `None`, admission treats that as "unknown, do not block", and the write-time ENOSPC guard (errno 28 → `OutOfSpace`) is the backstop.
 
 ---
 

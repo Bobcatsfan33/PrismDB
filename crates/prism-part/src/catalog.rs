@@ -389,11 +389,16 @@ impl<'a> Catalog<'a> {
             .store
             .snapshots_dir()
             .join(format!("{}.json", snap.snapshot_id));
+        // Out of space writing the snapshot file: CURRENT still names the old snapshot, so the
+        // store is unchanged — a clean refusal, not a hybrid (merge contract §3).
+        faults::guard_space("catalog.snapshot")?;
         io::write_atomic(&path, &serde_json::to_vec_pretty(&snap)?)?;
         faults::maybe_kill("snapshot.after_write_before_current");
 
         // The instant this rename lands, the new data is live. Before it, the
-        // old snapshot is live. There is no third state.
+        // old snapshot is live. There is no third state. Out of space swapping CURRENT leaves the
+        // old CURRENT intact (the rename never happens) — again old-or-new, never hybrid.
+        faults::guard_space("catalog.current")?;
         io::write_atomic(&self.store.current_path(), snap.snapshot_id.as_bytes())?;
         faults::maybe_kill("current.after_rename");
 

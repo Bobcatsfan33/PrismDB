@@ -346,6 +346,12 @@
       "value": 250,
       "kind": "policy",
       "rationale": "docs/QUERY-CONTRACT.md#17 \u2014 the cluster-quality floor (1 - inertia_k/inertia_1, x1000) below which a result is reported low-confidence. On the frozen corpus the no-structure shape scores ~0.13 and every labeled shape ~0.38-0.44, so the line at 0.25 sits with margin on both sides; the gate test no_structure_is_reported_low_confidence binds it. Corpus-conditional."
+    },
+    {
+      "name": "MERGE_SAFETY_MARGIN_BYTES",
+      "value": 67108864,
+      "kind": "policy",
+      "rationale": "docs/MERGE-CONTRACT.md#3 \u2014 free-space headroom required BEYOND the projected merge output before a merge is admitted. A merge writes a second copy before it can free the first, so it is refused with a named deferral unless projected output + this margin fits in free space. 64 MiB is a headroom decision, not a measured optimum: enough that the snapshot commit, WAL, and concurrent ingest have room while a merge runs, small enough not to refuse a merge on a nearly-full disk that the merge would itself relieve. Measurement cannot pick it; it states how close to full we operate."
     }
   ]
 }

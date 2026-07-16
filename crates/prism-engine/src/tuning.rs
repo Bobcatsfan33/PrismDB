@@ -255,6 +255,12 @@ pub fn constants() -> Vec<Constant> {
             value: (crate::cluster::CLUSTER_CONFIDENCE_MIN * 1000.0).round() as i64,
             kind: Kind::Policy,
         },
+        // --- S10: merge admission ---
+        Constant {
+            name: "MERGE_SAFETY_MARGIN_BYTES",
+            value: crate::merge::MERGE_SAFETY_MARGIN_BYTES as i64,
+            kind: Kind::Policy,
+        },
     ]
 }
 

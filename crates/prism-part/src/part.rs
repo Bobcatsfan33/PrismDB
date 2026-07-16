@@ -1230,6 +1230,12 @@ impl PartWriter {
         }
         io::ensure_dir(&tmp_dir)?;
 
+        // Out-of-space is refused here, before any column file is written, so a full disk leaves a
+        // clean empty `.tmp/` orphan rather than a half-written part (merge contract §3). A real
+        // ENOSPC on the writes below is caught the same way — errno 28 maps to OutOfSpace — and
+        // the part never leaves `.tmp/`, so no snapshot can name it.
+        faults::guard_space("part.columns")?;
+
         use std::io::Write;
         for (file, bytes) in &framed {
             let path = tmp_dir.join(file);

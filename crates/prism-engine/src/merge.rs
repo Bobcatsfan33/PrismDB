@@ -38,7 +38,25 @@ pub struct MergeReport {
     /// capacity can stay ahead of ingest, which is budgeted, never assumed.
     pub write_amplification: f64,
     pub snapshot_id: String,
+    /// Set when the merge was **refused before it started** because the projected output plus a
+    /// safety margin would not fit in free disk space ([merge contract §3](../../../docs/MERGE-CONTRACT.md)).
+    /// A deferral is normal backpressure, not an error: the store is unchanged, and the merge is
+    /// admitted unaltered on a later cycle once space returns (merge carries no state between
+    /// attempts). The reason names the free bytes and the requirement, so it is auditable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deferred: Option<String>,
 }
+
+/// Free-space headroom required **beyond** the projected merge output, so a merge never fills the
+/// device to the brim.
+///
+/// **Policy** ([C-3](../../../docs/DECISIONS.md)): a merge admits only if `projected output + this`
+/// fits in free space (merge contract §3). It is a headroom decision, not a measured optimum —
+/// enough that the snapshot commit, the WAL, and concurrent ingest have room to land while a merge
+/// runs, small enough not to refuse merges on a nearly-but-not-quite-full disk that a merge would
+/// actually *relieve*. 64 MiB is the declared headroom. Measurement cannot pick it; it is a
+/// statement about how close to full we are willing to operate.
+pub const MERGE_SAFETY_MARGIN_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ReembedReport {
@@ -99,7 +117,47 @@ impl Engine {
                 bytes_written: 0,
                 write_amplification: 0.0,
                 snapshot_id: snap.snapshot_id,
+                deferred: None,
             });
+        }
+
+        // --- merge admission (merge contract §3) ---
+        // A merge writes a second copy before it can free the first, so it is refused *before it
+        // starts* unless the projected output plus a safety margin fits in free space. The
+        // projected output is bounded above by the total logical bytes of the inputs (duplicate
+        // reconciliation only ever removes rows). If free space cannot be determined, we do not
+        // block — the write-time ENOSPC guard is the backstop and it degrades gracefully.
+        let input_logical_bytes: u64 = readers
+            .iter()
+            .map(|r| {
+                r.manifest
+                    .columns
+                    .iter()
+                    .map(|c| c.storage.logical_bytes())
+                    .sum::<u64>()
+            })
+            .sum();
+        let required = input_logical_bytes.saturating_add(MERGE_SAFETY_MARGIN_BYTES);
+        if let Some(free) = prism_part::disk::available_bytes(&self.store.parts_dir()) {
+            if free < required {
+                return Ok(MergeReport {
+                    parts_in: snap.parts.len(),
+                    parts_out: snap.parts.len(),
+                    rows_in: 0,
+                    rows_out: 0,
+                    duplicates_reconciled: 0,
+                    parts_migrated: 0,
+                    bytes_read: 0,
+                    bytes_written: 0,
+                    write_amplification: 0.0,
+                    snapshot_id: snap.snapshot_id,
+                    deferred: Some(format!(
+                        "merge deferred: insufficient free space — {free} B free, need ~{required} B \
+                         (projected output {input_logical_bytes} B + {MERGE_SAFETY_MARGIN_BYTES} B margin). \
+                         The store is unchanged; the merge will run once space returns."
+                    )),
+                });
+            }
         }
 
         let migrated = readers.iter().filter(|r| r.is_legacy()).count();
@@ -226,6 +284,7 @@ impl Engine {
                 bytes_written as f64 / bytes_read as f64
             },
             snapshot_id: new_snap.snapshot_id,
+            deferred: None,
         })
     }
 

@@ -12,6 +12,7 @@
 
 pub mod baseline;
 pub mod catalog;
+pub mod disk;
 pub mod ext;
 pub mod faults;
 pub mod format;
