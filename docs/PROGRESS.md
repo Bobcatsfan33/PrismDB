@@ -15,7 +15,7 @@ Sprint gates from [PRISM.md](PRISM.md) Part IV. **A sprint is done when its gate
 | **S8** | Cost-based hybrid optimizer + full SQL semantics | SQL ≡ direct-executor results; fuzzing cannot bypass tenant policy; plan selection beats any fixed plan | ✅ **complete** |
 | **S9** | Semantic GROUP BY at scale + novelty/drift | 100M-row filtered set < 10s single node; ARI ≥ 0.8 vs oracle; injected-novelty precision/recall ≥ 0.9 | 🟡 **semantics complete; 100M<10s not claimed** — ARI, determinism, merge-invariance, and injected-novelty precision/recall all gated; the scale gate is measured honestly and filed (D-062), like S7's GPU |
 | **S10** | Merge scheduler + mutations under load | sustained ingest → steady part count and merge debt; kills during merge/delete never expose partial results | ✅ **complete** |
-| S11 | Object storage + local cache | cold/warm/thrash SLOs; cache corruption repaired from remote; rerank fetch bytes bounded by the plan | ⬜ |
+| **S11** | Object storage + local cache | cold/warm/thrash SLOs; cache corruption repaired from remote; rerank fetch bytes bounded by the plan | 🟡 **first increment landed** — backend-agnostic semantics gated (ObjectStore + cache + faults + CAS + fetch budget + cost worksheet); MinIO + hand-rolled S3 client + end-to-end cold-tier wiring filed ([#6](https://github.com/Bobcatsfan33/PrismDB/issues/6)) |
 | S12 | Shared-nothing distribution | near-linear scaling; declared snapshot consistency under faults; a lost shard is documented, never silent | ⬜ |
 | S13 | Production model plane | a model crash cannot corrupt or mislabel a part; every semantic value traceable to exact hashes | ⬜ |
 | S14 | Security, governance, operability | independent tenant-escape review passes; deletion demonstrably absent; a new engineer ingests+queries in <15 min | ⬜ |
@@ -725,3 +725,26 @@ The accelerated soak runs sustained ingest **and** queries **and** deletes **and
 - **One constant, not two that can drift** — deriving GC grace from the lease makes invariant 6 hold by construction instead of by a reviewer noticing `grace < lease`.
 - **Deletion has three clocks** — query, baseline, and bytes — and naming each (D-064) is what keeps a compliance-relevant fact from silently depending on merge cadence.
 - **Remaining honest gap:** per-tenant write amplification is not yet a broken-out counter (the store-wide `write_amplification` is; per-tenant accounting rides on the fairness round-robin and is the next increment), and the CLI has no `delete` subcommand yet (the engine API is gated).
+
+---
+
+## S11 — first increment landed (backend-agnostic semantics gated; MinIO + S3 client filed)
+
+**Proof:** [CI run #29510192762](https://github.com/Bobcatsfan33/PrismDB/actions/runs/29510192762) — the S11 storage gate green on `main`, plus the whole suite. **Gate:** *cold/warm/thrash/remote-error SLOs; cache corruption detected and repaired from remote; rerank fetch bytes bounded by the plan's declared budget.* Contract first: [docs/STORAGE-CONTRACT.md](STORAGE-CONTRACT.md), [D-065](DECISIONS.md) (the dependency decision), [D-066](DECISIONS.md) (CAS publication).
+
+**This sprint is deliberately delivered as a first increment.** The load-bearing, backend-agnostic *semantics* ship and are gated; the S3-*protocol* proving layer (MinIO container, fault-injecting proxy, the hand-rolled SigV4 client) and the end-to-end cold-tier wiring are filed as [#6](https://github.com/Bobcatsfan33/PrismDB/issues/6). This is the honesty pattern S7 (GPU-off), S8 (Flight transport), and S9 (100M) shipped with: build and prove the mechanism, name what is deferred, do not claim what is not measured.
+
+### What landed and is gated
+
+- **The dependency decision, made against the charter** ([D-065](DECISIONS.md)): the S3 client is **hand-rolled** — HTTP/1.1 over a raw socket, SigV4 from the in-tree `sha256`, a small XML scanner — because the read path of the truth deserves a minimal auditable trusted base, exactly the trade the charter made five times before. The **one honest exception is TLS**: HTTPS-over-WAN is the single place a TLS dependency is unavoidable, deferred with the MinIO increment; CI's MinIO speaks plain HTTP, so the client and SigV4 are exercised end-to-end without it.
+- **The `ObjectStore` trait — one seam, the whole "multi-cloud abstraction"** (scope guard §8): `get`/`get_range`/`put`/`put_if_absent`/`head`/`delete`/`list`. A real **local backend** stands behind it, exercised through faults exactly as a remote would be — not a hand-mocked S3.
+- **Publication is CAS** ([D-066](DECISIONS.md)): `put_if_absent` is the `If-None-Match: *` primitive (locally, an `O_EXCL` create), so two writers racing to publish resolve to one winner and one detected conflict, never a lost commit. A truncated read is a **named-byte error** (the S1 rule, at the storage boundary).
+- **The cache trusts nothing** (§4): every served block is content-verified (CRC-32); a corrupt block is detected, evicted, refetched, and the repair logged; the truth is never in doubt because the cache is disposable. **Remote-unavailable is a named degradation** — cached data serves, an uncached miss fails with the remote condition named, never a silent partial (the S12 slow-shard rule, early).
+- **The rerank fetch budget is enforceable reality** (§6): a plan declares a **byte** budget (`Query.fetch_budget_bytes`); execution is bounded by it, reranking the most-promising candidates that fit and **flagging** exhaustion, never fetching unbounded. **`EXPLAIN` carries the two-tier economics** — object requests, retrieved bytes, an estimated per-query cost (backend-conditional constants).
+- **The cost worksheet is a receipt, not a slide** (§7): [`cost-worksheet.json`](../testing/evidence/cost-worksheet.json) records the measured bytes per million events in each tier and the hot/cold split, so **cost per billion events retained** is arithmetic over measured bytes — 548 GB/billion total, 256 GB of it the cold (exact-vector) tier. Tagged `backend: local-object-store`, because a MinIO number and an S3-over-WAN number are different products.
+
+### Findings
+
+- **The read path of the truth earns a minimal trusted base** — a hand-rolled S3 client is more of our code, but it is code we can read end to end, and the charter already made that trade for CRC-32, SHA-256, the PRNG, the SQL parser, and the `statvfs` shim.
+- **TLS is the one thing not to hand-roll** — a subtly-wrong TLS stack is a security hole, so it is the single named exception, scoped to the HTTPS transport of a production remote and decided when that remote is exercised.
+- **A cache is a physical layout, and a physical layout may not change an answer** — so the cache is held to the truth's standard (content-verified on every read), which is what makes "cold, hot, or mixed, the answer is identical" a property and not a hope.

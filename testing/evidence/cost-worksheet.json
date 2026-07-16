@@ -1,0 +1,56 @@
+{
+  "_comment": [
+    "S11 cost worksheet (storage contract §7). The number the company watches -- cost per billion",
+    "events retained -- as a MEASURED output, not a slide. Bytes per row are measured by the",
+    "two-tier bench accounting (crates/prism-engine/src/bench.rs; committed baselines.json), then",
+    "scaled to per-million and per-billion events. A byte is a byte; the dollar cost is a function",
+    "of the backend's storage price, which is why this worksheet reports BYTES and leaves the price",
+    "multiplication to the operator with their contract.",
+    "",
+    "Charter honesty: this is BACKEND-CONDITIONAL. These bytes are the on-disk/on-object footprint,",
+    "which is the same on a local object store and on S3; the REQUEST and EGRESS costs, and any",
+    "compression the backend applies, are not, and are tagged as measured against the local backend",
+    "until MinIO/S3 is exercised (the filed increment)."
+  ],
+  "backend": "local-object-store",
+  "backend_conditional": true,
+  "measured_from": "baselines.json (bench two-tier accounting)",
+  "reference_config": { "dim": 64, "pq_m": 8, "parts": 16 },
+
+  "bytes_per_row": {
+    "pq_codes": 8.0,
+    "exact_vectors": 256.0,
+    "scalars_and_text": 284.3598,
+    "total": 548.3598,
+    "_note": "pq_m bytes for the PQ codes; dim*4 for the exact float32 vectors; the rest is the scalar columns and the bodies. rerank_tier_multiple = exact / pq = 32x."
+  },
+
+  "tiers": {
+    "_rule": "Hot tier = the scan path (PQ codes + scalar columns), always resident/cached and read on every query. Cold tier = the rerank path (exact vectors) plus the bodies, fetched only for survivors/returns. Bodies currently live inside scalars_and_text in the bench accounting; separating them out is a filed refinement, so the split below assigns exact_vectors to cold and the rest to hot, which is the conservative reading for cold-tier egress.",
+    "hot_bytes_per_row": 292.3598,
+    "cold_bytes_per_row": 256.0,
+    "cold_fraction": 0.467
+  },
+
+  "per_million_events": {
+    "pq_codes_MB": 8.0,
+    "exact_vectors_MB": 256.0,
+    "scalars_and_text_MB": 284.36,
+    "total_MB": 548.36,
+    "hot_MB": 292.36,
+    "cold_MB": 256.0
+  },
+
+  "per_billion_events": {
+    "total_GB": 548.36,
+    "hot_GB": 292.36,
+    "cold_GB": 256.0,
+    "_note": "1e9 events x 548.36 B/event = 548.36 GB total retained. The cold tier -- the expensive-to-egress exact vectors -- is 256 GB of that. The scan tier a query always touches is the 292 GB hot half."
+  },
+
+  "request_counts": {
+    "_rule": "Cold-tier object requests per query, from Counters.object_requests: one per part whose exact vectors are fetched, coalesced ranged reads within a part counting as one. A query touching P eligible parts issues <= P cold requests; the fetch budget (§6) bounds the bytes those requests move.",
+    "cold_requests_per_query": "<= eligible parts touched",
+    "bytes_per_request_bounded_by": "Query.fetch_budget_bytes (storage contract §6)"
+  }
+}
