@@ -238,6 +238,7 @@ impl Engine {
         let mut parts = snap.parts.clone();
         let mut seq = snap.next_seq;
         let mut first_part: Option<String> = None;
+        let mut new_ids: Vec<String> = Vec::new();
 
         for (key, rows) in by_partition {
             let spec = PartSpec {
@@ -260,7 +261,17 @@ impl Engine {
             )?;
             seq += 1;
             first_part.get_or_insert(manifest.part_id.clone());
+            new_ids.push(manifest.part_id.clone());
             parts.push(PartEntry::Located(part_ref(&manifest, &key)?));
+        }
+
+        // **Remote-durable publication (invariant 2, extended).** Every new part's cold tier is
+        // uploaded and verified on the object store *before* the catalog references it — so a
+        // snapshot can never name a part whose exact-vector bytes are not durable and complete on
+        // the backend. The two kill points inside bracket the boundary; a crash there leaves the
+        // catalog at the old snapshot and the bytes an orphan, never a dangling reference.
+        for id in &new_ids {
+            self.publish_part_cold(id)?;
         }
 
         let new_snap = self.catalog().commit(

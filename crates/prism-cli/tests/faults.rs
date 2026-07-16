@@ -159,6 +159,12 @@ fn killing_the_writer_at_every_ingest_boundary_leaves_old_or_new_never_hybrid() 
         "part.after_write_before_fsync",
         "part.after_fsync_before_rename",
         "part.after_rename_before_snapshot",
+        // S11: the cold tier is uploaded and verified on the object store before the catalog
+        // references the part. A crash at either boundary is before the commit, so it must roll
+        // back to the old snapshot and leave the uploaded bytes an orphan — exactly like a crash
+        // after the part rename but before any snapshot names it.
+        "publish.after_upload_before_verify",
+        "publish.after_verify_before_reference",
         "snapshot.after_write_before_current",
         "current.after_rename",
     ];
@@ -449,6 +455,8 @@ fn every_declared_kill_point_is_reachable() {
         "wal.after_append_before_fsync",
         "ingest.after_embed_before_part",
         "ingest.after_publish_before_offset_commit",
+        "publish.after_upload_before_verify",
+        "publish.after_verify_before_reference",
     ];
     for p in KILL_POINTS {
         assert!(

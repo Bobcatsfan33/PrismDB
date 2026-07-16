@@ -420,6 +420,13 @@ impl CachedObjectStore {
         &self.cache
     }
 
+    /// The backend the cache sits in front of — the durable truth. Publication (upload + verify)
+    /// goes straight to the backend, never the cache: the cache is disposable, the truth is not
+    /// ([storage contract §2](../../../../docs/STORAGE-CONTRACT.md)).
+    pub fn backend(&self) -> &std::sync::Arc<dyn ObjectStore> {
+        &self.remote
+    }
+
     /// A cold-tier ranged read, cache-first. The workhorse the query path calls.
     pub fn get_range_cached(&self, key: &str, offset: u64, len: usize) -> Result<Vec<u8>> {
         if let Some(bytes) = self.cache.get(key, offset, len) {

@@ -90,6 +90,67 @@ impl Engine {
         Ok(n)
     }
 
+    /// Publish one part's cold tier to the object-store backend **durably, before the catalog
+    /// references it** ([storage contract §2](../../../../docs/STORAGE-CONTRACT.md)) — invariant 2
+    /// extended to the remote: a snapshot may name a part only once its exact-vector bytes are
+    /// durable and complete on the object store, not merely on local disk.
+    ///
+    /// The `rerank.vec` is uploaded only if the backend does not already hold it at the right size.
+    /// The default local backend is rooted at the store, so the part write already put it there and
+    /// this is a single HEAD; a remote backend receives the bytes here. A part with no cold tier (an
+    /// unframed v1 column, or an empty part) has nothing to publish and returns cleanly.
+    ///
+    /// Two kill points bracket the boundary so the fault harness proves old-or-new-never-hybrid: a
+    /// crash after the upload but before the verify, and after the verify but before the catalog
+    /// commit that references the part, must each leave the catalog at the OLD snapshot with the
+    /// uploaded bytes an orphan on the backend (reclaimed later by remote GC) — never a reference to
+    /// an object that was not confirmed durable.
+    pub fn publish_part_cold(&self, part_id: &str) -> Result<()> {
+        let path = self.store.part_dir(part_id).join("rerank.vec");
+        if !path.exists() {
+            return Ok(()); // no cold tier to publish
+        }
+        let bytes = std::fs::read(&path)?;
+        let want = bytes.len() as u64;
+        let key = format!("parts/{part_id}/rerank.vec");
+        let backend = self.cold.backend();
+
+        // Upload only if the backend does not already hold the object at the right size — idempotent
+        // by construction, since the cold tier is content-addressed. The local backend already has
+        // it (the part write wrote straight into the object key's path); a remote backend gets it.
+        if backend.head(&key)? != Some(want) {
+            backend.put(&key, &bytes)?;
+        }
+
+        // A crash here leaves the bytes on the backend but no catalog reference: an orphan.
+        prism_part::faults::maybe_kill("publish.after_upload_before_verify");
+
+        // Verify the object is durable and complete before the catalog may reference it: a PUT that
+        // returned OK but landed short or absent is caught here, named, and never referenced. Byte
+        // integrity is then re-checked per block on every read (the CRC-32 framing, storage §4), so
+        // this HEAD is the publication-time "it landed, whole" gate.
+        match backend.head(&key)? {
+            Some(len) if len == want => {}
+            Some(len) => {
+                return Err(PrismError::Invariant(format!(
+                    "cold-tier publish of part `{part_id}` did not verify: the backend holds {len} \
+                     bytes at `{key}`, but the part's cold tier is {want} bytes"
+                )));
+            }
+            None => {
+                return Err(PrismError::Invariant(format!(
+                    "cold-tier publish of part `{part_id}` did not verify: the backend has no \
+                     object at `{key}` after the upload"
+                )));
+            }
+        }
+
+        // A crash here leaves a verified object the catalog does not yet reference: still an orphan,
+        // still old-or-new — the commit that would reference it has not run.
+        prism_part::faults::maybe_kill("publish.after_verify_before_reference");
+        Ok(())
+    }
+
     /// One cold block, with a **bounded retry** on transient remote faults. A truncated/corrupt read
     /// is a named byte error at once (never retried); a persistent outage is named after the budget
     /// is spent. It never returns fewer bytes than asked — the query gets the block or a named error.

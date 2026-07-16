@@ -37,6 +37,16 @@ pub const KILL_POINTS: &[&str] = &[
     // source will re-deliver; idempotency must recognise every one as a replay.
     // Offsets may lag reality. They must never lead it.
     "ingest.after_publish_before_offset_commit",
+    // --- S11: remote-durable cold-tier publication ---
+    //
+    // A new part's cold tier has been uploaded to the object store but not yet
+    // verified. The bytes are on the backend; no snapshot names the part. An
+    // orphan the catalog never referenced.
+    "publish.after_upload_before_verify",
+    // The uploaded cold tier is verified durable and complete, but the catalog
+    // commit that would reference the part has not run. Still an orphan, still
+    // old-or-new: the snapshot is unchanged.
+    "publish.after_verify_before_reference",
 ];
 
 /// The points at which an out-of-space fault can be injected. Unlike [`KILL_POINTS`], these are

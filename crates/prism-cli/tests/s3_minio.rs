@@ -212,3 +212,74 @@ fn answer_invariance_through_minio_under_fault() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+fn store_cfg() -> StoreConfig {
+    StoreConfig {
+        format_version: STORE_VERSION,
+        dim: 64,
+        nlist: 16,
+        pq_m: 8,
+        seed: 9,
+        kmeans_restarts: 1,
+        block_size: prism_part::format::DEFAULT_BLOCK_SIZE,
+        partitions: Default::default(),
+        promote: Vec::new(),
+    }
+}
+
+/// **Boundary (a) against MinIO — remote-durable cold-tier publication.** An engine whose cold
+/// backend *is* MinIO uploads and verifies every new part's cold tier to the remote *during*
+/// ingest, before the catalog references the part (storage §2). Afterward the objects are on MinIO
+/// (HEAD confirms), a second publish is an idempotent no-op, and the bytes are byte-identical to the
+/// local cold tier — a query answered from MinIO matches a query answered from the local disk.
+#[test]
+fn cold_tier_is_published_and_verified_to_minio_before_reference() {
+    let Some(cfg) = minio() else {
+        eprintln!("skipping MinIO publication: PRISM_S3_ENDPOINT is not set");
+        return;
+    };
+    let root = std::env::temp_dir().join(format!("prism-s3pub-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+
+    // An engine whose cold tier lives on MinIO from the start.
+    let engine = prism_engine::Engine::init(&root, store_cfg())
+        .unwrap()
+        .with_cold(Arc::new(CachedObjectStore::new(
+            Arc::new(s3(&cfg)),
+            CACHE_QUOTA_BYTES,
+        )));
+    engine
+        .ingest(
+            prism_engine::corpus::generate(prism_engine::corpus::Kind::Zipf, 2000, 5),
+            1_760_000_000_000,
+        )
+        .unwrap();
+
+    // Publication happened during the commit: every part's cold tier is durable on MinIO.
+    let probe = s3(&cfg);
+    let ids = engine.snapshot().unwrap().part_ids();
+    assert!(!ids.is_empty());
+    for id in &ids {
+        let key = format!("parts/{id}/rerank.vec");
+        let head = probe.head(&key).unwrap();
+        assert!(
+            head.is_some(),
+            "part {id} was referenced but its cold tier is not on MinIO at {key}"
+        );
+        // Idempotent: re-publishing uploads nothing new and still verifies.
+        engine.publish_part_cold(id).unwrap();
+        assert_eq!(probe.head(&key).unwrap(), head, "re-publish changed the object");
+    }
+
+    // The published bytes are the truth: a query answered from MinIO equals one answered from the
+    // local cold tier (a fresh default-local reopen of the same store).
+    let from_minio = top_ids(&engine);
+    let local = prism_engine::Engine::open(&root).unwrap();
+    let from_local = top_ids(&local);
+    assert_eq!(
+        from_minio, from_local,
+        "the cold tier published to MinIO answered differently from the local one"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
