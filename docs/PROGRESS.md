@@ -663,6 +663,8 @@ EXPLAIN carries estimates *and* actuals for the four controls plus the chosen ro
 
 ## S9 — semantics complete; the 100M<10s gate is measured, not claimed
 
+**Proof:** [CI run #29464845219](https://github.com/Bobcatsfan33/PrismDB/actions/runs/29464845219) — all 26 jobs green on `main`, including the new S9 `cluster` gate (semantic_cluster determinism across layouts + plan/route flips, ARI ≥ 0.8 on the frozen labeled corpus incl. the adversarial shapes, noise asserted low-confidence, k-cap refusal, C-4 exemplars, merge-order invariance; injected-novelty precision/recall on the tail; cross-space refusal), the C-1 constant ledger, and the full suite in debug **and** release.
+
 **Gate:** *semantic `GROUP BY` over a 100M-row filtered set < 10s single node; ARI ≥ 0.8 vs oracle on labeled synthetics; partial-state merge property tests; injected-novelty precision/recall ≥ 0.9.* Contract first: [determinism contract §13–§15](DETERMINISM-CONTRACT.md), [query contract §15–§18](QUERY-CONTRACT.md), and charter **[C-7](DECISIONS.md)** were written before the clustering code.
 
 ### 1. The randomized aggregate is a function of the data — the central gate
