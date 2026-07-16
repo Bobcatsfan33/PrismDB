@@ -33,3 +33,18 @@ pub fn estimated_cost_micros(object_requests: usize, retrieved_bytes: usize) -> 
                 .saturating_div(1_000_000),
         )
 }
+
+/// The default local cache byte quota.
+///
+/// **Policy** ([C-3](../../../docs/DECISIONS.md)): the NVMe block cache is a bounded, disposable
+/// optimization — it is sized, not unbounded, so it cannot itself become the thing that fills the
+/// disk. A full cache evicts under pressure and, at the hard limit, reports the S10 `OutOfSpace`
+/// backpressure rather than growing without bound. 256 MiB is a working default; the real size is a
+/// deployment knob. Backend-conditional numbers ride on it (storage contract §5).
+pub const CACHE_QUOTA_BYTES: usize = 256 * 1024 * 1024;
+
+pub mod object;
+pub use object::{
+    BlockCache, CacheStats, CachedObjectStore, FaultConfig, FaultStore, LocalObjectStore,
+    ObjectStore,
+};

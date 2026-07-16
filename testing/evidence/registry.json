@@ -400,6 +400,12 @@
       "value": 1,
       "kind": "policy",
       "rationale": "docs/STORAGE-CONTRACT.md#5 \u2014 estimated cost of retrieving one cold-tier byte, pico-units. BACKEND-CONDITIONAL: per-byte egress/transfer. Local object storage is near-free per byte; S3-over-WAN egress is the dominant term of a real bill. Pico unit so a megabyte is a meaningful integer and the two backends' figures stay distinguishable."
+    },
+    {
+      "name": "CACHE_QUOTA_BYTES",
+      "value": 268435456,
+      "kind": "policy",
+      "rationale": "docs/STORAGE-CONTRACT.md#4 \u2014 the local NVMe block cache byte quota. The cache is a bounded, disposable optimization: sized, not unbounded, so it cannot itself become the thing that fills the disk. A full cache evicts under pressure and at the hard limit reports S10 OutOfSpace backpressure rather than growing without bound. 256 MiB is a working default; the real size is a deployment knob. Backend-conditional numbers ride on it."
     }
   ]
 }

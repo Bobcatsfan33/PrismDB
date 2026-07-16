@@ -4,11 +4,16 @@
 //! the cold tier, execution is bounded by it, and exhaustion is a **named** degradation carried in
 //! EXPLAIN, never a silent over-fetch.
 
+use prism_engine::storage::object::{
+    CachedObjectStore, FaultConfig, FaultStore, LocalObjectStore, ObjectStore,
+};
+use prism_engine::storage::CACHE_QUOTA_BYTES;
 use prism_engine::Engine;
 use prism_part::store::{StoreConfig, STORE_VERSION};
 use prism_types::Query;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 static N: AtomicU64 = AtomicU64::new(0);
 
@@ -96,5 +101,182 @@ fn the_fetch_budget_bounds_the_cold_tier_and_names_exhaustion() {
         "the two-tier cost estimate must be nonzero"
     );
 
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+// --- the object store, its faults, and the cache (storage contract §1, §2, §4) ---
+
+/// **CAS create: two writers race, exactly one wins** (storage contract §2, D-066).
+#[test]
+fn put_if_absent_is_a_compare_and_swap() {
+    let root = tmp("cas");
+    std::fs::create_dir_all(&root).unwrap();
+    let store = LocalObjectStore::new(&root);
+    assert!(
+        store.put_if_absent("catalog/CURRENT", b"snap-a").unwrap(),
+        "first create must win"
+    );
+    assert!(
+        !store.put_if_absent("catalog/CURRENT", b"snap-b").unwrap(),
+        "second create must lose"
+    );
+    assert_eq!(
+        store.get("catalog/CURRENT").unwrap(),
+        b"snap-a",
+        "the loser must not overwrite"
+    );
+    assert_eq!(store.head("catalog/CURRENT").unwrap(), Some(6));
+    assert_eq!(store.head("catalog/missing").unwrap(), None);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// **A truncated/out-of-range read is a named-byte error, never a silent short read** (storage §1).
+#[test]
+fn a_truncated_read_is_named() {
+    let root = tmp("trunc");
+    std::fs::create_dir_all(&root).unwrap();
+    let store = LocalObjectStore::new(&root);
+    store.put("parts/p/rerank.vec", &[7u8; 100]).unwrap();
+    // Reading past the end names the shortfall.
+    let err = store.get_range("parts/p/rerank.vec", 80, 40).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("truncated") && msg.contains("only 100 bytes"),
+        "{msg}"
+    );
+    // A valid range succeeds and returns exactly the bytes asked for.
+    assert_eq!(
+        store.get_range("parts/p/rerank.vec", 10, 20).unwrap().len(),
+        20
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// **The fault wrapper injects remote-style failures, each named** (storage §1).
+#[test]
+fn injected_faults_are_named() {
+    let root = tmp("fault");
+    std::fs::create_dir_all(&root).unwrap();
+    let local = LocalObjectStore::new(&root);
+    local.put("k", b"hello world").unwrap();
+    let store = FaultStore::new(local);
+
+    store.set(FaultConfig {
+        unavailable: true,
+        ..Default::default()
+    });
+    let err = store.get_range("k", 0, 5).unwrap_err().to_string();
+    assert!(err.contains("remote unavailable"), "{err}");
+
+    store.set(FaultConfig {
+        truncate_reads: true,
+        ..Default::default()
+    });
+    let err = store.get_range("k", 0, 5).unwrap_err().to_string();
+    assert!(err.contains("truncated"), "{err}");
+
+    store.set(FaultConfig {
+        fail_next: true,
+        ..Default::default()
+    });
+    assert!(
+        store.get_range("k", 0, 5).is_err(),
+        "the injected 5xx must fail the call"
+    );
+    assert_eq!(
+        store.get_range("k", 0, 5).unwrap(),
+        b"hello",
+        "fail_next clears after one call"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// **A corrupt cache block is detected by content hash, evicted, and repaired from the remote**
+/// (storage contract §4).
+#[test]
+fn a_corrupt_cache_block_is_repaired_from_the_remote() {
+    let root = tmp("cache");
+    std::fs::create_dir_all(&root).unwrap();
+    let local = LocalObjectStore::new(&root);
+    local
+        .put("parts/p/rerank.vec", &(0u8..255).collect::<Vec<u8>>())
+        .unwrap();
+    let cached = CachedObjectStore::new(Arc::new(local), CACHE_QUOTA_BYTES);
+
+    // Warm the cache (a miss populates it), then a hit serves from cache.
+    let want = cached
+        .get_range_cached("parts/p/rerank.vec", 0, 64)
+        .unwrap();
+    assert_eq!(cached.cache().stats().misses, 1);
+    assert_eq!(
+        cached
+            .get_range_cached("parts/p/rerank.vec", 0, 64)
+            .unwrap(),
+        want
+    );
+    assert_eq!(cached.cache().stats().hits, 1);
+
+    // Corrupt the cached block: the next read must detect it, refetch, and still be correct.
+    assert!(cached.cache().corrupt_entry("parts/p/rerank.vec", 0, 64));
+    let after = cached
+        .get_range_cached("parts/p/rerank.vec", 0, 64)
+        .unwrap();
+    assert_eq!(
+        after, want,
+        "a corrupt cache block must be repaired to the true bytes"
+    );
+    assert_eq!(
+        cached.cache().stats().corrupt_repaired,
+        1,
+        "the repair must be counted"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// **Remote unavailable is a named degradation: cached data serves, uncached fails named — never a
+/// silent partial answer** (storage contract §4, the S12 slow-shard rule early).
+#[test]
+fn remote_unavailable_serves_cache_and_names_the_miss() {
+    let root = tmp("degrade");
+    std::fs::create_dir_all(&root).unwrap();
+    let local = LocalObjectStore::new(&root);
+    local
+        .put(
+            "parts/p/rerank.vec",
+            &(0u8..=255).cycle().take(4096).collect::<Vec<u8>>(),
+        )
+        .unwrap();
+    // Share the fault handle so the outage can be toggled after the cache is warm.
+    let fault = Arc::new(FaultStore::new(local));
+    let cached = CachedObjectStore::new(fault.clone(), CACHE_QUOTA_BYTES);
+
+    // Warm one block while the remote is up.
+    let warm = cached
+        .get_range_cached("parts/p/rerank.vec", 0, 64)
+        .unwrap();
+
+    // Remote goes down.
+    fault.set(FaultConfig {
+        unavailable: true,
+        ..Default::default()
+    });
+
+    // The cached block still serves — a query answerable from cache succeeds.
+    assert_eq!(
+        cached
+            .get_range_cached("parts/p/rerank.vec", 0, 64)
+            .unwrap(),
+        warm,
+        "a cached block must still serve when the remote is down"
+    );
+    // An uncached block fails with the remote condition NAMED — never a silent partial.
+    let err = cached
+        .get_range_cached("parts/p/rerank.vec", 2048, 64)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("remote unavailable"),
+        "an uncached read against a dead remote must name the condition, not return a partial: {err}"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }

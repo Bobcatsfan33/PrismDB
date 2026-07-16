@@ -326,6 +326,20 @@ jobs:
       # a steady-state part count/debt and a canary answer identical to cycle 1 (merge contract §8).
       - run: cargo test --release -p prism-cli --test soak -- --nocapture
 
+  storage:
+    name: the S11 gate — object store, cache trusts nothing, fetch budget
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The ObjectStore trait + local backend + fault wrapper: CAS create (two writers, one wins),
+      # truncated/injected reads are named-byte errors, a corrupt cache block is detected by content
+      # hash and repaired from the remote, remote-unavailable serves cache and names the miss (never
+      # a silent partial), and the rerank fetch budget bounds the cold tier with named exhaustion
+      # (storage contract §1/§2/§4/§6). NOTE: MinIO + the hand-rolled S3 client is the filed increment.
+      - run: cargo test --release -p prism-cli --test storage -- --nocapture
+
   layout:
     name: charter C-4 — the answer is a function of the data, not the layout
     runs-on: ubuntu-latest

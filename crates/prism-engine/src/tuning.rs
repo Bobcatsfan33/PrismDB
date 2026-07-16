@@ -307,6 +307,11 @@ pub fn constants() -> Vec<Constant> {
             value: crate::storage::RETRIEVED_BYTE_COST_PICOS as i64,
             kind: Kind::Policy,
         },
+        Constant {
+            name: "CACHE_QUOTA_BYTES",
+            value: crate::storage::CACHE_QUOTA_BYTES as i64,
+            kind: Kind::Policy,
+        },
     ]
 }
 
