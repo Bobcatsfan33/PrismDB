@@ -673,7 +673,9 @@ fn cmd_rollback(a: &Args) -> Result<()> {
 fn cmd_gc(a: &Args) -> Result<()> {
     let engine = open(a)?;
     let retain = a.parse_opt("retain", 5usize)?;
-    emit(&engine.catalog().gc(retain, a.has("dry-run"))?)
+    // Lease-aware GC: the reader-lease horizon protects any snapshot young enough that a reader
+    // could still be within its lease, so invariant 6 holds by construction (merge contract §5).
+    emit(&engine.catalog().gc_at(retain, now_ms(), a.has("dry-run"))?)
 }
 
 fn cmd_bench(a: &Args) -> Result<()> {

@@ -84,7 +84,7 @@ fn lock() -> std::sync::MutexGuard<'static, ()> {
 }
 
 /// After an injected fault, the store must open, verify, and hold exactly the pre-fault rows.
-fn assert_healthy(root: &PathBuf, expect_rows: usize) {
+fn assert_healthy(root: &std::path::Path, expect_rows: usize) {
     let engine = Engine::open(root).unwrap();
     engine
         .catalog()

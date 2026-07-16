@@ -296,6 +296,18 @@ jobs:
       # rebuilt because retention expired its raw bodies goes DEGRADED rather than silent.
       - run: cargo test --release -p prism-cli --test generations -- --nocapture
 
+  lease:
+    name: the S10 gate — reader leases + GC grace by construction (invariant 6)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # GC grace is derived from the lease TTL (one constant), so a reader within its lease is
+      # never orphaned even at retain=1; a crashed/expired reader's snapshot is reclaimed and its
+      # stale cursor gets the explicit expired-snapshot error (merge contract §5, query contract §2).
+      - run: cargo test --release -p prism-cli --test lease -- --nocapture
+
   layout:
     name: charter C-4 — the answer is a function of the data, not the layout
     runs-on: ubuntu-latest

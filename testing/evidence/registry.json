@@ -352,6 +352,12 @@
       "value": 67108864,
       "kind": "policy",
       "rationale": "docs/MERGE-CONTRACT.md#3 \u2014 free-space headroom required BEYOND the projected merge output before a merge is admitted. A merge writes a second copy before it can free the first, so it is refused with a named deferral unless projected output + this margin fits in free space. 64 MiB is a headroom decision, not a measured optimum: enough that the snapshot commit, WAL, and concurrent ingest have room while a merge runs, small enough not to refuse a merge on a nearly-full disk that the merge would itself relieve. Measurement cannot pick it; it states how close to full we operate."
+    },
+    {
+      "name": "LEASE_TTL_MS",
+      "value": 3600000,
+      "kind": "policy",
+      "rationale": "docs/MERGE-CONTRACT.md#5 \u2014 the maximum time a reader may hold a snapshot pinned across a paginated query (invariant 4/6). A query paginating longer than this has its lease expire and its next page returns the explicit expired-snapshot error rather than a stale answer. One hour is generous for an interactive paginating reader and short enough that a crashed reader does not pin storage for long. This is the ONE lifecycle-timing constant; GC grace and the reclaim horizon are derived const fns of it (catalog::GC_GRACE_MS/GC_HORIZON_MS), never registered separately, so grace<lease can never arise and orphan a live reader."
     }
   ]
 }

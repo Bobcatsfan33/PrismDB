@@ -25,6 +25,25 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 
+/// The maximum time a reader may hold a snapshot pinned across a paginated query's lifetime
+/// (invariant 4 / invariant 6).
+///
+/// **Policy** ([C-3](../../../docs/DECISIONS.md)): a query that paginates for longer than this has
+/// its lease *expire*, and its next page returns the explicit expired-snapshot error rather than a
+/// stale answer — an hour is generous for an interactive paginating reader and short enough that a
+/// crashed reader does not pin storage for long. This is the **one** lifecycle-timing constant; the
+/// grace is derived from it ([`GC_GRACE_MS`]), never tuned beside it, so the two cannot drift into
+/// `grace < lease` and orphan a live reader (merge contract §5).
+pub const LEASE_TTL_MS: i64 = 60 * 60 * 1000;
+
+/// GC grace — **derived** from the lease, not an independent constant. Extra slack beyond the lease
+/// before a snapshot may be reclaimed, so the horizon is comfortably past the last moment any
+/// reader could still be within its lease. One lease-length of grace is the boring choice.
+pub const GC_GRACE_MS: i64 = LEASE_TTL_MS;
+
+/// A snapshot may be reclaimed only once it is older than this — lease plus its derived grace.
+pub const GC_HORIZON_MS: i64 = LEASE_TTL_MS + GC_GRACE_MS;
+
 /// A part as the catalog knows it.
 ///
 /// **Untagged**, so a snapshot written before S4 -- whose `parts` were bare strings -- still
@@ -457,26 +476,51 @@ impl<'a> Catalog<'a> {
 
     // --- garbage collection: explicit, and never on the publish path ---
 
-    /// Remove parts and snapshots that no retained snapshot references.
+    /// Remove parts and snapshots that no retained snapshot references — count-based only.
     ///
-    /// `retain_snapshots` is how many recent snapshots stay reachable. It is the
-    /// S0 stand-in for reader leases (invariant 6): with no lease service yet,
-    /// keeping the last N snapshots is what guarantees that a reader which
-    /// pinned a snapshot still has its parts underneath it. Setting it to 1
-    /// makes rollback impossible, which is why the default is not 1.
+    /// `retain_snapshots` keeps the newest N snapshots so a rollback target survives. Prefer
+    /// [`gc_at`] on the live path: it *also* honours the reader-lease horizon, so a reader within
+    /// its lease can never have its snapshot reclaimed (invariant 6, by construction). This method
+    /// is `gc_at` with `now = i64::MAX`, i.e. the time horizon disabled.
     pub fn gc(&self, retain_snapshots: usize, dry_run: bool) -> Result<GcReport> {
+        self.gc_at(retain_snapshots, i64::MAX, dry_run)
+    }
+
+    /// Remove parts and snapshots that neither the retain-count floor nor the **reader-lease
+    /// horizon** protects (merge contract §5, invariant 6).
+    ///
+    /// A snapshot is kept if it is one of the newest `retain_snapshots`, or the live one, **or**
+    /// younger than [`GC_HORIZON_MS`] — the lease plus its derived grace. That last clause is what
+    /// makes invariant 6 hold *by construction*: a reader that pinned a snapshot has at most
+    /// [`LEASE_TTL_MS`] to use it, and GC will not reclaim anything younger than the lease-plus-
+    /// grace horizon, so a reader within its lease always finds its parts. A reader that holds a
+    /// cursor past its lease is *expired*, and its stale cursor gets the explicit expired-snapshot
+    /// error ([query contract §2](../../../docs/QUERY-CONTRACT.md)), never a wrong answer.
+    pub fn gc_at(&self, retain_snapshots: usize, now_ms: i64, dry_run: bool) -> Result<GcReport> {
         let retain = retain_snapshots.max(1);
         let current = self.current()?;
         let all_snaps = self.list_snapshots()?;
 
-        // Keep the newest `retain` snapshots, and always the live one.
-        let keep_snaps: BTreeSet<String> = all_snaps
+        // Keep the newest `retain` snapshots, always the live one, and — the lease clause — any
+        // snapshot younger than the lease-plus-grace horizon, so a live reader is never orphaned.
+        let horizon_floor = now_ms.saturating_sub(GC_HORIZON_MS);
+        let mut keep_snaps: BTreeSet<String> = all_snaps
             .iter()
             .rev()
             .take(retain)
             .cloned()
             .chain(std::iter::once(current.snapshot_id.clone()))
             .collect();
+        for id in &all_snaps {
+            if keep_snaps.contains(id) {
+                continue;
+            }
+            if let Ok(s) = self.load_snapshot(id) {
+                if s.created_at_ms > horizon_floor {
+                    keep_snaps.insert(id.clone());
+                }
+            }
+        }
 
         // Anything a retained snapshot names is live and must not be touched.
         let mut referenced: BTreeSet<String> = BTreeSet::new();

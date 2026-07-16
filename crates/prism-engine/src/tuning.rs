@@ -255,10 +255,19 @@ pub fn constants() -> Vec<Constant> {
             value: (crate::cluster::CLUSTER_CONFIDENCE_MIN * 1000.0).round() as i64,
             kind: Kind::Policy,
         },
-        // --- S10: merge admission ---
+        // --- S10: merge admission + reader leases ---
         Constant {
             name: "MERGE_SAFETY_MARGIN_BYTES",
             value: crate::merge::MERGE_SAFETY_MARGIN_BYTES as i64,
+            kind: Kind::Policy,
+        },
+        // The ONE lifecycle-timing constant. GC grace and the reclaim horizon are `const fn`s of
+        // it (`catalog::GC_GRACE_MS` / `GC_HORIZON_MS`), so they are deliberately NOT registered
+        // here — a derived value cannot drift from its source, which is the whole point (invariant
+        // 6 by construction, merge contract §5).
+        Constant {
+            name: "LEASE_TTL_MS",
+            value: prism_part::catalog::LEASE_TTL_MS,
             kind: Kind::Policy,
         },
     ]
