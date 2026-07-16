@@ -51,6 +51,70 @@ fn store() -> (Engine, PathBuf) {
     (engine, root)
 }
 
+/// **Remote-orphan reconciliation, on a real (local) `ObjectStore` backend.** Reclaims a cold tier
+/// no snapshot names and a catalog mirror snapshot past the recovery depth; protects every
+/// referenced cold tier, the live mirror snapshot, and any object still inside its grace horizon.
+#[test]
+fn reconcile_reclaims_orphans_but_never_the_live_set() {
+    let root = tmp("recon");
+    let cold_root = tmp("recon-cold");
+    std::fs::create_dir_all(&cold_root).unwrap();
+    let backend = Arc::new(LocalObjectStore::new(cold_root));
+    let engine = Engine::init(&root, config())
+        .unwrap()
+        .with_cold(Arc::new(CachedObjectStore::new(
+            backend.clone(),
+            CACHE_QUOTA_BYTES,
+        )));
+    engine
+        .ingest(
+            prism_engine::corpus::generate(prism_engine::corpus::Kind::Zipf, 2000, 5),
+            1_760_000_000_000,
+        )
+        .unwrap();
+    let live_snapshot = engine.snapshot().unwrap().snapshot_id;
+    let live_parts = engine.snapshot().unwrap().part_ids();
+    assert!(!live_parts.is_empty());
+
+    backend
+        .put("parts/p99999999-orphanaaaa/rerank.vec", b"orphan bytes")
+        .unwrap();
+    backend.put("catalog/SNAPSHOT-s00000099", b"stale").unwrap();
+    backend
+        .put(&format!("catalog/SNAPSHOT-{live_snapshot}"), b"live")
+        .unwrap();
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+
+    // Inside the grace horizon: nothing is swept.
+    let graced = engine.reconcile_remote_orphans(1, now_ms, false).unwrap();
+    assert!(graced.removed.is_empty(), "swept inside grace: {:?}", graced.removed);
+    assert!(graced.too_young >= 1);
+
+    // Past the horizon: the two orphans go, the live set stays.
+    let horizon = prism_part::catalog::GC_HORIZON_MS;
+    let aged = engine
+        .reconcile_remote_orphans(1, now_ms + horizon + 60_000, false)
+        .unwrap();
+    assert!(aged.removed.contains(&"parts/p99999999-orphanaaaa/rerank.vec".to_string()));
+    assert!(aged.removed.contains(&"catalog/SNAPSHOT-s00000099".to_string()));
+    assert!(!aged
+        .removed
+        .contains(&format!("catalog/SNAPSHOT-{live_snapshot}")));
+    for id in &live_parts {
+        assert!(!aged.removed.contains(&format!("parts/{id}/rerank.vec")));
+        assert!(backend.head(&format!("parts/{id}/rerank.vec")).unwrap().is_some());
+    }
+    assert_eq!(aged.protected_parts, live_parts.len());
+    assert!(aged.protected_mirrors >= 1);
+    assert!(!top_ids(&engine).is_empty());
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// **The declared byte budget bounds the cold-tier fetch, and exhaustion is named.**
 #[test]
 fn the_fetch_budget_bounds_the_cold_tier_and_names_exhaustion() {

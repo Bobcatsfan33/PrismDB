@@ -213,6 +213,96 @@ fn answer_invariance_through_minio_under_fault() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// **Boundary (c) against MinIO — remote-orphan reconciliation.** Reconciliation reclaims a remote
+/// object only when it is absent from the live set AND older than the reader-lease horizon. A
+/// crashed publication's cold tier and a catalog mirror snapshot past the recovery depth are
+/// reclaimed; a referenced part's cold tier, a live mirror snapshot, and any just-uploaded object
+/// (an in-flight publication) are protected (storage §2, invariant-6 shape).
+#[test]
+fn reconcile_reclaims_remote_orphans_but_never_the_live_set() {
+    let Some(cfg) = minio() else {
+        eprintln!("skipping MinIO reconciliation: PRISM_S3_ENDPOINT is not set");
+        return;
+    };
+    let root = std::env::temp_dir().join(format!("prism-s3rec-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+
+    let engine = prism_engine::Engine::init(&root, store_cfg())
+        .unwrap()
+        .with_cold(Arc::new(CachedObjectStore::new(
+            Arc::new(s3(&cfg)),
+            CACHE_QUOTA_BYTES,
+        )));
+    engine
+        .ingest(
+            prism_engine::corpus::generate(prism_engine::corpus::Kind::Zipf, 2000, 5),
+            1_760_000_000_000,
+        )
+        .unwrap();
+    let live_snapshot = engine.snapshot().unwrap().snapshot_id;
+    let live_parts = engine.snapshot().unwrap().part_ids();
+    assert!(!live_parts.is_empty());
+
+    // Plant orphans on the remote: a cold tier no snapshot names, and a mirror snapshot past the
+    // recovery depth. Plus a live mirror snapshot, which must be protected.
+    let probe = s3(&cfg);
+    probe.put("parts/p99999999-orphanaaaa/rerank.vec", b"orphaned bytes").unwrap();
+    probe.put("catalog/SNAPSHOT-s00000099", b"stale mirror").unwrap();
+    probe
+        .put(&format!("catalog/SNAPSHOT-{live_snapshot}"), b"live mirror")
+        .unwrap();
+
+    // A fresh orphan, uploaded just now: reconciliation must grace it (its commit could be moments
+    // away), so a pass at wall-clock-now reclaims nothing.
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let graced = engine.reconcile_remote_orphans(1, now_ms, false).unwrap();
+    assert!(
+        graced.removed.is_empty(),
+        "a fresh orphan was swept inside its grace horizon: {:?}",
+        graced.removed
+    );
+    assert!(graced.too_young >= 1, "the fresh orphans must count as too_young");
+
+    // Now well past the horizon: the two orphans are reclaimed, the live set is not.
+    let horizon = prism_part::catalog::GC_HORIZON_MS;
+    let aged = engine
+        .reconcile_remote_orphans(1, now_ms + horizon + 60_000, false)
+        .unwrap();
+    assert!(
+        aged.removed.contains(&"parts/p99999999-orphanaaaa/rerank.vec".to_string()),
+        "the orphan cold tier was not reclaimed: {:?}",
+        aged.removed
+    );
+    assert!(
+        aged.removed.contains(&"catalog/SNAPSHOT-s00000099".to_string()),
+        "the stale mirror snapshot was not reclaimed: {:?}",
+        aged.removed
+    );
+    // The live mirror snapshot and every referenced cold tier survived.
+    assert!(
+        !aged.removed.iter().any(|k| k == &format!("catalog/SNAPSHOT-{live_snapshot}")),
+        "reconciliation swept the LIVE mirror snapshot — recovery target destroyed"
+    );
+    for id in &live_parts {
+        let key = format!("parts/{id}/rerank.vec");
+        assert!(!aged.removed.contains(&key), "a live cold tier was reclaimed: {key}");
+        assert!(
+            probe.head(&key).unwrap().is_some(),
+            "a referenced part's cold tier is gone from MinIO after reconciliation: {key}"
+        );
+    }
+    assert_eq!(aged.protected_parts, live_parts.len());
+    assert!(aged.protected_mirrors >= 1);
+
+    // The store still answers — reconciliation touched no live byte.
+    assert!(!top_ids(&engine).is_empty());
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 fn store_cfg() -> StoreConfig {
     StoreConfig {
         format_version: STORE_VERSION,

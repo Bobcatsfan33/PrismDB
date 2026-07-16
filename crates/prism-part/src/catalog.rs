@@ -515,15 +515,19 @@ impl<'a> Catalog<'a> {
     /// grace horizon, so a reader within its lease always finds its parts. A reader that holds a
     /// cursor past its lease is *expired*, and its stale cursor gets the explicit expired-snapshot
     /// error ([query contract §2](../../../docs/QUERY-CONTRACT.md)), never a wrong answer.
-    pub fn gc_at(&self, retain_snapshots: usize, now_ms: i64, dry_run: bool) -> Result<GcReport> {
+    /// The snapshots GC retains at `(retain_snapshots, now_ms)` and the part ids they reference —
+    /// the live set any reclaimer must protect. Extracted so **local GC** ([`gc_at`]) and **remote
+    /// orphan reconciliation** share one definition of "live": a snapshot is kept if it is one of the
+    /// newest `retain_snapshots`, the live one, or younger than [`GC_HORIZON_MS`] (the reader-lease
+    /// horizon, invariant 6). A remote object — a part's cold tier or a catalog mirror snapshot — is
+    /// an orphan only if the snapshot that would protect it is *not* in this set.
+    pub fn retained(&self, retain_snapshots: usize, now_ms: i64) -> Result<Retained> {
         let retain = retain_snapshots.max(1);
         let current = self.current()?;
         let all_snaps = self.list_snapshots()?;
 
-        // Keep the newest `retain` snapshots, always the live one, and — the lease clause — any
-        // snapshot younger than the lease-plus-grace horizon, so a live reader is never orphaned.
         let horizon_floor = now_ms.saturating_sub(GC_HORIZON_MS);
-        let mut keep_snaps: BTreeSet<String> = all_snaps
+        let mut snapshots: BTreeSet<String> = all_snaps
             .iter()
             .rev()
             .take(retain)
@@ -531,23 +535,33 @@ impl<'a> Catalog<'a> {
             .chain(std::iter::once(current.snapshot_id.clone()))
             .collect();
         for id in &all_snaps {
-            if keep_snaps.contains(id) {
+            if snapshots.contains(id) {
                 continue;
             }
             if let Ok(s) = self.load_snapshot(id) {
                 if s.created_at_ms > horizon_floor {
-                    keep_snaps.insert(id.clone());
+                    snapshots.insert(id.clone());
                 }
             }
         }
 
-        // Anything a retained snapshot names is live and must not be touched.
-        let mut referenced: BTreeSet<String> = BTreeSet::new();
-        for id in &keep_snaps {
+        let mut parts: BTreeSet<String> = BTreeSet::new();
+        for id in &snapshots {
             if let Ok(s) = self.load_snapshot(id) {
-                referenced.extend(s.part_ids());
+                parts.extend(s.part_ids());
             }
         }
+        Ok(Retained { snapshots, parts })
+    }
+
+    pub fn gc_at(&self, retain_snapshots: usize, now_ms: i64, dry_run: bool) -> Result<GcReport> {
+        let all_snaps = self.list_snapshots()?;
+        // The retained snapshots and the parts they reference — the one definition of "live",
+        // shared with remote-orphan reconciliation so the two reclaimers cannot drift apart.
+        let Retained {
+            snapshots: keep_snaps,
+            parts: referenced,
+        } = self.retained(retain_snapshots, now_ms)?;
 
         let mut removed_parts = Vec::new();
         let mut removed_snapshots = Vec::new();
@@ -614,6 +628,14 @@ impl<'a> Catalog<'a> {
             generations_verified: generations.into_iter().collect(),
         })
     }
+}
+
+/// The live set at a GC point: the retained snapshot ids and the part ids they reference. Both
+/// local GC and remote-orphan reconciliation protect exactly this (one definition, never two).
+#[derive(Clone, Debug, Default)]
+pub struct Retained {
+    pub snapshots: BTreeSet<String>,
+    pub parts: BTreeSet<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

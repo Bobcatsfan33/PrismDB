@@ -9,7 +9,7 @@
 //! semantics (conditional-put, ranged 206, XML shape) are verified end-to-end against a real MinIO
 //! server in CI; there is **no mock of S3 behavior** anywhere in the gate path (storage contract §1).
 
-use super::object::ObjectStore;
+use super::object::{ObjectMeta, ObjectStore};
 use super::sigv4::{self, Credentials};
 use prism_types::error::{PrismError, Result};
 use std::io::{Read, Write};
@@ -165,6 +165,95 @@ pub fn parse_list_xml(body: &[u8]) -> Vec<String> {
         }
     }
     keys
+}
+
+/// Extract `(key, size, last-modified-ms)` from each `<Contents>` of a `ListBucketResult` — the
+/// fields age-aware reconciliation needs. Still a small scanner over the exact fields S3/MinIO
+/// return, not a full XML parser (same scope guard as [`parse_list_xml`]). A `<Contents>` whose
+/// `LastModified` does not parse is skipped rather than assigned a wrong age — an unparseable time
+/// must never make a live object look old enough to sweep.
+pub fn parse_list_xml_meta(body: &[u8]) -> Vec<(String, u64, i64)> {
+    let s = String::from_utf8_lossy(body);
+    let mut out = Vec::new();
+    let mut rest = s.as_ref();
+    while let Some(start) = rest.find("<Contents>") {
+        let after = &rest[start + "<Contents>".len()..];
+        let end = match after.find("</Contents>") {
+            Some(e) => e,
+            None => break,
+        };
+        let block = &after[..end];
+        rest = &after[end + "</Contents>".len()..];
+        let (Some(key), Some(lm)) = (
+            inner_tag(block, "Key").map(|v| xml_unescape(&v)),
+            inner_tag(block, "LastModified"),
+        ) else {
+            continue;
+        };
+        let size = inner_tag(block, "Size")
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(0);
+        if let Some(ms) = epoch_ms_from_iso8601(&lm) {
+            out.push((key, size, ms));
+        }
+    }
+    out
+}
+
+fn inner_tag(block: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = block.find(&open)? + open.len();
+    let end = block[start..].find(&close)? + start;
+    Some(block[start..end].to_string())
+}
+
+/// Parse an S3 `LastModified` (`YYYY-MM-DDThh:mm:ss(.fff)?Z`, UTC) to epoch milliseconds. Returns
+/// `None` on any shape it does not recognise — the caller then skips that object rather than sweep
+/// it on a guessed age.
+pub fn epoch_ms_from_iso8601(s: &str) -> Option<i64> {
+    let s = s.trim();
+    let bytes = s.as_bytes();
+    if bytes.len() < 19 || bytes[4] != b'-' || bytes[7] != b'-' || bytes[10] != b'T' {
+        return None;
+    }
+    let y: i64 = s[0..4].parse().ok()?;
+    let mo: u32 = s[5..7].parse().ok()?;
+    let d: u32 = s[8..10].parse().ok()?;
+    let h: i64 = s[11..13].parse().ok()?;
+    let mi: i64 = s[14..16].parse().ok()?;
+    let sec: i64 = s[17..19].parse().ok()?;
+    if !(1..=12).contains(&mo) || !(1..=31).contains(&d) {
+        return None;
+    }
+    // Fractional seconds, if present (`.fff`), to milliseconds.
+    let millis: i64 = if bytes.get(19) == Some(&b'.') {
+        let frac: String = s[20..].chars().take_while(|c| c.is_ascii_digit()).collect();
+        let mut f = frac;
+        f.truncate(3);
+        while f.len() < 3 {
+            f.push('0');
+        }
+        f.parse().unwrap_or(0)
+    } else {
+        0
+    };
+    let days = days_from_civil(y, mo, d);
+    let secs = days * 86400 + h * 3600 + mi * 60 + sec;
+    Some(secs * 1000 + millis)
+}
+
+/// Days since the Unix epoch for a civil (proleptic Gregorian) date — the inverse of
+/// [`civil_from_epoch`]'s date half (Howard Hinnant's `days_from_civil`).
+fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let m = m as i64;
+    let d = d as i64;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe - 719468
 }
 
 fn xml_unescape(s: &str) -> String {
@@ -486,6 +575,26 @@ impl ObjectStore for S3ObjectStore {
             s => Err(PrismError::Io(format!("LIST returned HTTP {s}"))),
         }
     }
+
+    fn list_meta(&self, prefix: &str) -> Result<Vec<ObjectMeta>> {
+        let path = format!(
+            "/{}?list-type=2&prefix={}",
+            self.cfg.bucket,
+            sigv4::uri_encode(prefix, false)
+        );
+        let r = self.send("GET", &path, &[], b"")?;
+        match r.status {
+            200 => Ok(parse_list_xml_meta(&r.body)
+                .into_iter()
+                .map(|(key, size, last_modified_ms)| ObjectMeta {
+                    key,
+                    size,
+                    last_modified_ms,
+                })
+                .collect()),
+            s => Err(PrismError::Io(format!("LIST returned HTTP {s}"))),
+        }
+    }
 }
 
 fn now_amz_date() -> String {
@@ -534,6 +643,45 @@ mod tests {
             },
             fixed_amz_date: Some("20150830T123600Z".into()),
         }
+    }
+
+    #[test]
+    fn iso8601_epoch_anchor_and_roundtrip() {
+        // Absolute anchor.
+        assert_eq!(epoch_ms_from_iso8601("1970-01-01T00:00:00Z"), Some(0));
+        // Fractional seconds → milliseconds.
+        assert_eq!(
+            epoch_ms_from_iso8601("1970-01-01T00:00:00.250Z"),
+            Some(250)
+        );
+        // Inverse of civil_from_epoch across a wide span of dates.
+        for secs in [1u64, 1_000_000, 1_440_938_160, 1_760_000_000, 4_102_444_800] {
+            let (y, mo, d, h, mi, s) = civil_from_epoch(secs);
+            let iso = format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z");
+            assert_eq!(
+                epoch_ms_from_iso8601(&iso),
+                Some(secs as i64 * 1000),
+                "roundtrip failed for {iso}"
+            );
+        }
+        // Unparseable shapes yield None rather than a wrong (sweepable) age.
+        assert_eq!(epoch_ms_from_iso8601("not-a-date"), None);
+        assert_eq!(epoch_ms_from_iso8601("2026/07/16 20:10:10"), None);
+    }
+
+    #[test]
+    fn parses_list_contents_with_size_and_time() {
+        let body = br#"<?xml version="1.0"?><ListBucketResult>
+          <Contents><Key>parts/a/rerank.vec</Key><LastModified>2026-07-16T20:10:10.000Z</LastModified><Size>512</Size></Contents>
+          <Contents><Key>catalog/SNAPSHOT-s00000003</Key><LastModified>2026-07-16T20:11:00Z</LastModified><Size>2048</Size></Contents>
+        </ListBucketResult>"#;
+        let got = parse_list_xml_meta(body);
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].0, "parts/a/rerank.vec");
+        assert_eq!(got[0].1, 512);
+        assert_eq!(got[0].2, epoch_ms_from_iso8601("2026-07-16T20:10:10.000Z").unwrap());
+        assert_eq!(got[1].0, "catalog/SNAPSHOT-s00000003");
+        assert_eq!(got[1].1, 2048);
     }
 
     #[test]

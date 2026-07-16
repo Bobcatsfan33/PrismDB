@@ -13,9 +13,43 @@
 
 use super::COLD_FETCH_MAX_RETRIES;
 use crate::engine::Engine;
+use prism_part::catalog::GC_HORIZON_MS;
 use prism_part::format::{self, FRAME_HEADER_BYTES};
 use prism_part::part::{ColumnStorage, PartReader};
 use prism_types::error::{PrismError, Result};
+
+/// The remote key of a part's cold tier (`parts/<id>/rerank.vec`), or a catalog mirror snapshot
+/// (`catalog/SNAPSHOT-<snapshot_id>`, the scheme [D-069](../../../../docs/DECISIONS.md)'s mirror
+/// writes). What reconciliation reclaims against the live set.
+const COLD_TIER_FILE: &str = "rerank.vec";
+const MIRROR_SNAPSHOT_PREFIX: &str = "catalog/SNAPSHOT-";
+
+/// What a remote-orphan reconciliation pass did.
+#[derive(Clone, Debug, Default)]
+pub struct ReconcileReport {
+    pub dry_run: bool,
+    /// Keys reclaimed (absent from the live set and older than the reader-lease horizon).
+    pub removed: Vec<String>,
+    /// Live cold-tier objects a retained snapshot references — left untouched.
+    pub protected_parts: usize,
+    /// Live catalog mirror snapshots within the recovery depth — left untouched.
+    pub protected_mirrors: usize,
+    /// Objects absent from the live set but younger than the horizon (an in-flight publication):
+    /// graced, not swept.
+    pub too_young: usize,
+}
+
+/// The part id of a `parts/<id>/rerank.vec` key, if the key is a cold-tier object.
+fn cold_tier_part_of(key: &str) -> Option<&str> {
+    let rest = key.strip_prefix("parts/")?;
+    let (id, tail) = rest.split_once('/')?;
+    (tail == COLD_TIER_FILE).then_some(id)
+}
+
+/// The snapshot id a `catalog/SNAPSHOT-<id>` mirror key names, if the key is a mirror snapshot.
+fn mirror_snapshot_of(key: &str) -> Option<&str> {
+    key.strip_prefix(MIRROR_SNAPSHOT_PREFIX)
+}
 
 impl Engine {
     /// Fetch the exact vectors for `rows` of `reader`'s part through the cold-tier object store and
@@ -88,6 +122,68 @@ impl Engine {
             }
         }
         Ok(n)
+    }
+
+    /// Reconcile the object-store listing against the live set — the **remote analogue of local GC**
+    /// ([storage §2](../../../../docs/STORAGE-CONTRACT.md)). It reclaims a remote object only when it
+    /// is BOTH absent from the live set (no retained snapshot references the part, or the mirror
+    /// snapshot is past the recovery depth) AND older than the reader-lease horizon
+    /// ([`GC_HORIZON_MS`]) — so a just-uploaded cold tier whose publication commit has not yet landed
+    /// is graced, never swept, and a catalog mirror snapshot the recovery path could need is
+    /// protected exactly as a reader's snapshot is (invariant 6, by construction). An object under
+    /// neither recognised scheme is never touched: reconciliation reclaims only what it positively
+    /// knows to be an orphan.
+    ///
+    /// Publication never deletes as it goes (a retried upload could race a live object); reclaiming
+    /// orphans is *only* this pass's job, exactly as local GC — never the writer — reclaims a `.tmp`.
+    pub fn reconcile_remote_orphans(
+        &self,
+        retain_snapshots: usize,
+        now_ms: i64,
+        dry_run: bool,
+    ) -> Result<ReconcileReport> {
+        let live = self.catalog().retained(retain_snapshots, now_ms)?;
+        let backend = self.cold.backend();
+
+        let mut objects = backend.list_meta("parts/")?;
+        objects.extend(backend.list_meta("catalog/")?);
+
+        let mut report = ReconcileReport {
+            dry_run,
+            ..Default::default()
+        };
+        for obj in objects {
+            let protected = if let Some(id) = cold_tier_part_of(&obj.key) {
+                let live_part = live.parts.contains(id);
+                report.protected_parts += live_part as usize;
+                live_part
+            } else if let Some(sid) = mirror_snapshot_of(&obj.key) {
+                let live_mirror = live.snapshots.contains(sid);
+                report.protected_mirrors += live_mirror as usize;
+                live_mirror
+            } else {
+                // Neither a cold tier nor a mirror snapshot: never sweep the unrecognised.
+                true
+            };
+            if protected {
+                continue;
+            }
+
+            // Absent from the live set — but an object younger than the horizon may be an in-flight
+            // publication whose commit is about to reference it. Grace it, exactly as GC would not
+            // reclaim a snapshot within a reader's lease.
+            if now_ms.saturating_sub(obj.last_modified_ms) <= GC_HORIZON_MS {
+                report.too_young += 1;
+                continue;
+            }
+
+            report.removed.push(obj.key.clone());
+            if !dry_run {
+                backend.delete(&obj.key)?;
+            }
+        }
+        report.removed.sort();
+        Ok(report)
     }
 
     /// Publish one part's cold tier to the object-store backend **durably, before the catalog

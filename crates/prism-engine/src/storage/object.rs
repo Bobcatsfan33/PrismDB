@@ -39,6 +39,25 @@ pub trait ObjectStore: Send + Sync {
     /// Every key under `prefix` — GC lists the remote to reconcile orphans against the referenced
     /// set (storage contract §2).
     fn list(&self, prefix: &str) -> Result<Vec<String>>;
+    /// Every object under `prefix` with its size and last-modified time (epoch ms). Age-aware
+    /// orphan reconciliation needs the modification time — a just-uploaded object whose commit has
+    /// not yet landed must not be swept — which plain [`list`](Self::list) cannot give. Backends
+    /// that cannot report a modification time inherit the default, which refuses by name rather than
+    /// guessing an age (a wrong age would sweep a live object).
+    fn list_meta(&self, _prefix: &str) -> Result<Vec<ObjectMeta>> {
+        Err(PrismError::Invalid(
+            "this object store does not report object modification times (list_meta unsupported)"
+                .into(),
+        ))
+    }
+}
+
+/// One object's reconcilable metadata: its key, size, and last-modified time (epoch ms).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ObjectMeta {
+    pub key: String,
+    pub size: u64,
+    pub last_modified_ms: i64,
 }
 
 // --- the local backend -----------------------------------------------------------------------
@@ -152,6 +171,24 @@ impl ObjectStore for LocalObjectStore {
         out.sort();
         Ok(out)
     }
+
+    fn list_meta(&self, prefix: &str) -> Result<Vec<ObjectMeta>> {
+        let mut out = Vec::new();
+        for key in self.list(prefix)? {
+            let m = std::fs::metadata(self.path(&key))?;
+            let last_modified_ms = m
+                .modified()?
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            out.push(ObjectMeta {
+                key,
+                size: m.len(),
+                last_modified_ms,
+            });
+        }
+        Ok(out)
+    }
 }
 
 fn list_rec(root: &Path, dir: &Path, out: &mut Vec<String>) -> Result<()> {
@@ -249,6 +286,10 @@ impl ObjectStore for FaultStore {
     fn list(&self, prefix: &str) -> Result<Vec<String>> {
         self.gate()?;
         self.inner.list(prefix)
+    }
+    fn list_meta(&self, prefix: &str) -> Result<Vec<ObjectMeta>> {
+        self.gate()?;
+        self.inner.list_meta(prefix)
     }
 }
 
