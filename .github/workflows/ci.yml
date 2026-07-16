@@ -343,27 +343,24 @@ jobs:
   s3-minio:
     name: the S11 MinIO gate — hand-rolled S3 client vs a real S3 server
     runs-on: ubuntu-latest
-    services:
-      minio:
-        image: bitnami/minio:latest
-        ports:
-          - 9000:9000
-        env:
-          MINIO_ROOT_USER: minioadmin
-          MINIO_ROOT_PASSWORD: minioadmin
-          MINIO_DEFAULT_BUCKETS: prism
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # Wait for MinIO to be live (the runner has curl; the service image may not).
-      - name: wait for MinIO
+      # Run the official MinIO as a background container (a `services:` block cannot override the
+      # server command, and the bitnami image's distribution is unreliable). Wait for health, then
+      # create the bucket with `mc`.
+      - name: start MinIO + create bucket
         run: |
+          docker run -d --name minio -p 9000:9000 \
+            -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
+            minio/minio:latest server /data
           for i in $(seq 1 40); do
-            if curl -sf http://127.0.0.1:9000/minio/health/live; then echo "minio up"; exit 0; fi
+            curl -sf http://127.0.0.1:9000/minio/health/live && break
             sleep 2
           done
-          echo "minio did not come up" >&2; exit 1
+          docker run --rm --network host --entrypoint sh minio/mc:latest -c \
+            "mc alias set local http://127.0.0.1:9000 minioadmin minioadmin && mc mb --ignore-existing local/prism"
       # The hand-rolled S3 client (SigV4-signed HTTP/1.1) against a REAL S3 server — no mock in the
       # path (storage contract §1): round-trip, ranged get, CAS create race (D-066/D-067), capability
       # check. This is the gate that flips S11 from 🟡 to ✅ when green.
