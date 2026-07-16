@@ -100,11 +100,14 @@ pub fn bind(stmt: Select, session: &Session) -> Result<Plan> {
     }
     for g in &stmt.group_by {
         check_column(g)?;
-        if g == "score" {
+        if g == "score" || g == "semantic_cluster" {
             return Err(PrismError::Invalid(
-                "cannot GROUP BY score: it is a float computed per query, and grouping on it \
-                 would produce one group per row. Semantic grouping — GROUP BY meaning — is \
-                 S9."
+                "cannot GROUP BY score or semantic_cluster in SQL yet. Semantic grouping — GROUP \
+                 BY meaning — is built and gated at the engine level in S9 (Engine::semantic_cluster, \
+                 with NOVELTY/SEMANTIC_DIFF alongside it); its determinism, ordering, bounding and \
+                 exemplar rules are the query contract §15–§18. The SQL *keyword* surface for it is \
+                 the next increment, deferred exactly as S8 deferred the Flight wire transport — the \
+                 semantics ship first, the grammar follows."
                 .into(),
             ));
         }
@@ -284,6 +287,9 @@ mod tests {
         let e = plan("SELECT count(*) FROM events GROUP BY score")
             .unwrap_err()
             .to_string();
-        assert!(e.contains("one group per row"), "{e}");
+        assert!(
+            e.contains("GROUP BY meaning") && e.contains("engine level"),
+            "{e}"
+        );
     }
 }

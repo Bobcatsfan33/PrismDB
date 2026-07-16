@@ -222,6 +222,39 @@ pub fn constants() -> Vec<Constant> {
             value: prism_types::MAX_EMBED_INPUT_BYTES as i64,
             kind: Kind::Policy,
         },
+        // --- S9: the semantic aggregate. Policy, bound by the ARI/novelty gate tests and the
+        // frozen corpus (a receipt that is a committed test, not a stopwatch). ---
+        Constant {
+            name: "MAX_SEMANTIC_K",
+            value: crate::cluster::MAX_SEMANTIC_K as i64,
+            kind: Kind::Policy,
+        },
+        Constant {
+            name: "SEMANTIC_STATE_BUDGET_BYTES",
+            value: crate::cluster::SEMANTIC_STATE_BUDGET_BYTES as i64,
+            kind: Kind::Policy,
+        },
+        Constant {
+            name: "SEMANTIC_MINIBATCH_SIZE",
+            value: crate::cluster::SEMANTIC_MINIBATCH_SIZE as i64,
+            kind: Kind::Policy,
+        },
+        Constant {
+            name: "SEMANTIC_MINIBATCH_EPOCHS",
+            value: crate::cluster::SEMANTIC_MINIBATCH_EPOCHS as i64,
+            kind: Kind::Policy,
+        },
+        Constant {
+            name: "SEMANTIC_MINIBATCH_RESTARTS",
+            value: crate::cluster::SEMANTIC_MINIBATCH_RESTARTS as i64,
+            kind: Kind::Policy,
+        },
+        Constant {
+            // Stored x1000 because the ledger holds integers and the floor is 0.25.
+            name: "CLUSTER_CONFIDENCE_MIN_X1000",
+            value: (crate::cluster::CLUSTER_CONFIDENCE_MIN * 1000.0).round() as i64,
+            kind: Kind::Policy,
+        },
     ]
 }
 

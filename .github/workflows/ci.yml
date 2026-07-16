@@ -235,6 +235,24 @@ jobs:
       # The device FFI must still compile behind its feature (it is not run -- no device).
       - run: cargo build -p prism-engine --features cuda
 
+  cluster:
+    name: the S9 gate — semantic_cluster is a function of the data (C-7)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # semantic_cluster: identical clusters/exemplars/aggregates across layouts and forced
+      # plan/route flips (C-7); ARI >= 0.8 on the frozen labeled corpus incl. the adversarial
+      # shapes, with uniform noise asserted LOW-confidence; k over the cap is a named refusal;
+      # exemplars are a C-4 selection on the exact score; partial states merge in canonical order.
+      - run: cargo test --release -p prism-cli --test cluster -- --nocapture
+      # NOVELTY / SEMANTIC_DIFF: injected-novelty precision AND recall >= 0.9 on the WORST seeded
+      # class (the tail), semantic-diff surfaces new behaviour, cross-space novelty is refused.
+      - run: cargo test --release -p prism-cli --test novelty -- --nocapture
+      - run: cargo test --release -p prism-engine --lib cluster -- --nocapture
+      - run: cargo test --release -p prism-quantizer --lib kmeans -- --nocapture
+
   fp16-contract:
     name: the fp16 rerank accuracy contract holds (D-049)
     runs-on: ubuntu-latest

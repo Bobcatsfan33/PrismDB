@@ -200,3 +200,49 @@ A store mid-migration holds parts in more than one generation, and possibly more
 ## 14. EXPLAIN carries estimates *and* actuals
 
 `EXPLAIN` reports, for all four controls (`nprobe`, candidate width, rerank width, `k`) and for bytes / parts / ranges: the optimizer's **estimate** and the query's **actual**, plus the chosen route and plan **with the reason** — the receipt id and the threshold that decided it. The estimate-vs-actual error is tracked across the selectivity matrix in CI (the calibration harness), so cost-model drift is a visible number, not a slow surprise. An optimizer that cannot say *why* it chose a plan is an optimizer nobody can debug.
+
+# The semantic-aggregate edition (S9)
+
+**Status:** S9 owns `GROUP BY semantic_cluster(embedding, k)` — grouping by *meaning* over an arbitrarily large filtered set — and the two primitives `NOVELTY(embedding) AGAINST (baseline)` and `SEMANTIC_DIFF(a, b, k)`. Everything below **extends** §1–§14 and may not contradict them; the determinism of the clustering itself is the [determinism contract §13–§15](DETERMINISM-CONTRACT.md). Every S9 gate test cites the clause it exercises.
+
+The semantics below are **built and gated at the engine level** (`Engine::semantic_cluster`, `Engine::novelty_against`, `Engine::semantic_diff`), where correctness lives. The SQL *keyword* grammar that spells them (`GROUP BY semantic_cluster(...)`, `NOVELTY ... AGAINST`, `SEMANTIC_DIFF`) is the next increment — deferred exactly as S8 deferred the Flight wire transport, and for the same reason: the semantics ship first and are proven, the surface that types them follows. The clauses here are written in that grammar because the grammar is the destination; they bind the semantics regardless of which door reaches them.
+
+## 15. A cluster id is query-scoped and ephemeral; the stable output is the exemplar and the stats
+
+A `semantic_cluster` result is *k* groups, and each carries a small integer `cluster_id`. **That id is scoped to the one query that produced it and means nothing outside it.** It is not a stable identifier for "the errors cluster" across two queries, two days, or two `k` values — cluster the same rows tomorrow with `k+1` and every id may land on different meaning. Treating it as stable is the mistake §2 warns about for cursors, one level up.
+
+> The **stable, comparable** output of a cluster is its **exemplar** (a real `event_id`, §16's most-central event) and its **statistics** (count, `avg(cost)`, `countIf(error)`, …). Those are functions of the data. Two queries that want to be compared compare exemplars and stats, never raw cluster ids.
+
+This is why the ids are assigned *last*, deterministically, from the group order (§16): they are a presentation convenience, not an identity. A caller who needs a durable label builds it from the exemplar's `event_id`.
+
+## 16. Group ordering is deterministic — size, then exemplar identity
+
+The groups of a `semantic_cluster` result are returned in a total order, fixed by the contract, never by hash-map iteration or cluster-fit accident:
+
+> **`ORDER BY count DESC, exemplar.event_id ASC`.** Largest cluster first; ties in size broken on the exemplar's `event_id` ascending.
+
+The size-descending rule puts the mass where a reader looks first; the `event_id` tie-break is [charter C-4](DECISIONS.md) again — when two clusters are the same size, the one whose exemplar has the smaller `event_id` comes first, so the order is a function of the data and identical across every layout, plan, and route. The ephemeral `cluster_id` (§15) is then just this order's index. `LIMIT` over a `semantic_cluster` result takes the first *n* groups *in this order* — the *n* biggest clusters — which is well-defined precisely because the order is.
+
+## 17. The aggregate is bounded before it runs — `k` and clustering state
+
+A `semantic_cluster` over a billion-row filtered set must not be a way to make the node allocate a billion rows' worth of clustering state. So the aggregate is bounded the way S2 bounded attributes — *before* the state exists, not after it OOMs:
+
+- **`k` is capped by policy** at `MAX_SEMANTIC_K` ([C-3](DECISIONS.md) policy bound, with its rationale in the registry). A query asking for more clusters than a human can read is refused with a **named limit**, not silently clamped — clamping would answer a different question than the one asked.
+- **Clustering state is budgeted and admission-controlled.** The state is `k` centroids plus per-cluster running aggregates plus a bounded exemplar selection; its size is `k`-bounded, *not* row-bounded (the rows stream through in mini-batches — §13 — and are never all resident as vectors). A query whose declared `k` and dimension would exceed `SEMANTIC_STATE_BUDGET_BYTES` is refused with a named limit **before** the first batch is read. A `semantic_cluster` never OOMs the node; it declines, the way ingest declines a tenant over quota (S2).
+
+## 18. `NOVELTY ... AGAINST` names its baseline, and a space mismatch is the invariant-9 error
+
+`NOVELTY(embedding) AGAINST (baseline)` scores each row by its distance to the nearest centroid of a **baseline snapshot** — a frozen, generation-scoped drift baseline ([D-038](DECISIONS.md)). `SEMANTIC_DIFF(a, b, k)` reports the clusters with mass in *b* and none in *a*. Both compare a row to *known structure*, and known structure lives in exactly one embedding space, so:
+
+- The clause **names its baseline generation explicitly**, or **defaults to the query's own generation.** A baseline is generation-scoped because a centroid is only a distance from vectors in its own space; a baseline built in `hash-embedder:v1` says nothing about a row embedded in `hash-embedder:v2`.
+- A `NOVELTY` whose baseline generation is a **different embedding space** than the rows it scores is the **invariant-9 error** — the same refusal §13 gives a cross-space ranking, because a cross-space *distance* is exactly as meaningless as a cross-space *score*. The message is written to teach, and names both spaces:
+
+  ```
+  this NOVELTY compares rows in hash-embedder:v2 against a baseline built in
+  hash-embedder:v1 — a distance between two embedding spaces is not a distance
+  (a cosine of 0.8 in one is not a cosine of 0.8 in the other). PrismDB will not
+  compute it. Either name a baseline in hash-embedder:v2, or rebuild the baseline
+  in this generation (`prism baseline build`).
+  ```
+
+- A baseline whose source generation was **redacted or retired out of retention** cannot be rebuilt, and the query does not silently score against a stale one: it is **DEGRADED, not silent** ([D-038](DECISIONS.md)) — the result carries the degraded state and the reason, exactly as `baselines_refresh` records it. A gate test drives the retention-expired path and asserts the query reports degraded rather than returning a confident wrong number.

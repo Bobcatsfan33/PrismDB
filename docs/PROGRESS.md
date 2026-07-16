@@ -13,7 +13,7 @@ Sprint gates from [PRISM.md](PRISM.md) Part IV. **A sprint is done when its gate
 | **S6** | CPU scan engine | bit/epsilon equivalence to the scalar oracle; zero heap allocation in the block loop | ✅ **complete** |
 | **S7** | GPU compressed scan + rerank | GPU meets recall/tolerance vs the CPU oracle; p99 bounded under saturation; speedups end-to-end | 🟡 **GPU-ready, GPU-off** — device-agnostic machinery built + tested against a CPU reference of the GPU route; the GPU gate is **not** claimed (no GPU runner) |
 | **S8** | Cost-based hybrid optimizer + full SQL semantics | SQL ≡ direct-executor results; fuzzing cannot bypass tenant policy; plan selection beats any fixed plan | ✅ **complete** |
-| S9 | Semantic GROUP BY at scale + novelty/drift | 100M-row filtered set < 10s single node; ARI ≥ 0.8 vs oracle; injected-novelty precision/recall ≥ 0.9 | ⬜ |
+| **S9** | Semantic GROUP BY at scale + novelty/drift | 100M-row filtered set < 10s single node; ARI ≥ 0.8 vs oracle; injected-novelty precision/recall ≥ 0.9 | 🟡 **semantics complete; 100M<10s not claimed** — ARI, determinism, merge-invariance, and injected-novelty precision/recall all gated; the scale gate is measured honestly and filed (D-062), like S7's GPU |
 | S10 | Merge scheduler + mutations under load | sustained ingest → steady part count and merge debt; kills during merge/delete never expose partial results | ⬜ |
 | S11 | Object storage + local cache | cold/warm/thrash SLOs; cache corruption repaired from remote; rerank fetch bytes bounded by the plan | ⬜ |
 | S12 | Shared-nothing distribution | near-linear scaling; declared snapshot consistency under faults; a lost shard is documented, never silent | ⬜ |
@@ -661,6 +661,29 @@ EXPLAIN carries estimates *and* actuals for the four controls plus the chosen ro
 
 ---
 
-## S9 — next
+## S9 — semantics complete; the 100M<10s gate is measured, not claimed
 
-**Semantic aggregation.** `GROUP BY` meaning, and novelty/drift, over an arbitrarily large *filtered set* — not the S0 top-k survivors, the flagship aggregate. The three-strategy machinery generalizes: an aggregate must be plan-invariant too, and the drift baselines S5 built are its inputs.
+**Gate:** *semantic `GROUP BY` over a 100M-row filtered set < 10s single node; ARI ≥ 0.8 vs oracle on labeled synthetics; partial-state merge property tests; injected-novelty precision/recall ≥ 0.9.* Contract first: [determinism contract §13–§15](DETERMINISM-CONTRACT.md), [query contract §15–§18](QUERY-CONTRACT.md), and charter **[C-7](DECISIONS.md)** were written before the clustering code.
+
+### 1. The randomized aggregate is a function of the data — the central gate
+
+`semantic_cluster` clusters an arbitrarily large *filtered set* by meaning, and a randomized algorithm is where determinism contracts usually die. **[C-7](DECISIONS.md)** closes the two new leaks: the PRNG is seeded from **content** — `SHA-256(sorted event_ids ‖ k ‖ generation)`, never a clock — and rows are consumed in **logical (`event_id`) order**, never scan order. The gate asserts **identical clusters, exemplars, and per-cluster aggregates** across two physical layouts *and* across forced plan-flips and route-flips (the S7/S8 controls turned on the aggregate). Exemplars are a **C-4 selection on the exact score** (a mislabeled cluster is a wrong answer a human reads), proven on the boundary-tie logic. Partial states **merge in canonical (shard-id) order**, and a property test asserts the *invariance* — the same partials in a scrambled order produce byte-identical aggregates — not merely correctness ([D-058](DECISIONS.md)/[D-061](DECISIONS.md)).
+
+### 2. ARI ≥ 0.8 against ground truth, including the shapes a demo would hide
+
+The oracle is **ground-truth labels**, not a reference clusterer — labeled synthetics are the exact answer sklearn would only estimate, and the charter forbids the dependency anyway ([D-059](DECISIONS.md)). The frozen corpus ([`testing/cluster/v1`](../testing/cluster/v1), C-2) carries the adversarial shapes: **balanced** (ARI 0.91), **Zipf-skewed sizes** (0.92), **touching boundaries** (0.83), and **uniform noise**, where the honest answer is asserted **low-confidence** (`quality = 1 − inertia_k/inertia_1` below the floor) rather than dressed up as `k` confident groups. The aggregate is **bounded before it runs** ([D-060](DECISIONS.md)): `k` over `MAX_SEMANTIC_K` and a working set over the state budget are **named refusals**, never a silent clamp or an OOM.
+
+### 3. Novelty and drift, accurate on the tail
+
+`NOVELTY … AGAINST` reuses the S5 drift baseline; `SEMANTIC_DIFF` is the aggregate asked a comparative question ([D-063](DECISIONS.md)). The injected-novelty benchmark holds **precision 0.96 and recall ≥ 0.9 on the worst seeded class** (the S1 tail lesson — a mean would hide the one novelty kind that gets missed), and a `NOVELTY` scoring rows against a baseline in another embedding space is the **invariant-9 refusal**, proven across a real v1→v2 re-embed.
+
+### 4. The 100M<10s gate is measured, not claimed — and the SQL surface is deferred
+
+**The honest wall, in S7's shape** ([D-062](DECISIONS.md)). The quality params that clear the ARI floor (5 restarts × 15 epochs) make the fit ~75 passes; at the measured **~10⁴ rows/s single-core** ([`semantic-cluster.json`](../testing/evidence/semantic-cluster.json)) that projects to ~10⁴ s for 100M — a ~1000× gap — so the gate is **not claimed**. What is built is the mechanism the target needs (bounded-state streaming fit, mergeable partials, deterministic answer); what is filed is the scale profile it does not tune this sprint (single-restart fit, PQ-code ADC assignment, SIMD, multi-core, streaming PQ-code fit). And the SQL *keyword* grammar (`GROUP BY semantic_cluster(…)`, `NOVELTY … AGAINST`, `SEMANTIC_DIFF`) is deferred like S8's Flight transport: the semantics ship first at the engine level and are gated, the surface that spells them follows ([D-063](DECISIONS.md)).
+
+### Findings
+
+- **The clustering oracle is better than the one PRISM named** — ground-truth labels are exact where sklearn would approximate, and they cost no dependency.
+- **A single k-means++ draw is a lottery** on this corpus (ARI 0.76); restarts make the fit a function of the data, the same lesson D-036 taught the codebook.
+- **A few synthetic novel classes collide into the baseline's hash buckets** (a 64-dim hash-embedder artifact) and are not actually novel; the benchmark injects the genuinely-far classes and records the caveat, because labelling a colliding class "novel" would benchmark the embedder, not the alarm.
+- **The 100M gate needs a scale profile, not a faster core** — the shipped quality params are ~1000× too slow for it, and no committed number supports a 10s claim, so none is made.

@@ -2,6 +2,8 @@
 
 pub mod admission;
 pub mod bench;
+pub mod cluster;
+pub mod cluster_corpus;
 pub mod corpus;
 pub mod drift;
 pub mod engine;
@@ -14,6 +16,7 @@ pub mod ingest;
 pub mod ingestor;
 pub mod merge;
 pub mod model;
+pub mod novelty;
 pub mod oracle;
 pub mod otlp;
 pub mod plan;

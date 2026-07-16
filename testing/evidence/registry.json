@@ -310,6 +310,42 @@
       "value": 15,
       "kind": "policy",
       "rationale": "The worst-cell regret bound (S8, directive 3): the chosen plan must be within 15% of the best fixed plan's actual cost in EVERY cell of the selectivity matrix, not on average. An optimizer that wins on average by losing badly in one cell is worse than a fixed heuristic for the customer in that cell. Measurement cannot pick this -- it is a statement of how much regret we are willing to ship. 15% is wide enough for a crude sampled selectivity estimate (directive 7) to meet, tight enough that a plainly-wrong choice fails the gate."
+    },
+    {
+      "name": "MAX_SEMANTIC_K",
+      "value": 256,
+      "kind": "policy",
+      "rationale": "docs/QUERY-CONTRACT.md#17 \u2014 the ceiling on k for GROUP BY semantic_cluster. A cluster result is read by a human; the exemplars are the product. Past a couple hundred groups it stops being an explanation and becomes a second dataset. A query asking for more is refused with a named limit, never silently clamped, because clamping answers a different question than the one asked. Measurement cannot pick this; it is a statement about what a person can read."
+    },
+    {
+      "name": "SEMANTIC_STATE_BUDGET_BYTES",
+      "value": 536870912,
+      "kind": "policy",
+      "rationale": "docs/QUERY-CONTRACT.md#17 \u2014 the clustering working-set budget. A semantic_cluster over a billion-row filtered set must decline, not OOM the node (the S2 lesson, bound the aggregate before it exists). A query whose (rows, dim, k) would exceed 512 MiB is refused with a named limit before the first vector is gathered. 512 MiB admits every corpus S9 clusters and refuses the sets that would need the streaming PQ-code fit filed for the distributed sprint."
+    },
+    {
+      "name": "SEMANTIC_MINIBATCH_SIZE",
+      "value": 4096,
+      "kind": "policy",
+      "rationale": "docs/DETERMINISM-CONTRACT.md#13 \u2014 rows per mini-batch in the k-means fit. A throughput/memory knob, not an optimum: large enough that per-batch overhead is amortized, small enough that the working set stays bounded. Because the fit accumulates in logical (event_id) order regardless of batch size, this changes memory and never the answer."
+    },
+    {
+      "name": "SEMANTIC_MINIBATCH_EPOCHS",
+      "value": 15,
+      "kind": "policy",
+      "rationale": "docs/QUERY-CONTRACT.md#15 \u2014 passes over the filtered set in the fit, chosen to clear the ARI>=0.8 floor on the frozen labeled corpus with margin. The gate test clustering_recovers_the_true_labels binds it: drop it too low and the ARI floor fails, so the committed test is the receipt. More epochs buy quality with linear cost; this is where the curve flattens on the corpus. Corpus-conditional."
+    },
+    {
+      "name": "SEMANTIC_MINIBATCH_RESTARTS",
+      "value": 5,
+      "kind": "policy",
+      "rationale": "docs/DECISIONS.md#d-036 \u2014 independent seeded restarts, keeping the lowest-inertia fit. A single k-means++ draw is a lottery (the defect D-036 killed once for the codebook); a single draw scored ARI 0.76 on the corpus and five clears the 0.8 floor. Each restart seed is derived from the content seed, so the choice stays a deterministic function of the data (C-7). The ARI gate binds it. Corpus-conditional."
+    },
+    {
+      "name": "CLUSTER_CONFIDENCE_MIN_X1000",
+      "value": 250,
+      "kind": "policy",
+      "rationale": "docs/QUERY-CONTRACT.md#17 \u2014 the cluster-quality floor (1 - inertia_k/inertia_1, x1000) below which a result is reported low-confidence. On the frozen corpus the no-structure shape scores ~0.13 and every labeled shape ~0.38-0.44, so the line at 0.25 sits with margin on both sides; the gate test no_structure_is_reported_low_confidence binds it. Corpus-conditional."
     }
   ]
 }

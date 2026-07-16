@@ -209,6 +209,175 @@ fn kmeans_once(
     Ok(centroids)
 }
 
+/// k-means++ seeding only — the `k` initial centroids, no Lloyd refinement.
+///
+/// Exposed so the mini-batch fit (S9's semantic aggregate) can seed the same way the codebook
+/// trainer does, then refine by streaming mini-batches instead of by full passes. Deterministic
+/// given `seed`: the D²-weighted draws come from a `seed`-initialized [`Rng`], and points are
+/// considered in the order the caller supplies them — which for S9 is **logical** (`event_id`)
+/// order, so the initialization is a function of the data, not of the layout ([C-7](../../../docs/DECISIONS.md)).
+pub fn kmeans_plusplus_init(
+    vectors: &[f32],
+    n: usize,
+    dim: usize,
+    k: usize,
+    seed: u64,
+) -> Result<Vec<f32>> {
+    if n == 0 {
+        return Err(PrismError::Invalid("cannot seed on zero vectors".into()));
+    }
+    if k == 0 {
+        return Err(PrismError::Invalid("k must be positive".into()));
+    }
+    if vectors.len() != n * dim {
+        return Err(PrismError::Invalid(format!(
+            "vector buffer is {} floats, expected {}",
+            vectors.len(),
+            n * dim
+        )));
+    }
+    let mut rng = Rng::new(seed);
+    let point = |i: usize| &vectors[i * dim..(i + 1) * dim];
+    let mut centroids = vec![0.0f32; k * dim];
+    let first = rng.below(n);
+    centroids[..dim].copy_from_slice(point(first));
+    let mut d2: Vec<f32> = (0..n).map(|i| l2_sq(point(i), point(first))).collect();
+    for c in 1..k {
+        let total: f64 = d2.iter().map(|&x| x as f64).sum();
+        let chosen = if total <= 0.0 {
+            c % n
+        } else {
+            let target = rng.next_f32() as f64 * total;
+            let mut acc = 0.0f64;
+            let mut pick = n - 1;
+            for (i, &w) in d2.iter().enumerate() {
+                acc += w as f64;
+                if acc >= target {
+                    pick = i;
+                    break;
+                }
+            }
+            pick
+        };
+        centroids[c * dim..(c + 1) * dim].copy_from_slice(point(chosen));
+        for (i, nearest) in d2.iter_mut().enumerate() {
+            let d = l2_sq(point(i), &centroids[c * dim..(c + 1) * dim]);
+            if d < *nearest {
+                *nearest = d;
+            }
+        }
+    }
+    Ok(centroids)
+}
+
+/// The nearest centroid to `v` among `k` centroids of width `dim`, ties broken on centroid index.
+/// The shared assignment rule for the mini-batch fit and its final labeling pass.
+pub fn nearest_centroid(v: &[f32], centroids: &[f32], k: usize, dim: usize) -> (usize, f32) {
+    let mut best = 0usize;
+    let mut best_d = f32::INFINITY;
+    for c in 0..k {
+        let d = l2_sq(v, &centroids[c * dim..(c + 1) * dim]);
+        if d < best_d {
+            best_d = d;
+            best = c;
+        }
+    }
+    (best, best_d)
+}
+
+/// Streaming (mini-batch) k-means (S9). Seeds with k-means++ ([`kmeans_plusplus_init`]) and then
+/// refines the centroids by streaming `vectors` in the **order given** — for S9 that is `event_id`
+/// order — in chunks of `batch_size`, for `epochs` passes. Each pass reassigns every point to its
+/// nearest centroid and recomputes each centroid as the **logical-order mean** of its assigned
+/// points; the per-center accumulators are the only state that persists across a pass, so the fit
+/// never holds more than a chunk of points beyond `k*dim` — it clusters a filtered set far larger
+/// than memory would hold as vectors, which full-batch [`kmeans`] cannot.
+///
+/// Deterministic given `(vectors order, seed, epochs)`: the sums accumulate in the supplied
+/// (logical) index order regardless of `batch_size`, so the float reductions are reproducible
+/// ([determinism contract §13](../../../docs/DETERMINISM-CONTRACT.md)) and `batch_size` changes
+/// memory, never the answer. Empty clusters re-seed from the worst-served point, deterministically.
+///
+/// Returns the centroids and the final **inertia** (sum of squared distances to the nearest
+/// centroid), which the caller turns into a cluster-quality signal — low inertia relative to the
+/// data's spread is real structure; near the spread is noise (the no-structure corpus).
+pub fn kmeans_minibatch(
+    vectors: &[f32],
+    n: usize,
+    dim: usize,
+    k: usize,
+    seed: u64,
+    batch_size: usize,
+    epochs: usize,
+) -> Result<(Vec<f32>, f64)> {
+    if k == 0 {
+        return Err(PrismError::Invalid("k must be positive".into()));
+    }
+    if n == 0 {
+        return Err(PrismError::Invalid("cannot cluster zero vectors".into()));
+    }
+    if vectors.len() != n * dim {
+        return Err(PrismError::Invalid(format!(
+            "vector buffer is {} floats, expected {}",
+            vectors.len(),
+            n * dim
+        )));
+    }
+    let k = k.min(n);
+    let point = |i: usize| &vectors[i * dim..(i + 1) * dim];
+    let batch = batch_size.max(1);
+
+    let mut centroids = kmeans_plusplus_init(vectors, n, dim, k, seed)?;
+
+    for _ in 0..epochs.max(1) {
+        // Per-center accumulators for this pass, reset each epoch. The running distance to the
+        // nearest centroid feeds the empty-cluster re-seed.
+        let mut sums = vec![0.0f64; k * dim];
+        let mut counts = vec![0usize; k];
+        let mut worst_d = 0.0f32;
+        let mut worst_i = 0usize;
+        let mut changed = false;
+        let mut start = 0usize;
+        while start < n {
+            let end = (start + batch).min(n);
+            for i in start..end {
+                let (c, d) = nearest_centroid(point(i), &centroids, k, dim);
+                counts[c] += 1;
+                let p = point(i);
+                for j in 0..dim {
+                    sums[c * dim + j] += p[j] as f64;
+                }
+                if d > worst_d {
+                    worst_d = d;
+                    worst_i = i;
+                }
+            }
+            start = end;
+        }
+        for c in 0..k {
+            if counts[c] > 0 {
+                for j in 0..dim {
+                    let m = (sums[c * dim + j] / counts[c] as f64) as f32;
+                    if m != centroids[c * dim + j] {
+                        changed = true;
+                    }
+                    centroids[c * dim + j] = m;
+                }
+            } else {
+                // Re-seed the empty cluster from the point currently worst-served.
+                centroids[c * dim..(c + 1) * dim].copy_from_slice(point(worst_i));
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    let inertia = inertia(vectors, n, dim, &centroids, k);
+    Ok((centroids, inertia))
+}
+
 /// The coarse (IVF) centroids: the resident index that prunes the scan.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct CoarseCodebook {
@@ -350,5 +519,33 @@ mod tests {
     fn rejects_malformed_training_input() {
         assert!(kmeans(&[], 0, 4, 2, 5, 1).is_err());
         assert!(kmeans(&[1.0, 2.0], 5, 4, 2, 5, 1).is_err());
+    }
+
+    #[test]
+    fn minibatch_is_deterministic_and_order_faithful() {
+        let (v, labels) = blobs(30, 6, 9);
+        let n = labels.len();
+        let a = kmeans_minibatch(&v, n, 6, 3, 42, 16, 8).unwrap();
+        let b = kmeans_minibatch(&v, n, 6, 3, 42, 16, 8).unwrap();
+        assert_eq!(a.0, b.0, "same seed + same order must be byte-identical");
+        assert_eq!(a.1, b.1);
+    }
+
+    #[test]
+    fn minibatch_recovers_well_separated_blobs() {
+        let (v, labels) = blobs(40, 9, 2);
+        let n = labels.len();
+        let (centroids, _) = kmeans_minibatch(&v, n, 9, 3, 7, 32, 12).unwrap();
+        let assigned: Vec<usize> = (0..n)
+            .map(|i| nearest_centroid(&v[i * 9..(i + 1) * 9], &centroids, 3, 9).0)
+            .collect();
+        for b in 0..3 {
+            let idx: Vec<usize> = (0..n).filter(|&i| labels[i] == b).collect();
+            let first = assigned[idx[0]];
+            assert!(
+                idx.iter().all(|&i| assigned[i] == first),
+                "blob {b} was split across clusters"
+            );
+        }
     }
 }

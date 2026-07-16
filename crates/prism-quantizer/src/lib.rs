@@ -19,5 +19,7 @@ pub mod kmeans;
 pub mod pq;
 
 pub use kernel::{adc_scan, Isa};
-pub use kmeans::{kmeans, CoarseCodebook};
+pub use kmeans::{
+    kmeans, kmeans_minibatch, kmeans_plusplus_init, nearest_centroid, CoarseCodebook,
+};
 pub use pq::{AdcTable, PqCodebook, PQ_KSUB};

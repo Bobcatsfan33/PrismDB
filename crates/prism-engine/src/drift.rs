@@ -55,6 +55,13 @@ fn quantile() -> f64 {
     BASELINE_QUANTILE_PCT as f64 / 100.0
 }
 
+/// The fraction of *normal* traffic the baseline calibrates as novel (`1 − quantile`), i.e. the
+/// expected false-positive rate. An alarm fires at [`DRIFT_FIRE_MULTIPLE`] times this. Exposed so
+/// the S9 novelty primitive shares the exact firing rule, not a copy of it.
+pub fn quantile_fraction() -> f64 {
+    1.0 - quantile()
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DriftAlarm {
     pub tenant: String,

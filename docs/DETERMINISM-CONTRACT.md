@@ -134,3 +134,31 @@ And **device-memory admission is per tenant, and lands with the kernels, not aft
 Routing CPU-vs-GPU is a **measured** decision, not a heuristic: the thresholds (bytes to transfer, candidate width, selectivity, queue depth) are C-1 tuned constants with C-3 policy bounds, measured **end to end** — transfer, launch, selection, rerank — never kernel time, because a kernel-only number is a roofline and the charter forbids rooflines. The published matrix **includes where GPU loses** — a selective query with a small candidate set pays the upload and launch cost for a scan too short to amortize it, and loses; the honest matrix says so. And the quoted number is the **worst device's**, exactly as §7's is the worst ISA's.
 
 **In S7 these thresholds cannot be derived**, because deriving them requires measuring a GPU, and there is none. So the cost-model *mechanism* is built and the thresholds are constants marked **device-conditional and un-derived**, with the sweep filed to run the moment a runner exists. Charter **C-6** makes that re-derivation a standing obligation, not a hope.
+
+# The semantic-aggregate edition (S9)
+
+**Status:** written in S9, before the clustering code. S9 adds a *randomized* algorithm — k-means over PQ codes — to an engine whose every prior answer was a deterministic function of the data. A randomized algorithm is where determinism contracts usually die: a different seed, a different iteration order, a different reduction, and the clusters move. Everything below is how S9 refuses that. It is the **randomized-algorithm edition of [charter C-5](DECISIONS.md)** ([C-7](DECISIONS.md)): *the answer is a function of the data — not of a wall-clock seed, and not of the order the rows happened to be stored in.*
+
+## 13. `semantic_cluster` is a deterministic function of `(logical row set, k, generation)`
+
+> Cluster the **same rows** with the **same k** in the **same generation**, and get the **same clusters, the same exemplars, and the same per-cluster aggregates** — byte-identical — every time, on every layout, under every plan and route.
+
+Three things make a k-means result move, and each is nailed down:
+
+- **The seed.** The PRNG is **seeded from content**, never from a clock or a counter: `seed = SHA-256(sorted event_ids ‖ k ‖ generation)`. Two stores holding the same logical rows seed identically regardless of when or where they run; a store that gains or loses a row reseeds, because the row set *is* the input. There is no `Math.random()` anywhere near this — a wall-clock seed would make the answer a function of *when you asked*, which is exactly what C-5 forbids, one axis over.
+- **The initialization.** k-means++ over the decoded PQ centroids, using that seeded PRNG, with candidates considered in **logical (`event_id`) order** so the D²-weighted draw is reproducible. Lucky-init dependence is the bug [D-036](DECISIONS.md) already killed once for the codebook; the same discipline applies here.
+- **The order rows are consumed.** Mini-batches are drawn in **logical order** — sorted by `event_id` — **never in scan order.** Scan order is a fact about physical layout (which part, which block, which route fetched it); making the clusters depend on it would be [C-4](DECISIONS.md)/[C-5](DECISIONS.md) violated at the batch level. A row's contribution to a centroid update is a function of its identity and its position in the *sorted* set, not of where it lives.
+
+Float reductions inside the centroid update obey §1's rule — a centroid coordinate is an ascending sum in a fixed (logical) order, no FMA — so the model itself is bit-reproducible, not merely close. The gate asserts identical clusters/exemplars/aggregates across the layout-variant fixtures **and** across forced plan-flips and route-flips (the S8/S7 controls turned on the aggregate): the physical strategy that fetched the rows is invisible to the clustering, as it is to every other answer.
+
+## 14. The merge of distributed partial states is canonical-order, and that is a property, not a hope
+
+The aggregate is built to scale out ([PRISM.md](PRISM.md) S12) before it scales out: each partition produces a **partial state** — per cluster, a count, the scalar-aggregate sums (each accumulated in that partition's logical order), and a bounded exemplar-candidate selection — and the global answer is the **merge** of those partials.
+
+> Partials merge in **canonical order: sorted partition id.** The merge sorts its inputs before it combines them, so the *physical* order partials arrive in cannot change the result.
+
+This matters because a float sum is not associative: merging partition sums in arrival order would make `avg(cost)` a function of which partition's network packet landed first. So the merge is defined as a fixed fold over partition id ascending, and the **partial-state property test asserts merge-order invariance** directly — it presents the same partials in scrambled orders and requires byte-identical output, not merely *correct* output. Correctness a lenient test would accept; invariance is the actual contract, because it is what makes a distributed answer equal to a single-node one. (Distributed *model fit* — computing the centroids themselves from partials — is **not** in S9; S9 fits the model single-node and only the aggregate is partitioned-and-merged. The distributed fit is filed, not faked.)
+
+## 15. Exemplars are a C-4 bounded selection on the exact score
+
+An exemplar is the most-central *actual event* of a cluster, and choosing it is a **bounded selection**, so [charter C-4](DECISIONS.md) governs it exactly as it governs the top-k: **most-central by exact score, ties broken on `event_id` ascending, never on physical position.** And the score is the **exact** rerank distance to the centroid, never the PQ distance alone — a cluster is *labeled* by its exemplar, and a mislabeled cluster is a wrong answer a user reads and believes, worse than a slow one. The PQ code decides cluster membership (it is what the aggregate is cheap over); the exact vector decides the one event we put a name on. The gate proves the tie-break on the boundary-tie corpus, where two events are equidistant from a centroid and only the `event_id` rule keeps the exemplar stable across layouts.

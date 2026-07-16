@@ -1,0 +1,60 @@
+{
+  "_comment": [
+    "S9 semantic_cluster receipt. Two things it records: the clustering QUALITY (ARI vs",
+    "ground-truth labels on the frozen testing/cluster/v1 corpus) and the fit THROUGHPUT",
+    "(a single-core measurement, from which the 100M projection follows).",
+    "",
+    "Charter honesty: no performance claim without a committed reproducible benchmark, and a",
+    "roofline is labelled a roofline. The 100M-row < 10s single-node gate is NOT claimed at S9",
+    "(see scale_note) -- the same 'build the mechanism, measure honestly, do not claim the gate",
+    "you cannot meet on this rig' stance S7 took for the GPU."
+  ],
+  "corpus": "testing/cluster/v1",
+  "corpus_conditional": true,
+  "generation_conditional": true,
+  "true_clusters": 8,
+  "params": {
+    "minibatch_epochs": 15,
+    "minibatch_restarts": 5,
+    "minibatch_size": 4096,
+    "confidence_min_x1000": 250
+  },
+  "ari": {
+    "_rule": "ARI(clustering, ground-truth labels) on each frozen shape at the shipped params; the floor is 0.8 on every labeled shape, and noise is asserted low-confidence instead.",
+    "balanced": 0.911,
+    "zipf": 0.921,
+    "overlap": 0.834,
+    "floor": 0.8
+  },
+  "confidence_quality": {
+    "_rule": "quality = 1 - inertia_k/inertia_1. The no-structure shape must fall below CLUSTER_CONFIDENCE_MIN (0.25) and every labeled shape above it.",
+    "balanced": 0.438,
+    "zipf": 0.424,
+    "overlap": 0.383,
+    "noise": 0.135,
+    "threshold": 0.25
+  },
+  "novelty_benchmark": {
+    "_rule": "Injected-novelty precision AND recall on the WORST seeded class (the S1 tail lesson), against a baseline built on normal traffic. Floors 0.9.",
+    "precision": 0.96,
+    "worst_class_recall": 1.0,
+    "floor": 0.9,
+    "note": "Injected classes are the ones genuinely far from normal in this embedding space; a few synthetic token-namespaces collide into the baseline's hash buckets (a 64-dim hash-embedder artifact) and are not actually novel. Real embeddings (S13) do not have this pathology. Corpus-conditional."
+  },
+  "throughput": {
+    "_rule": "Single-core wall-clock for kmeans_minibatch at the shipped (restarts x epochs) quality params, on blobby dim-64 data. From bench_fit_throughput (cluster.rs), run --ignored.",
+    "rows": 100000,
+    "k": 8,
+    "dim": 64,
+    "seconds": 10.0,
+    "rows_per_sec": 9992,
+    "machine": "Apple Silicon aarch64, single core, debug-opt disabled note: measured in release"
+  },
+  "scale_note": {
+    "gate": "100M-row filtered set < 10s single node",
+    "claimed": false,
+    "projection_seconds_at_shipped_params": 10008,
+    "why": "The quality params (5 restarts x 15 epochs) that clear the ARI floor on the small corpus make the fit ~75 full passes; at ~1e4 rows/s single-core that is ~1e4 s for 100M, a ~1000x gap. The 100M target needs a SCALE profile the mechanism is built for but this sprint does not tune: single-restart + fewer-epoch fit, PQ-code ADC assignment (no exact-vector reconstruction), SIMD, and multi-core -- plus the streaming PQ-code fit that also removes the 512 MiB working-set bound. Filed, not faked.",
+    "filed": "scale profile + streaming PQ-code fit + distributed model-fit"
+  }
+}

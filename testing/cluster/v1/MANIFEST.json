@@ -1,0 +1,28 @@
+{
+  "created_in_sprint": "S9",
+  "current": "v1",
+  "generator": {
+    "rows": 1600,
+    "seed": 9,
+    "true_clusters": 8
+  },
+  "shapes": {
+    "balanced": {
+      "bytes": 137088,
+      "sha256": "266c25ddd240c67a"
+    },
+    "noise": {
+      "bytes": 141877,
+      "sha256": "2c6faac7182a3377"
+    },
+    "overlap": {
+      "bytes": 143771,
+      "sha256": "001a99189df6e262"
+    },
+    "zipf": {
+      "bytes": 137088,
+      "sha256": "dc779f6bb9686c79"
+    }
+  },
+  "why": "Labeled synthetic clusters — the ground-truth oracle for ARI (no sklearn; labels are the exact answer). Four shapes: balanced, zipf (unequal sizes), overlap (touching boundaries), noise (no structure -> low confidence)."
+}
