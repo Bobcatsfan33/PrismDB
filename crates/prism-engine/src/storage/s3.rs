@@ -49,17 +49,33 @@ impl HttpResponse {
 /// `Content-Length`. A truncated body (fewer bytes than `Content-Length`) is a **named** error, the
 /// same discipline the local reader has (storage §1).
 pub fn parse_response(buf: &[u8]) -> Result<HttpResponse> {
-    let split = find_subslice(buf, b"\r\n\r\n")
-        .ok_or_else(|| PrismError::Corrupt("HTTP response has no header terminator".into()))?;
+    // Skip any `HTTP/1.1 100 Continue\r\n\r\n` interstitial a server may send before the real
+    // response (some paths do, even without an `Expect` header).
+    let mut buf = buf;
+    loop {
+        let split = find_subslice(buf, b"\r\n\r\n")
+            .ok_or_else(|| PrismError::Corrupt("HTTP response has no header terminator".into()))?;
+        let is_continue = buf
+            .get(..split)
+            .and_then(|h| std::str::from_utf8(h).ok())
+            .map(|h| h.starts_with("HTTP/1.1 100") || h.starts_with("HTTP/1.0 100"))
+            .unwrap_or(false);
+        if is_continue {
+            buf = &buf[split + 4..];
+        } else {
+            break;
+        }
+    }
+
+    let split = find_subslice(buf, b"\r\n\r\n").unwrap();
     let head = std::str::from_utf8(&buf[..split])
         .map_err(|_| PrismError::Corrupt("HTTP response head is not UTF-8".into()))?;
-    let body = &buf[split + 4..];
+    let raw_body = &buf[split + 4..];
 
     let mut lines = head.split("\r\n");
     let status_line = lines
         .next()
         .ok_or_else(|| PrismError::Corrupt("HTTP response has no status line".into()))?;
-    // "HTTP/1.1 206 Partial Content"
     let status: u16 = status_line
         .split_whitespace()
         .nth(1)
@@ -75,28 +91,62 @@ pub fn parse_response(buf: &[u8]) -> Result<HttpResponse> {
         }
     }
 
-    // Honour Content-Length when present: refuse a short body by name.
+    let chunked = headers.iter().any(|(n, v)| {
+        n.eq_ignore_ascii_case("transfer-encoding") && v.eq_ignore_ascii_case("chunked")
+    });
     let content_len = headers
         .iter()
         .find(|(n, _)| n.eq_ignore_ascii_case("content-length"))
         .and_then(|(_, v)| v.parse::<usize>().ok());
-    if let Some(cl) = content_len {
-        if body.len() < cl {
+
+    let body = if chunked {
+        decode_chunked(raw_body)?
+    } else if let Some(cl) = content_len {
+        if raw_body.len() < cl {
             return Err(PrismError::Corrupt(format!(
                 "HTTP body is truncated: Content-Length {cl}, but only {} bytes arrived",
-                body.len()
+                raw_body.len()
             )));
         }
-    }
-    let body = match content_len {
-        Some(cl) => body[..cl].to_vec(),
-        None => body.to_vec(),
+        raw_body[..cl].to_vec()
+    } else {
+        raw_body.to_vec()
     };
     Ok(HttpResponse {
         status,
         headers,
         body,
     })
+}
+
+/// Decode an HTTP/1.1 chunked body: `<hexlen>\r\n<bytes>\r\n`... terminated by a `0\r\n`.
+fn decode_chunked(mut buf: &[u8]) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    loop {
+        let line_end = find_subslice(buf, b"\r\n")
+            .ok_or_else(|| PrismError::Corrupt("chunked body: missing chunk-size line".into()))?;
+        let size_str = std::str::from_utf8(&buf[..line_end])
+            .ok()
+            .and_then(|s| s.split(';').next())
+            .map(str::trim)
+            .ok_or_else(|| PrismError::Corrupt("chunked body: bad chunk size".into()))?;
+        let size = usize::from_str_radix(size_str, 16).map_err(|_| {
+            PrismError::Corrupt(format!("chunked body: bad chunk size `{size_str}`"))
+        })?;
+        buf = &buf[line_end + 2..];
+        if size == 0 {
+            break;
+        }
+        if buf.len() < size {
+            return Err(PrismError::Corrupt(format!(
+                "chunked body: chunk declares {size} bytes, only {} present",
+                buf.len()
+            )));
+        }
+        out.extend_from_slice(&buf[..size]);
+        buf = &buf[size + 2..]; // skip the trailing CRLF after the chunk data
+    }
+    Ok(out)
 }
 
 /// Extract the `<Key>` values from an S3 `ListBucketResult` XML body — a small scanner, not a full
@@ -430,6 +480,14 @@ mod tests {
             err.contains("truncated") && err.contains("Content-Length 10"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn parses_a_chunked_response_and_skips_100_continue() {
+        let raw = b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
+        let r = parse_response(raw).unwrap();
+        assert_eq!(r.status, 200);
+        assert_eq!(r.body, b"hello world");
     }
 
     #[test]
