@@ -694,6 +694,8 @@ The oracle is **ground-truth labels**, not a reference clusterer — labeled syn
 
 ## S10 — complete
 
+**Proof:** [CI run #29505875380](https://github.com/Bobcatsfan33/PrismDB/actions/runs/29505875380) — all 28 jobs green on `main`, including the new ENOSPC fault matrix (disk filled mid-part-write / mid-snapshot / mid-CURRENT, each old-or-new and recovering), the size-tiered scheduler (bounded steady-state part count + debt, answers unchanged, fair admission), the reader-lease gate (invariant 6 by construction, crashed-reader expiry), the tombstone gate, and the accelerated soak.
+
 **Gate:** *sustained ingest → steady part count and merge debt; random kills during query/merge/delete never expose partial results; a re-embed migration pauses/resumes/rolls back.* Contract first: [docs/MERGE-CONTRACT.md](MERGE-CONTRACT.md) was written before the scheduler.
 
 ### 1. ENOSPC is a first-class fault — the lesson the build host taught
