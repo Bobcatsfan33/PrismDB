@@ -17,6 +17,33 @@
   "measured_from": "baselines.json (bench two-tier accounting)",
   "reference_config": { "dim": 64, "pq_m": 8, "parts": 16 },
 
+  "_dimensionality_warning": [
+    "The measured numbers below are at dim=64 -- the TEST config, NOT a product number. Real",
+    "embedding models are ~768-dimensional, where the cold tier (exact float32 vectors) is",
+    "768*4 = 3072 bytes = 3.07 KB per vector, ~12x the dim=64 figure. The README and any external",
+    "material MUST quote the 768d numbers (projected_at_768d below), never the dim=64 ones.",
+    "A measured-at-768d worksheet is a filed obligation (measured_at_768d), unlocked by the first",
+    "real-embedding corpus -- the SAME C-3 standing item (issue #3) that unlocks the real-embedding",
+    "index re-derivation. One corpus, both obligations."
+  ],
+
+  "projected_at_768d": {
+    "_rule": "PROJECTION, not a measurement: the cold tier scales linearly with dimension (exact float32 = dim*4 bytes/vector); the hot PQ tier does not (pq_m bytes, fixed). At dim=768, pq_m=8: PQ = 8 B/vector unchanged; exact vectors = 768*4 = 3072 B = 3.07 KB/vector. Scalars_and_text are dimension-independent (~284 B/row). These are the numbers the README quotes.",
+    "pq_codes_bytes_per_vector": 8,
+    "exact_vector_bytes_per_vector": 3072,
+    "exact_vector_KB_per_vector": 3.07,
+    "cold_GB_per_billion_events": 3072,
+    "hot_GB_per_billion_events": 292,
+    "total_GB_per_billion_events": 3364,
+    "note": "1e9 events x 3072 B cold = 3072 GB (~3 TB) of exact vectors per billion events; the hot scan tier stays ~292 GB. rerank_tier_multiple at 768d = 3072/8 = 384x."
+  },
+
+  "measured_at_768d": {
+    "status": "OBLIGATION -- not yet measured",
+    "filed": "unlocked by the first real-embedding corpus (issue #3, C-3 standing item)",
+    "_rule": "The projection above assumes float32 exact vectors and no backend compression. A measured-at-768d worksheet against a real-embedding corpus on the MinIO/S3 backend replaces the projection, and any material quoting a 768d number switches to the measured one the moment it exists."
+  },
+
   "bytes_per_row": {
     "pq_codes": 8.0,
     "exact_vectors": 256.0,

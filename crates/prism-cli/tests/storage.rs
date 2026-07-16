@@ -280,3 +280,110 @@ fn remote_unavailable_serves_cache_and_names_the_miss() {
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+
+// --- CAS publication distinction + capability check (D-067, storage §2/§5) ---
+
+use prism_engine::storage::object::{assert_cas_capability, cas_publish, CasOutcome};
+
+/// **The capability check refuses a backend that cannot do conditional-create** (storage §5).
+#[test]
+fn a_backend_without_conditional_create_is_refused() {
+    let root = tmp("cap");
+    std::fs::create_dir_all(&root).unwrap();
+    // The real local backend has it.
+    assert!(assert_cas_capability(&LocalObjectStore::new(&root)).is_ok());
+
+    // A backend whose put_if_absent always "creates" (last-writer-wins) is refused, named.
+    struct BrokenCas;
+    impl ObjectStore for BrokenCas {
+        fn get(&self, _: &str) -> Result<Vec<u8>, prism_types::error::PrismError> {
+            Ok(vec![])
+        }
+        fn get_range(
+            &self,
+            _: &str,
+            _: u64,
+            _: usize,
+        ) -> Result<Vec<u8>, prism_types::error::PrismError> {
+            Ok(vec![])
+        }
+        fn put(&self, _: &str, _: &[u8]) -> Result<(), prism_types::error::PrismError> {
+            Ok(())
+        }
+        fn put_if_absent(&self, _: &str, _: &[u8]) -> Result<bool, prism_types::error::PrismError> {
+            Ok(true)
+        }
+        fn head(&self, _: &str) -> Result<Option<u64>, prism_types::error::PrismError> {
+            Ok(None)
+        }
+        fn delete(&self, _: &str) -> Result<(), prism_types::error::PrismError> {
+            Ok(())
+        }
+        fn list(&self, _: &str) -> Result<Vec<String>, prism_types::error::PrismError> {
+            Ok(vec![])
+        }
+    }
+    let err = assert_cas_capability(&BrokenCas).unwrap_err().to_string();
+    assert!(
+        err.contains("conditional-create") && err.contains("refuses"),
+        "{err}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// **CAS publish distinguishes our own landed write from another writer's win** (D-067).
+#[test]
+fn cas_publish_distinguishes_our_write_from_a_conflict() {
+    let root = tmp("cas2");
+    std::fs::create_dir_all(&root).unwrap();
+    let store = LocalObjectStore::new(&root);
+
+    // First publish creates.
+    assert_eq!(
+        cas_publish(&store, "catalog/CURRENT", b"snap-a").unwrap(),
+        CasOutcome::Created
+    );
+    // Re-publishing the SAME bytes is our own landed attempt — success, not conflict.
+    assert_eq!(
+        cas_publish(&store, "catalog/CURRENT", b"snap-a").unwrap(),
+        CasOutcome::AlreadyOurs
+    );
+    // Publishing DIFFERENT bytes is another writer's win — a named conflict.
+    assert_eq!(
+        cas_publish(&store, "catalog/CURRENT", b"snap-b").unwrap(),
+        CasOutcome::Conflict
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// **An ambiguous transport failure reads back before concluding** (D-067): a dropped call that
+/// landed nothing retries to a clean create; one whose bytes are already ours succeeds.
+#[test]
+fn cas_publish_reads_back_on_an_ambiguous_failure() {
+    let root = tmp("cas3");
+    std::fs::create_dir_all(&root).unwrap();
+    let fault = FaultStore::new(LocalObjectStore::new(&root));
+
+    // The put_if_absent call fails ambiguously (nothing landed), so cas_publish reads back
+    // (NotFound), then retries the create.
+    fault.set(FaultConfig {
+        fail_next: true,
+        ..Default::default()
+    });
+    assert_eq!(
+        cas_publish(&fault, "catalog/CURRENT", b"snap-a").unwrap(),
+        CasOutcome::Created
+    );
+
+    // Now the object exists with our bytes. A later ambiguous failure reads back and finds our own
+    // write — success, not conflict.
+    fault.set(FaultConfig {
+        fail_next: true,
+        ..Default::default()
+    });
+    assert_eq!(
+        cas_publish(&fault, "catalog/CURRENT", b"snap-a").unwrap(),
+        CasOutcome::AlreadyOurs
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}

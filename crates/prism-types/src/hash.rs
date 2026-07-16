@@ -127,6 +127,31 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
     out
 }
 
+/// HMAC-SHA256 (RFC 2104), composed from the in-tree [`sha256`]. The primitive AWS SigV4 signing is
+/// built from — hand-rolled rather than a dependency, per the charter ([D-065](../../../docs/DECISIONS.md)),
+/// and verified against the RFC 4231 test vectors in this module's tests.
+pub fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
+    const BLOCK: usize = 64; // SHA-256 block size
+    let mut k = if key.len() > BLOCK {
+        sha256(key).to_vec()
+    } else {
+        key.to_vec()
+    };
+    k.resize(BLOCK, 0);
+    let mut ipad = [0x36u8; BLOCK];
+    let mut opad = [0x5cu8; BLOCK];
+    for i in 0..BLOCK {
+        ipad[i] ^= k[i];
+        opad[i] ^= k[i];
+    }
+    let mut inner = ipad.to_vec();
+    inner.extend_from_slice(msg);
+    let inner_hash = sha256(&inner);
+    let mut outer = opad.to_vec();
+    outer.extend_from_slice(&inner_hash);
+    sha256(&outer)
+}
+
 pub fn hex(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {
@@ -161,6 +186,28 @@ mod tests {
             c.update(chunk);
         }
         assert_eq!(c.finish(), crc32(&data));
+    }
+
+    #[test]
+    fn hmac_sha256_matches_rfc4231_vectors() {
+        // RFC 4231 Test Case 1.
+        assert_eq!(
+            hex(&hmac_sha256(&[0x0b; 20], b"Hi There")),
+            "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
+        );
+        // RFC 4231 Test Case 2 (short key).
+        assert_eq!(
+            hex(&hmac_sha256(b"Jefe", b"what do ya want for nothing?")),
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+        );
+        // A key longer than the block, exercising the sha256(key) path (RFC 4231 Test Case 6 key).
+        assert_eq!(
+            hex(&hmac_sha256(
+                &[0xaa; 131],
+                b"Test Using Larger Than Block-Size Key - Hash Key First"
+            )),
+            "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54"
+        );
     }
 
     #[test]

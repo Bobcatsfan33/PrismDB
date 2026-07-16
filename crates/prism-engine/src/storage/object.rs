@@ -432,3 +432,84 @@ impl CachedObjectStore {
         Ok(bytes)
     }
 }
+
+// --- CAS publication and the backend capability check (D-067, storage contract §2/§5) --------
+
+/// The outcome of a compare-and-swap create.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CasOutcome {
+    /// This call created the object.
+    Created,
+    /// The object already existed with **exactly these bytes** — our own earlier attempt landed, so
+    /// this is a success, not a conflict (idempotent retry, D-067).
+    AlreadyOurs,
+    /// The object exists with **different bytes** — another writer won the race. A named conflict.
+    Conflict,
+}
+
+/// Publish a key by CAS, distinguishing *our own landed attempt* from *another writer's win*
+/// ([D-067](../../../../docs/DECISIONS.md)).
+///
+/// Content-addressed PUTs are idempotent by construction, so a retry is free; the subtlety is the
+/// **CAS** pointer (`CURRENT`). When `put_if_absent` reports the object already exists, or a call
+/// fails *ambiguously* (a drop or timeout that may or may not have landed), we **read back** before
+/// concluding a conflict: if the bytes there are ours, our write landed and we succeeded; only
+/// bytes that are *not* ours are a real conflict. Concluding "conflict" on our own landed write
+/// would abandon a commit that actually succeeded.
+pub fn cas_publish(store: &dyn ObjectStore, key: &str, bytes: &[u8]) -> Result<CasOutcome> {
+    match store.put_if_absent(key, bytes) {
+        Ok(true) => Ok(CasOutcome::Created),
+        Ok(false) => Ok(read_back(store, key, bytes)?),
+        Err(PrismError::Io(msg)) => {
+            // Ambiguous transport failure: the write may or may not have landed. Read back the
+            // truth before deciding — never conclude conflict on a maybe.
+            match store.get(key) {
+                Ok(existing) if existing == bytes => Ok(CasOutcome::AlreadyOurs),
+                Ok(_) => Ok(CasOutcome::Conflict),
+                Err(PrismError::NotFound(_)) => {
+                    // Nothing landed; the failure was clean. Retry the create once.
+                    match store.put_if_absent(key, bytes) {
+                        Ok(true) => Ok(CasOutcome::Created),
+                        Ok(false) => Ok(read_back(store, key, bytes)?),
+                        Err(_) => Err(PrismError::Io(format!(
+                            "CAS publish of `{key}` failed ambiguously and could not be resolved: {msg}"
+                        ))),
+                    }
+                }
+                Err(e) => Err(e),
+            }
+        }
+        Err(e) => Err(e),
+    }
+}
+
+fn read_back(store: &dyn ObjectStore, key: &str, bytes: &[u8]) -> Result<CasOutcome> {
+    let existing = store.get(key)?;
+    if existing == bytes {
+        Ok(CasOutcome::AlreadyOurs)
+    } else {
+        Ok(CasOutcome::Conflict)
+    }
+}
+
+/// Confirm the backend provides the conditional-create (`If-None-Match: *`) primitive publication
+/// requires ([D-066](../../../../docs/DECISIONS.md)) — a **named capability check at startup**, not
+/// a silent fallback to last-writer-wins. A backend that lets a second create overwrite the first
+/// cannot host the catalog, and refusing loudly is the only safe answer (storage contract §5).
+pub fn assert_cas_capability(store: &dyn ObjectStore) -> Result<()> {
+    let probe = "catalog/.cas-capability-probe";
+    let _ = store.delete(probe);
+    let first = store.put_if_absent(probe, b"a")?;
+    let second = store.put_if_absent(probe, b"b")?;
+    let _ = store.delete(probe);
+    if first && !second {
+        Ok(())
+    } else {
+        Err(PrismError::Invariant(format!(
+            "storage backend does not provide conditional-create (If-None-Match: *): a second \
+             create returned {second} where it must return false. Without it, two writers could \
+             both publish and one commit would be silently lost. PrismDB refuses this backend \
+             rather than fall back to last-writer-wins (storage contract §5)."
+        )))
+    }
+}
