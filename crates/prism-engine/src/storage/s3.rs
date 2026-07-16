@@ -234,6 +234,99 @@ pub fn build_request(
     out
 }
 
+/// Read one HTTP response from a stream, length-delimited. Reads headers, then the body by
+/// `Content-Length` / `Transfer-Encoding: chunked` / to-EOF — correct on a kept-alive connection,
+/// where `read_to_end` would block. A HEAD response (`is_head`) carries `Content-Length` but no body.
+fn read_http(stream: &mut TcpStream, is_head: bool) -> Result<HttpResponse> {
+    let mut buf: Vec<u8> = Vec::new();
+    let mut tmp = [0u8; 8192];
+    // 1) headers.
+    let header_end = loop {
+        if let Some(p) = find_subslice(&buf, b"\r\n\r\n") {
+            break p;
+        }
+        let n = stream
+            .read(&mut tmp)
+            .map_err(|e| PrismError::Io(format!("remote unavailable: read: {e}")))?;
+        if n == 0 {
+            return Err(PrismError::Corrupt(
+                "connection closed before the response headers were complete".into(),
+            ));
+        }
+        buf.extend_from_slice(&tmp[..n]);
+    };
+    let head = std::str::from_utf8(&buf[..header_end])
+        .map_err(|_| PrismError::Corrupt("HTTP response head is not UTF-8".into()))?;
+    let mut lines = head.split("\r\n");
+    let status: u16 = lines
+        .next()
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| PrismError::Corrupt("HTTP status line malformed".into()))?;
+    let mut headers = Vec::new();
+    for line in lines {
+        if let Some((n, v)) = line.split_once(':') {
+            headers.push((n.trim().to_string(), v.trim().to_string()));
+        }
+    }
+    let chunked = headers.iter().any(|(n, v)| {
+        n.eq_ignore_ascii_case("transfer-encoding") && v.eq_ignore_ascii_case("chunked")
+    });
+    let content_len = headers
+        .iter()
+        .find(|(n, _)| n.eq_ignore_ascii_case("content-length"))
+        .and_then(|(_, v)| v.parse::<usize>().ok());
+
+    let mut body = buf[header_end + 4..].to_vec();
+    if !is_head {
+        if chunked {
+            // Read until the terminating `0\r\n\r\n`, then decode.
+            while find_subslice(&body, b"0\r\n\r\n").is_none() {
+                let n = stream
+                    .read(&mut tmp)
+                    .map_err(|e| PrismError::Io(format!("remote unavailable: read: {e}")))?;
+                if n == 0 {
+                    break;
+                }
+                body.extend_from_slice(&tmp[..n]);
+            }
+            body = decode_chunked(&body)?;
+        } else if let Some(cl) = content_len {
+            while body.len() < cl {
+                let n = stream
+                    .read(&mut tmp)
+                    .map_err(|e| PrismError::Io(format!("remote unavailable: read: {e}")))?;
+                if n == 0 {
+                    return Err(PrismError::Corrupt(format!(
+                        "HTTP body is truncated: Content-Length {cl}, connection closed after {} bytes",
+                        body.len()
+                    )));
+                }
+                body.extend_from_slice(&tmp[..n]);
+            }
+            body.truncate(cl);
+        } else {
+            // No length signalled: read to EOF.
+            loop {
+                let n = stream
+                    .read(&mut tmp)
+                    .map_err(|e| PrismError::Io(format!("remote unavailable: read: {e}")))?;
+                if n == 0 {
+                    break;
+                }
+                body.extend_from_slice(&tmp[..n]);
+            }
+        }
+    } else {
+        body.clear();
+    }
+    Ok(HttpResponse {
+        status,
+        headers,
+        body,
+    })
+}
+
 /// A real S3 object store over the hand-rolled client.
 pub struct S3ObjectStore {
     cfg: S3Config,
@@ -287,11 +380,10 @@ impl S3ObjectStore {
         stream
             .write_all(&bytes)
             .map_err(|e| PrismError::Io(format!("remote unavailable: write: {e}")))?;
-        let mut resp = Vec::new();
-        stream
-            .read_to_end(&mut resp)
-            .map_err(|e| PrismError::Io(format!("remote unavailable: read: {e}")))?;
-        let parsed = parse_response(&resp)?;
+        // Read length-delimited (not read_to_end, which hangs on a kept-alive connection). A HEAD
+        // response carries Content-Length but NO body by the HTTP spec, so it must not be treated as
+        // a truncation.
+        let parsed = read_http(&mut stream, method == "HEAD")?;
         // Clock skew: S3 answers a badly-skewed request with 403 RequestTimeTooSkewed. Name it so a
         // caller resyncs and retries within bounds rather than treating it as an auth failure.
         if parsed.status == 403
