@@ -35,7 +35,10 @@ fn the_hand_rolled_s3_client_round_trips_against_minio() {
     };
     let store = S3ObjectStore::new(cfg);
 
-    // The backend must provide conditional-create, or we refuse it.
+    // The backend must provide conditional-create, or we refuse it. **Regression guard (D-070):**
+    // MinIO RELEASE.2025-09-06 returned `404 NoSuchKey` on an `If-None-Match: *` write-if-absent
+    // (fixed in 2025-09-07) — this check is exactly what fails against such a backend, which is why
+    // CI pins a conformant image digest rather than `:latest`.
     assert_cas_capability(&store).expect("MinIO must provide If-None-Match conditional create");
 
     // Put / get / ranged get / head.
