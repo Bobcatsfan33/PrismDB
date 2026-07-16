@@ -6,7 +6,9 @@
 //! ranged-get/head/delete/list round-trip, the CAS create race (D-066/D-067), and the capability
 //! check — all against the real wire, verifying the SigV4 signing and the S3 semantics end-to-end.
 
-use prism_engine::storage::object::{assert_cas_capability, cas_publish, CasOutcome, ObjectStore};
+use prism_engine::storage::object::{
+    assert_cas_capability, cas_publish, CasOutcome, FaultConfig, FaultStore, ObjectStore,
+};
 use prism_engine::storage::s3::{S3Config, S3ObjectStore};
 use prism_engine::storage::sigv4::Credentials;
 
@@ -69,4 +71,144 @@ fn the_hand_rolled_s3_client_round_trips_against_minio() {
     store.delete("it/k").unwrap();
     assert!(store.head("it/k").unwrap().is_none());
     store.delete("it/CURRENT").ok();
+}
+
+use prism_engine::storage::object::CachedObjectStore;
+use prism_engine::storage::CACHE_QUOTA_BYTES;
+use prism_part::store::{StoreConfig, STORE_VERSION};
+use prism_types::Query;
+use std::sync::Arc;
+
+fn s3(cfg: &S3Config) -> S3ObjectStore {
+    S3ObjectStore::new(cfg.clone())
+}
+
+fn top_ids(engine: &prism_engine::Engine) -> Vec<String> {
+    let q = Query {
+        text: "the tool call timed out retrying".into(),
+        k: 15,
+        tenant: Some("t1".into()),
+        rerank: 40,
+        ..Default::default()
+    };
+    engine
+        .search(&q)
+        .unwrap()
+        .hits
+        .iter()
+        .map(|h| h.event.event_id.clone())
+        .collect()
+}
+
+/// **The S11 sprint-closer: answer-invariance forced hot / cold / mixed THROUGH MinIO** — the cold
+/// tier lives on the real remote, and a cache state never changes the answer (storage §3), while a
+/// transient remote fault retries to the correct answer and a dead remote names itself (storage §4).
+#[test]
+fn answer_invariance_through_minio_under_fault() {
+    let Some(cfg) = minio() else {
+        eprintln!("skipping MinIO answer-invariance: PRISM_S3_ENDPOINT is not set");
+        return;
+    };
+    let root = std::env::temp_dir().join(format!("prism-s3ai-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let engine = prism_engine::Engine::init(
+        &root,
+        StoreConfig {
+            format_version: STORE_VERSION,
+            dim: 64,
+            nlist: 16,
+            pq_m: 8,
+            seed: 9,
+            kmeans_restarts: 1,
+            block_size: prism_part::format::DEFAULT_BLOCK_SIZE,
+            partitions: Default::default(),
+            promote: Vec::new(),
+        },
+    )
+    .unwrap();
+    engine
+        .ingest(
+            prism_engine::corpus::generate(prism_engine::corpus::Kind::Zipf, 2000, 5),
+            1_760_000_000_000,
+        )
+        .unwrap();
+    let baseline = top_ids(&engine); // local cold tier
+
+    // Push the cold tier onto MinIO, then answer the same query with the cold tier on the remote.
+    let uploaded = engine.upload_cold_tier(&s3(&cfg)).unwrap();
+    assert!(uploaded > 0, "no cold-tier objects uploaded");
+
+    // Forced cold: a fresh cache over the S3 backend — every block a miss, fetched from MinIO.
+    let remote = prism_engine::Engine::open(&root)
+        .unwrap()
+        .with_cold(Arc::new(CachedObjectStore::new(
+            Arc::new(s3(&cfg)),
+            CACHE_QUOTA_BYTES,
+        )));
+    let cold = top_ids(&remote);
+    assert_eq!(
+        cold, baseline,
+        "the cold tier on MinIO answered differently — storage §3 violated"
+    );
+    assert!(
+        remote.cold.cache().stats().misses > 0,
+        "the cold run must miss the cache"
+    );
+
+    // Forced hot: the same engine again — blocks now cached, identical answer.
+    let hot = top_ids(&remote);
+    assert!(
+        remote.cold.cache().stats().hits > 0,
+        "the hot run must hit the cache"
+    );
+    assert_eq!(
+        hot, baseline,
+        "a warm cache changed the answer through MinIO"
+    );
+
+    // Under a transient fault: a fresh cache over a FaultStore-wrapped MinIO; one injected 5xx is
+    // ridden out by the bounded retry, and the answer is correct — not short.
+    let fault = Arc::new(FaultStore::new(s3(&cfg)));
+    let faulted = prism_engine::Engine::open(&root)
+        .unwrap()
+        .with_cold(Arc::new(CachedObjectStore::new(
+            fault.clone(),
+            CACHE_QUOTA_BYTES,
+        )));
+    fault.set(FaultConfig {
+        fail_next: true,
+        ..Default::default()
+    });
+    assert_eq!(
+        top_ids(&faulted),
+        baseline,
+        "a transient MinIO fault must retry to the correct answer"
+    );
+
+    // A dead remote is named, never a silently short result set.
+    let fault2 = Arc::new(FaultStore::new(s3(&cfg)));
+    let dead = prism_engine::Engine::open(&root)
+        .unwrap()
+        .with_cold(Arc::new(CachedObjectStore::new(
+            fault2.clone(),
+            CACHE_QUOTA_BYTES,
+        )));
+    fault2.set(FaultConfig {
+        unavailable: true,
+        ..Default::default()
+    });
+    let q = Query {
+        text: "the tool call timed out retrying".into(),
+        k: 15,
+        tenant: Some("t1".into()),
+        rerank: 40,
+        ..Default::default()
+    };
+    let err = dead.search(&q).unwrap_err().to_string();
+    assert!(
+        err.contains("remote unavailable"),
+        "a dead MinIO must be named, not a short answer: {err}"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
 }

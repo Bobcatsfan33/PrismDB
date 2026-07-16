@@ -71,6 +71,25 @@ impl Engine {
         Ok(out)
     }
 
+    /// Upload every live part's cold tier (`rerank.vec`) to a destination object store, keyed
+    /// `parts/<id>/rerank.vec` — the key the cold read expects. This is the cold-tier half of
+    /// remote-durable publication (storage §2); the answer-invariance-through-MinIO gate uses it to
+    /// put the cold tier on the remote before querying it. Returns the number of parts uploaded.
+    pub fn upload_cold_tier(&self, dst: &dyn super::object::ObjectStore) -> Result<usize> {
+        let snap = self.snapshot()?;
+        let mut n = 0;
+        for e in &snap.parts {
+            let id = e.part_id();
+            let path = self.store.part_dir(id).join("rerank.vec");
+            if path.exists() {
+                let bytes = std::fs::read(&path)?;
+                dst.put(&format!("parts/{id}/rerank.vec"), &bytes)?;
+                n += 1;
+            }
+        }
+        Ok(n)
+    }
+
     /// One cold block, with a **bounded retry** on transient remote faults. A truncated/corrupt read
     /// is a named byte error at once (never retried); a persistent outage is named after the budget
     /// is spent. It never returns fewer bytes than asked — the query gets the block or a named error.
