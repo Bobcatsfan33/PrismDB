@@ -417,7 +417,7 @@
       "name": "MULTIPART_THRESHOLD_BYTES",
       "value": 16777216,
       "kind": "policy",
-      "rationale": "docs/STORAGE-CONTRACT.md#2 \u2014 object size at/above which an upload uses multipart instead of a single PUT. BACKEND-CONDITIONAL: a single PUT is fine to the backend's limit, but a large object wants multipart so a mid-upload crash resumes and its server-side incomplete parts are swept by GC rather than re-sent whole. 16 MiB is a common part size; a cold-tier rerank.vec crosses it at scale. The multipart client path + GC sweep are filed (issue #6); this is where it engages."
+      "rationale": "docs/STORAGE-CONTRACT.md#2 \u2014 object size at/above which an upload uses multipart instead of a single PUT, AND the size of each part. BACKEND-CONDITIONAL: a single PUT is fine to the backend's limit, but a large object wants multipart so a mid-upload crash leaves resumable server-side parts that GC's list-and-abort sweep reclaims, rather than re-sending whole. 16 MiB (> S3's 5 MiB minimum part size) is a common part size; a cold-tier rerank.vec crosses it at scale. Multipart initiate/part/complete/abort + the GC sweep are implemented (S11 boundary d); this constant is both the threshold and the part size."
     }
   ]
 }

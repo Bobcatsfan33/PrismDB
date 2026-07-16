@@ -9,7 +9,8 @@
 //! semantics (conditional-put, ranged 206, XML shape) are verified end-to-end against a real MinIO
 //! server in CI; there is **no mock of S3 behavior** anywhere in the gate path (storage contract §1).
 
-use super::object::{ObjectMeta, ObjectStore};
+use super::object::{MultipartUpload, ObjectMeta, ObjectStore};
+use super::MULTIPART_THRESHOLD_BYTES;
 use super::sigv4::{self, Credentials};
 use prism_types::error::{PrismError, Result};
 use std::io::{Read, Write};
@@ -195,6 +196,40 @@ pub fn parse_list_xml_meta(body: &[u8]) -> Vec<(String, u64, i64)> {
             .unwrap_or(0);
         if let Some(ms) = epoch_ms_from_iso8601(&lm) {
             out.push((key, size, ms));
+        }
+    }
+    out
+}
+
+/// The `UploadId` from an `InitiateMultipartUploadResult`.
+pub fn parse_multipart_initiate(body: &[u8]) -> Option<String> {
+    let s = String::from_utf8_lossy(body);
+    inner_tag(&s, "UploadId").map(|v| xml_unescape(&v))
+}
+
+/// Each in-progress upload `(key, upload_id, initiated-ms)` from a `ListMultipartUploadsResult`.
+/// An `<Upload>` whose `Initiated` does not parse is skipped rather than assigned a wrong age.
+pub fn parse_multipart_list(body: &[u8]) -> Vec<(String, String, i64)> {
+    let s = String::from_utf8_lossy(body);
+    let mut out = Vec::new();
+    let mut rest = s.as_ref();
+    while let Some(start) = rest.find("<Upload>") {
+        let after = &rest[start + "<Upload>".len()..];
+        let end = match after.find("</Upload>") {
+            Some(e) => e,
+            None => break,
+        };
+        let block = &after[..end];
+        rest = &after[end + "</Upload>".len()..];
+        let (Some(key), Some(uid), Some(init)) = (
+            inner_tag(block, "Key").map(|v| xml_unescape(&v)),
+            inner_tag(block, "UploadId").map(|v| xml_unescape(&v)),
+            inner_tag(block, "Initiated"),
+        ) else {
+            continue;
+        };
+        if let Some(ms) = epoch_ms_from_iso8601(&init) {
+            out.push((key, uid, ms));
         }
     }
     out
@@ -486,6 +521,104 @@ impl S3ObjectStore {
         }
         Ok(parsed)
     }
+
+    // --- multipart upload (initiate / part / complete / abort) — plain SigV4, one part per chunk.
+
+    /// Begin a multipart upload; returns the `UploadId` that identifies its server-side parts.
+    pub fn initiate_multipart(&self, key: &str) -> Result<String> {
+        let path = format!("{}?uploads=", self.object_path(key));
+        let r = self.send("POST", &path, &[], b"")?;
+        if r.status != 200 {
+            return Err(PrismError::Io(format!(
+                "initiate multipart `{key}` returned HTTP {}",
+                r.status
+            )));
+        }
+        parse_multipart_initiate(&r.body).ok_or_else(|| {
+            PrismError::Corrupt(format!("initiate multipart `{key}`: no UploadId in response"))
+        })
+    }
+
+    /// Upload one part (1-based `part_number`); returns its `ETag`, needed to complete the upload.
+    pub fn upload_part(
+        &self,
+        key: &str,
+        upload_id: &str,
+        part_number: u32,
+        bytes: &[u8],
+    ) -> Result<String> {
+        let path = format!(
+            "{}?partNumber={}&uploadId={}",
+            self.object_path(key),
+            part_number,
+            sigv4::uri_encode(upload_id, false)
+        );
+        let r = self.send("PUT", &path, &[], bytes)?;
+        if r.status != 200 {
+            return Err(PrismError::Io(format!(
+                "upload part {part_number} of `{key}` returned HTTP {}",
+                r.status
+            )));
+        }
+        r.header("etag").map(str::to_string).ok_or_else(|| {
+            PrismError::Corrupt(format!("upload part {part_number} of `{key}`: no ETag"))
+        })
+    }
+
+    /// Complete the upload, assembling the parts (each `(number, etag)`) into the final object.
+    pub fn complete_multipart(
+        &self,
+        key: &str,
+        upload_id: &str,
+        parts: &[(u32, String)],
+    ) -> Result<()> {
+        let mut body = String::from("<CompleteMultipartUpload>");
+        for (n, etag) in parts {
+            body.push_str(&format!(
+                "<Part><PartNumber>{n}</PartNumber><ETag>{etag}</ETag></Part>"
+            ));
+        }
+        body.push_str("</CompleteMultipartUpload>");
+        let path = format!(
+            "{}?uploadId={}",
+            self.object_path(key),
+            sigv4::uri_encode(upload_id, false)
+        );
+        let r = self.send("POST", &path, &[], body.as_bytes())?;
+        if r.status != 200 {
+            return Err(PrismError::Io(format!(
+                "complete multipart `{key}` returned HTTP {}",
+                r.status
+            )));
+        }
+        // S3 can answer a completion with HTTP 200 and an `<Error>` in the body — name it, never
+        // treat it as success.
+        if String::from_utf8_lossy(&r.body).contains("<Error>") {
+            return Err(PrismError::Io(format!(
+                "complete multipart `{key}` failed: {}",
+                String::from_utf8_lossy(&r.body)
+            )));
+        }
+        Ok(())
+    }
+
+    /// Put a large object as a multipart upload, one part per [`MULTIPART_THRESHOLD_BYTES`] chunk. A
+    /// failure mid-upload aborts the upload so no server-side parts leak, and propagates the cause.
+    fn put_multipart(&self, key: &str, bytes: &[u8]) -> Result<()> {
+        let upload_id = self.initiate_multipart(key)?;
+        let mut parts = Vec::new();
+        for (i, chunk) in bytes.chunks(MULTIPART_THRESHOLD_BYTES).enumerate() {
+            let n = i as u32 + 1;
+            match self.upload_part(key, &upload_id, n, chunk) {
+                Ok(etag) => parts.push((n, etag)),
+                Err(e) => {
+                    let _ = self.abort_multipart(key, &upload_id);
+                    return Err(e);
+                }
+            }
+        }
+        self.complete_multipart(key, &upload_id, &parts)
+    }
 }
 
 impl ObjectStore for S3ObjectStore {
@@ -527,6 +660,11 @@ impl ObjectStore for S3ObjectStore {
     }
 
     fn put(&self, key: &str, bytes: &[u8]) -> Result<()> {
+        // A large object goes up as multipart, so a mid-upload crash resumes and its server-side
+        // parts are sweepable, rather than re-sent whole (storage §2).
+        if bytes.len() >= MULTIPART_THRESHOLD_BYTES {
+            return self.put_multipart(key, bytes);
+        }
         let r = self.send("PUT", &self.object_path(key), &[], bytes)?;
         match r.status {
             200 | 201 => Ok(()),
@@ -593,6 +731,45 @@ impl ObjectStore for S3ObjectStore {
                 })
                 .collect()),
             s => Err(PrismError::Io(format!("LIST returned HTTP {s}"))),
+        }
+    }
+
+    fn list_multipart(&self, prefix: &str) -> Result<Vec<MultipartUpload>> {
+        // Enumerate all in-progress uploads and filter by key prefix client-side: MinIO's
+        // ListMultipartUploads honours a server-side `prefix` inconsistently, so we do not depend on
+        // it (and there are few in-progress uploads to enumerate — a crashed publication's leftovers,
+        // not steady-state traffic). The valueless `uploads` is written `uploads=` so the request
+        // line and the signed canonical query match.
+        let path = format!("/{}?uploads=", self.cfg.bucket);
+        let r = self.send("GET", &path, &[], b"")?;
+        match r.status {
+            200 => Ok(parse_multipart_list(&r.body)
+                .into_iter()
+                .filter(|(key, _, _)| key.starts_with(prefix))
+                .map(|(key, upload_id, initiated_ms)| MultipartUpload {
+                    key,
+                    upload_id,
+                    initiated_ms,
+                })
+                .collect()),
+            s => Err(PrismError::Io(format!(
+                "LIST multipart returned HTTP {s}"
+            ))),
+        }
+    }
+
+    fn abort_multipart(&self, key: &str, upload_id: &str) -> Result<()> {
+        let path = format!(
+            "{}?uploadId={}",
+            self.object_path(key),
+            sigv4::uri_encode(upload_id, false)
+        );
+        let r = self.send("DELETE", &path, &[], b"")?;
+        match r.status {
+            200 | 204 | 404 => Ok(()),
+            s => Err(PrismError::Io(format!(
+                "abort multipart `{key}` returned HTTP {s}"
+            ))),
         }
     }
 }
@@ -667,6 +844,23 @@ mod tests {
         // Unparseable shapes yield None rather than a wrong (sweepable) age.
         assert_eq!(epoch_ms_from_iso8601("not-a-date"), None);
         assert_eq!(epoch_ms_from_iso8601("2026/07/16 20:10:10"), None);
+    }
+
+    #[test]
+    fn parses_multipart_initiate_and_list() {
+        let init = br#"<?xml version="1.0"?><InitiateMultipartUploadResult><Bucket>prism</Bucket><Key>parts/a/rerank.vec</Key><UploadId>abc-123-xyz</UploadId></InitiateMultipartUploadResult>"#;
+        assert_eq!(parse_multipart_initiate(init), Some("abc-123-xyz".to_string()));
+
+        let list = br#"<?xml version="1.0"?><ListMultipartUploadsResult>
+          <Upload><Key>parts/p1/rerank.vec</Key><UploadId>uid-1</UploadId><Initiated>2026-07-16T20:10:10.000Z</Initiated></Upload>
+          <Upload><Key>parts/p2/rerank.vec</Key><UploadId>uid-2</UploadId><Initiated>2026-07-16T20:11:00Z</Initiated></Upload>
+        </ListMultipartUploadsResult>"#;
+        let got = parse_multipart_list(list);
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].0, "parts/p1/rerank.vec");
+        assert_eq!(got[0].1, "uid-1");
+        assert_eq!(got[0].2, epoch_ms_from_iso8601("2026-07-16T20:10:10.000Z").unwrap());
+        assert_eq!(got[1].1, "uid-2");
     }
 
     #[test]

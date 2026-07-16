@@ -37,6 +37,8 @@ pub struct ReconcileReport {
     /// Objects absent from the live set but younger than the horizon (an in-flight publication):
     /// graced, not swept.
     pub too_young: usize,
+    /// Incomplete multipart uploads aborted (a crashed large-object publication's server-side parts).
+    pub aborted_uploads: Vec<String>,
 }
 
 /// The part id of a `parts/<id>/rerank.vec` key, if the key is a cold-tier object.
@@ -183,6 +185,22 @@ impl Engine {
             }
         }
         report.removed.sort();
+
+        // **Sweep incomplete multipart uploads.** A large-object publication that crashed mid-upload
+        // leaves server-side parts that no object references and no listing shows — only a multipart
+        // enumeration does. Abort those older than the horizon (a crashed upload), graced within it
+        // (an upload still in flight for a live publication). A backend without multipart lists none.
+        for mp in backend.list_multipart("parts/")? {
+            if now_ms.saturating_sub(mp.initiated_ms) <= GC_HORIZON_MS {
+                report.too_young += 1;
+                continue;
+            }
+            report.aborted_uploads.push(mp.key.clone());
+            if !dry_run {
+                backend.abort_multipart(&mp.key, &mp.upload_id)?;
+            }
+        }
+        report.aborted_uploads.sort();
         Ok(report)
     }
 

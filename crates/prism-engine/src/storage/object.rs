@@ -50,6 +50,17 @@ pub trait ObjectStore: Send + Sync {
                 .into(),
         ))
     }
+    /// In-progress multipart uploads under `prefix` — the server-side incomplete parts a crashed
+    /// large-object publication leaves behind, which GC sweeps ([storage §2](../../../../docs/STORAGE-CONTRACT.md)).
+    /// A backend without multipart has none.
+    fn list_multipart(&self, _prefix: &str) -> Result<Vec<MultipartUpload>> {
+        Ok(Vec::new())
+    }
+    /// Abort an in-progress multipart upload, discarding its server-side parts. A no-op on a backend
+    /// without multipart (there is nothing incomplete to discard).
+    fn abort_multipart(&self, _key: &str, _upload_id: &str) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// One object's reconcilable metadata: its key, size, and last-modified time (epoch ms).
@@ -58,6 +69,16 @@ pub struct ObjectMeta {
     pub key: String,
     pub size: u64,
     pub last_modified_ms: i64,
+}
+
+/// An in-progress multipart upload: its object key, the upload id that identifies it, and when it
+/// was initiated (epoch ms) — the age GC reconciles against so an upload still in flight is not
+/// aborted out from under a live publication.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MultipartUpload {
+    pub key: String,
+    pub upload_id: String,
+    pub initiated_ms: i64,
 }
 
 // --- the local backend -----------------------------------------------------------------------
@@ -290,6 +311,14 @@ impl ObjectStore for FaultStore {
     fn list_meta(&self, prefix: &str) -> Result<Vec<ObjectMeta>> {
         self.gate()?;
         self.inner.list_meta(prefix)
+    }
+    fn list_multipart(&self, prefix: &str) -> Result<Vec<MultipartUpload>> {
+        self.gate()?;
+        self.inner.list_multipart(prefix)
+    }
+    fn abort_multipart(&self, key: &str, upload_id: &str) -> Result<()> {
+        self.gate()?;
+        self.inner.abort_multipart(key, upload_id)
     }
 }
 

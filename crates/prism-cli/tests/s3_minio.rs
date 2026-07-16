@@ -74,7 +74,7 @@ fn the_hand_rolled_s3_client_round_trips_against_minio() {
 }
 
 use prism_engine::storage::object::CachedObjectStore;
-use prism_engine::storage::CACHE_QUOTA_BYTES;
+use prism_engine::storage::{CACHE_QUOTA_BYTES, MULTIPART_THRESHOLD_BYTES};
 use prism_part::store::{StoreConfig, STORE_VERSION};
 use prism_types::Query;
 use std::sync::Arc;
@@ -252,8 +252,25 @@ fn reconcile_reclaims_remote_orphans_but_never_the_live_set() {
         .put(&format!("catalog/SNAPSHOT-{live_snapshot}"), b"live mirror")
         .unwrap();
 
+    // Leak an incomplete multipart upload — a large-object publication that crashed mid-upload
+    // leaves server-side parts that only a multipart enumeration shows. Keyed under `parts/`, so
+    // reconciliation's `parts/` sweep is what must abort it.
+    let mp_key = format!("parts/p88888888-mpleak-{}/rerank.vec", std::process::id());
+    let upload_id = probe.initiate_multipart(&mp_key).unwrap();
+    probe
+        .upload_part(&mp_key, &upload_id, 1, &vec![7u8; 5 * 1024 * 1024])
+        .unwrap();
+    assert!(
+        probe
+            .list_multipart("parts/")
+            .unwrap()
+            .iter()
+            .any(|u| u.key == mp_key && u.upload_id == upload_id),
+        "the leaked multipart upload is not listed as in-progress"
+    );
+
     // A fresh orphan, uploaded just now: reconciliation must grace it (its commit could be moments
-    // away), so a pass at wall-clock-now reclaims nothing.
+    // away), so a pass at wall-clock-now reclaims nothing and aborts no upload.
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -263,6 +280,11 @@ fn reconcile_reclaims_remote_orphans_but_never_the_live_set() {
         graced.removed.is_empty(),
         "a fresh orphan was swept inside its grace horizon: {:?}",
         graced.removed
+    );
+    assert!(
+        graced.aborted_uploads.is_empty(),
+        "a fresh in-flight multipart upload was aborted: {:?}",
+        graced.aborted_uploads
     );
     assert!(graced.too_young >= 1, "the fresh orphans must count as too_young");
 
@@ -297,10 +319,57 @@ fn reconcile_reclaims_remote_orphans_but_never_the_live_set() {
     assert_eq!(aged.protected_parts, live_parts.len());
     assert!(aged.protected_mirrors >= 1);
 
+    // The stale multipart upload was aborted and no longer enumerates.
+    assert!(
+        aged.aborted_uploads.contains(&mp_key),
+        "the stale multipart upload was not aborted: {:?}",
+        aged.aborted_uploads
+    );
+    assert!(
+        !probe
+            .list_multipart("parts/")
+            .unwrap()
+            .iter()
+            .any(|u| u.upload_id == upload_id),
+        "the aborted multipart upload still enumerates"
+    );
+
     // The store still answers — reconciliation touched no live byte.
     assert!(!top_ids(&engine).is_empty());
 
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// **Boundary (d) against MinIO — multipart upload.** An object at/above the threshold goes up as a
+/// real multipart upload (initiate → parts → complete, all plain SigV4) and comes back byte-
+/// identical, with ranged reads working on the assembled object. Keyed under `it/` so the reconcile
+/// test's `parts/` multipart sweep never races this in-flight upload.
+#[test]
+fn a_large_object_round_trips_through_multipart() {
+    let Some(cfg) = minio() else {
+        eprintln!("skipping MinIO multipart: PRISM_S3_ENDPOINT is not set");
+        return;
+    };
+    let store = S3ObjectStore::new(cfg);
+    let key = format!("it/big-{}", std::process::id());
+    store.delete(&key).ok();
+
+    // 19 MiB → two parts (16 MiB + 3 MiB); a deterministic fill so the byte-compare is meaningful.
+    let n = MULTIPART_THRESHOLD_BYTES + 3 * 1024 * 1024;
+    let data: Vec<u8> = (0..n).map(|i| (i % 251) as u8).collect();
+
+    store.put(&key, &data).unwrap(); // >= threshold → multipart path
+    assert_eq!(store.head(&key).unwrap(), Some(n as u64));
+    let got = store.get(&key).unwrap();
+    assert_eq!(got.len(), n, "multipart object came back a different length");
+    assert!(got == data, "multipart object came back changed");
+    assert_eq!(
+        store.get_range(&key, 100, 10).unwrap(),
+        &data[100..110],
+        "a ranged read of the assembled multipart object is wrong"
+    );
+
+    store.delete(&key).ok();
 }
 
 fn store_cfg() -> StoreConfig {
