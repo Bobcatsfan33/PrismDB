@@ -675,7 +675,9 @@ fn cmd_gc(a: &Args) -> Result<()> {
     let retain = a.parse_opt("retain", 5usize)?;
     // Lease-aware GC: the reader-lease horizon protects any snapshot young enough that a reader
     // could still be within its lease, so invariant 6 holds by construction (merge contract §5).
-    emit(&engine.catalog().gc_at(retain, now_ms(), a.has("dry-run"))?)
+    // `--now` overrides the clock (an operator forcing reclamation of an aged store, or a test).
+    let now = a.parse_opt("now", now_ms())?;
+    emit(&engine.catalog().gc_at(retain, now, a.has("dry-run"))?)
 }
 
 fn cmd_bench(a: &Args) -> Result<()> {

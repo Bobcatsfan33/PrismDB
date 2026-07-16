@@ -323,8 +323,18 @@ fn killing_gc_midway_never_takes_a_live_part_with_it() {
     let engine = Engine::open(&root).unwrap();
     let live: Vec<String> = engine.snapshot().unwrap().part_ids();
 
+    // `--now` far in the future so the reader-lease horizon (S10) does not protect these fresh
+    // snapshots — this test is about GC actually reclaiming and being killed mid-unlink.
     let out = run(
-        &["gc", "--path", root.to_str().unwrap(), "--retain", "1"],
+        &[
+            "gc",
+            "--path",
+            root.to_str().unwrap(),
+            "--retain",
+            "1",
+            "--now",
+            "9999999999999",
+        ],
         Some("gc.after_first_unlink"),
     );
     assert!(died_abnormally(&out), "the gc kill point did not fire");
@@ -343,7 +353,15 @@ fn killing_gc_midway_never_takes_a_live_part_with_it() {
 
     // Finishing the job is safe.
     let out = run(
-        &["gc", "--path", root.to_str().unwrap(), "--retain", "1"],
+        &[
+            "gc",
+            "--path",
+            root.to_str().unwrap(),
+            "--retain",
+            "1",
+            "--now",
+            "9999999999999",
+        ],
         None,
     );
     assert!(out.status.success());
