@@ -44,6 +44,7 @@ pub fn estimated_cost_micros(object_requests: usize, retrieved_bytes: usize) -> 
 pub const CACHE_QUOTA_BYTES: usize = 256 * 1024 * 1024;
 
 pub mod object;
+pub mod s3;
 pub mod sigv4;
 pub use object::{
     BlockCache, CacheStats, CachedObjectStore, FaultConfig, FaultStore, LocalObjectStore,
