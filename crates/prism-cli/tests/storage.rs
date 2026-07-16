@@ -60,12 +60,13 @@ fn reconcile_reclaims_orphans_but_never_the_live_set() {
     let cold_root = tmp("recon-cold");
     std::fs::create_dir_all(&cold_root).unwrap();
     let backend = Arc::new(LocalObjectStore::new(cold_root));
-    let engine = Engine::init(&root, config())
-        .unwrap()
-        .with_cold(Arc::new(CachedObjectStore::new(
-            backend.clone(),
-            CACHE_QUOTA_BYTES,
-        )));
+    let engine =
+        Engine::init(&root, config())
+            .unwrap()
+            .with_cold(Arc::new(CachedObjectStore::new(
+                backend.clone(),
+                CACHE_QUOTA_BYTES,
+            )));
     engine
         .ingest(
             prism_engine::corpus::generate(prism_engine::corpus::Kind::Zipf, 2000, 5),
@@ -91,7 +92,11 @@ fn reconcile_reclaims_orphans_but_never_the_live_set() {
 
     // Inside the grace horizon: nothing is swept.
     let graced = engine.reconcile_remote_orphans(1, now_ms, false).unwrap();
-    assert!(graced.removed.is_empty(), "swept inside grace: {:?}", graced.removed);
+    assert!(
+        graced.removed.is_empty(),
+        "swept inside grace: {:?}",
+        graced.removed
+    );
     assert!(graced.too_young >= 1);
 
     // Past the horizon: the two orphans go, the live set stays.
@@ -99,14 +104,21 @@ fn reconcile_reclaims_orphans_but_never_the_live_set() {
     let aged = engine
         .reconcile_remote_orphans(1, now_ms + horizon + 60_000, false)
         .unwrap();
-    assert!(aged.removed.contains(&"parts/p99999999-orphanaaaa/rerank.vec".to_string()));
-    assert!(aged.removed.contains(&"catalog/SNAPSHOT-s00000099".to_string()));
+    assert!(aged
+        .removed
+        .contains(&"parts/p99999999-orphanaaaa/rerank.vec".to_string()));
+    assert!(aged
+        .removed
+        .contains(&"catalog/SNAPSHOT-s00000099".to_string()));
     assert!(!aged
         .removed
         .contains(&format!("catalog/SNAPSHOT-{live_snapshot}")));
     for id in &live_parts {
         assert!(!aged.removed.contains(&format!("parts/{id}/rerank.vec")));
-        assert!(backend.head(&format!("parts/{id}/rerank.vec")).unwrap().is_some());
+        assert!(backend
+            .head(&format!("parts/{id}/rerank.vec"))
+            .unwrap()
+            .is_some());
     }
     assert_eq!(aged.protected_parts, live_parts.len());
     assert!(aged.protected_mirrors >= 1);

@@ -10,8 +10,8 @@
 //! server in CI; there is **no mock of S3 behavior** anywhere in the gate path (storage contract §1).
 
 use super::object::{MultipartUpload, ObjectMeta, ObjectStore};
-use super::MULTIPART_THRESHOLD_BYTES;
 use super::sigv4::{self, Credentials};
+use super::MULTIPART_THRESHOLD_BYTES;
 use prism_types::error::{PrismError, Result};
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -535,7 +535,9 @@ impl S3ObjectStore {
             )));
         }
         parse_multipart_initiate(&r.body).ok_or_else(|| {
-            PrismError::Corrupt(format!("initiate multipart `{key}`: no UploadId in response"))
+            PrismError::Corrupt(format!(
+                "initiate multipart `{key}`: no UploadId in response"
+            ))
         })
     }
 
@@ -752,9 +754,7 @@ impl ObjectStore for S3ObjectStore {
                     initiated_ms,
                 })
                 .collect()),
-            s => Err(PrismError::Io(format!(
-                "LIST multipart returned HTTP {s}"
-            ))),
+            s => Err(PrismError::Io(format!("LIST multipart returned HTTP {s}"))),
         }
     }
 
@@ -827,10 +827,7 @@ mod tests {
         // Absolute anchor.
         assert_eq!(epoch_ms_from_iso8601("1970-01-01T00:00:00Z"), Some(0));
         // Fractional seconds → milliseconds.
-        assert_eq!(
-            epoch_ms_from_iso8601("1970-01-01T00:00:00.250Z"),
-            Some(250)
-        );
+        assert_eq!(epoch_ms_from_iso8601("1970-01-01T00:00:00.250Z"), Some(250));
         // Inverse of civil_from_epoch across a wide span of dates.
         for secs in [1u64, 1_000_000, 1_440_938_160, 1_760_000_000, 4_102_444_800] {
             let (y, mo, d, h, mi, s) = civil_from_epoch(secs);
@@ -849,7 +846,10 @@ mod tests {
     #[test]
     fn parses_multipart_initiate_and_list() {
         let init = br#"<?xml version="1.0"?><InitiateMultipartUploadResult><Bucket>prism</Bucket><Key>parts/a/rerank.vec</Key><UploadId>abc-123-xyz</UploadId></InitiateMultipartUploadResult>"#;
-        assert_eq!(parse_multipart_initiate(init), Some("abc-123-xyz".to_string()));
+        assert_eq!(
+            parse_multipart_initiate(init),
+            Some("abc-123-xyz".to_string())
+        );
 
         let list = br#"<?xml version="1.0"?><ListMultipartUploadsResult>
           <Upload><Key>parts/p1/rerank.vec</Key><UploadId>uid-1</UploadId><Initiated>2026-07-16T20:10:10.000Z</Initiated></Upload>
@@ -859,7 +859,10 @@ mod tests {
         assert_eq!(got.len(), 2);
         assert_eq!(got[0].0, "parts/p1/rerank.vec");
         assert_eq!(got[0].1, "uid-1");
-        assert_eq!(got[0].2, epoch_ms_from_iso8601("2026-07-16T20:10:10.000Z").unwrap());
+        assert_eq!(
+            got[0].2,
+            epoch_ms_from_iso8601("2026-07-16T20:10:10.000Z").unwrap()
+        );
         assert_eq!(got[1].1, "uid-2");
     }
 
@@ -873,7 +876,10 @@ mod tests {
         assert_eq!(got.len(), 2);
         assert_eq!(got[0].0, "parts/a/rerank.vec");
         assert_eq!(got[0].1, 512);
-        assert_eq!(got[0].2, epoch_ms_from_iso8601("2026-07-16T20:10:10.000Z").unwrap());
+        assert_eq!(
+            got[0].2,
+            epoch_ms_from_iso8601("2026-07-16T20:10:10.000Z").unwrap()
+        );
         assert_eq!(got[1].0, "catalog/SNAPSHOT-s00000003");
         assert_eq!(got[1].1, 2048);
     }

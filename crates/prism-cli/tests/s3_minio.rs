@@ -249,8 +249,12 @@ fn reconcile_reclaims_remote_orphans_but_never_the_live_set() {
     // Plant orphans on the remote: a cold tier no snapshot names, and a mirror snapshot past the
     // recovery depth. Plus a live mirror snapshot, which must be protected.
     let probe = s3(&cfg);
-    probe.put("parts/p99999999-orphanaaaa/rerank.vec", b"orphaned bytes").unwrap();
-    probe.put("catalog/SNAPSHOT-s00000099", b"stale mirror").unwrap();
+    probe
+        .put("parts/p99999999-orphanaaaa/rerank.vec", b"orphaned bytes")
+        .unwrap();
+    probe
+        .put("catalog/SNAPSHOT-s00000099", b"stale mirror")
+        .unwrap();
     probe
         .put(&format!("catalog/SNAPSHOT-{live_snapshot}"), b"live mirror")
         .unwrap();
@@ -289,7 +293,10 @@ fn reconcile_reclaims_remote_orphans_but_never_the_live_set() {
         "a fresh in-flight multipart upload was aborted: {:?}",
         graced.aborted_uploads
     );
-    assert!(graced.too_young >= 1, "the fresh orphans must count as too_young");
+    assert!(
+        graced.too_young >= 1,
+        "the fresh orphans must count as too_young"
+    );
 
     // Now well past the horizon: the two orphans are reclaimed, the live set is not.
     let horizon = prism_part::catalog::GC_HORIZON_MS;
@@ -297,23 +304,31 @@ fn reconcile_reclaims_remote_orphans_but_never_the_live_set() {
         .reconcile_remote_orphans(1, now_ms + horizon + 60_000, false)
         .unwrap();
     assert!(
-        aged.removed.contains(&"parts/p99999999-orphanaaaa/rerank.vec".to_string()),
+        aged.removed
+            .contains(&"parts/p99999999-orphanaaaa/rerank.vec".to_string()),
         "the orphan cold tier was not reclaimed: {:?}",
         aged.removed
     );
     assert!(
-        aged.removed.contains(&"catalog/SNAPSHOT-s00000099".to_string()),
+        aged.removed
+            .contains(&"catalog/SNAPSHOT-s00000099".to_string()),
         "the stale mirror snapshot was not reclaimed: {:?}",
         aged.removed
     );
     // The live mirror snapshot and every referenced cold tier survived.
     assert!(
-        !aged.removed.iter().any(|k| k == &format!("catalog/SNAPSHOT-{live_snapshot}")),
+        !aged
+            .removed
+            .iter()
+            .any(|k| k == &format!("catalog/SNAPSHOT-{live_snapshot}")),
         "reconciliation swept the LIVE mirror snapshot — recovery target destroyed"
     );
     for id in &live_parts {
         let key = format!("parts/{id}/rerank.vec");
-        assert!(!aged.removed.contains(&key), "a live cold tier was reclaimed: {key}");
+        assert!(
+            !aged.removed.contains(&key),
+            "a live cold tier was reclaimed: {key}"
+        );
         assert!(
             probe.head(&key).unwrap().is_some(),
             "a referenced part's cold tier is gone from MinIO after reconciliation: {key}"
@@ -364,7 +379,11 @@ fn a_large_object_round_trips_through_multipart() {
     store.put(&key, &data).unwrap(); // >= threshold → multipart path
     assert_eq!(store.head(&key).unwrap(), Some(n as u64));
     let got = store.get(&key).unwrap();
-    assert_eq!(got.len(), n, "multipart object came back a different length");
+    assert_eq!(
+        got.len(),
+        n,
+        "multipart object came back a different length"
+    );
     assert!(got == data, "multipart object came back changed");
     assert_eq!(
         store.get_range(&key, 100, 10).unwrap(),
@@ -430,7 +449,11 @@ fn cold_tier_is_published_and_verified_to_minio_before_reference() {
         );
         // Idempotent: re-publishing uploads nothing new and still verifies.
         engine.publish_part_cold(id).unwrap();
-        assert_eq!(probe.head(&key).unwrap(), head, "re-publish changed the object");
+        assert_eq!(
+            probe.head(&key).unwrap(),
+            head,
+            "re-publish changed the object"
+        );
     }
 
     // The published bytes are the truth: a query answered from MinIO equals one answered from the
