@@ -610,6 +610,19 @@ impl Engine {
         // --- 5. exact rerank, within the declared fetch budget ---
         let mut candidates: Vec<crate::topk::Candidate> = topk.into_sorted(); // nearest first
         candidates.truncate(q.rerank);
+        // The fetch budget is a **byte** ceiling on the cold tier (storage contract §6): a plan may
+        // declare how many bytes of exact vectors it is willing to pull, and execution is bounded by
+        // it — not an unbounded fetch. Exhausting it reranks only the most-promising candidates that
+        // fit (they are already in PQ-distance order, so this keeps the best) and **flags** the
+        // result as budget-limited rather than silently over-fetching or silently under-answering.
+        let bytes_per_vector = dim * 4;
+        if let Some(budget) = q.fetch_budget_bytes {
+            let max_vectors = budget / bytes_per_vector.max(1);
+            if candidates.len() > max_vectors {
+                candidates.truncate(max_vectors);
+                c.fetch_budget_exhausted = true;
+            }
+        }
         c.rerank_width = candidates.len();
 
         let mut by_part: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
@@ -638,6 +651,9 @@ impl Engine {
             let ids = r.read_event_ids_for_rows(rows)?;
             c.exact_vectors_fetched += vectors.len();
             c.exact_bytes_fetched += vectors.len() * dim * 4;
+            // One cold-tier object request per part touched (S11 EXPLAIN economics, §6). Coalesced
+            // ranged reads within a part are one logical request against the object.
+            c.object_requests += 1;
             for ((row, v), event_id) in rows.iter().zip(vectors).zip(ids) {
                 fetched.push(Fetched {
                     part: *pi,
@@ -858,6 +874,14 @@ impl Engine {
                 actual_parts_opened: c.parts_opened,
                 actual_ranges_scanned: c.ranges_scanned,
                 actual_bytes_read: c.physical_bytes_read,
+                object_requests: c.object_requests,
+                retrieved_bytes: c.exact_bytes_fetched,
+                estimated_cost_micros: crate::storage::estimated_cost_micros(
+                    c.object_requests,
+                    c.exact_bytes_fetched,
+                ),
+                declared_fetch_budget_bytes: q.fetch_budget_bytes,
+                fetch_budget_exhausted: c.fetch_budget_exhausted,
             })
         } else {
             None

@@ -388,6 +388,18 @@
       "value": 16,
       "kind": "policy",
       "rationale": "docs/MERGE-CONTRACT.md#2 \u2014 the most merges a single cycle runs (concurrency budget). Bounds how many partitions a cycle touches, so no cycle's work is unbounded even on a store with thousands of partitions. Excess ops are deferred, not dropped."
+    },
+    {
+      "name": "OBJECT_REQUEST_COST_MICROS",
+      "value": 100,
+      "kind": "policy",
+      "rationale": "docs/STORAGE-CONTRACT.md#5 \u2014 estimated cost of one cold-tier object request, micro-units. BACKEND-CONDITIONAL: a fixed per-call cost (round trip, auth, request charge) independent of size. This is the local-object-store figure (a syscall's worth); an S3-over-WAN request is orders of magnitude more, and a receipt measured against one backend is not the number for the other. Named so EXPLAIN's per-query cost is a consistent unit, re-derived per backend."
+    },
+    {
+      "name": "RETRIEVED_BYTE_COST_PICOS",
+      "value": 1,
+      "kind": "policy",
+      "rationale": "docs/STORAGE-CONTRACT.md#5 \u2014 estimated cost of retrieving one cold-tier byte, pico-units. BACKEND-CONDITIONAL: per-byte egress/transfer. Local object storage is near-free per byte; S3-over-WAN egress is the dominant term of a real bill. Pico unit so a megabyte is a meaningful integer and the two backends' figures stay distinguishable."
     }
   ]
 }

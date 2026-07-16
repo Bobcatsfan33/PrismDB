@@ -272,7 +272,9 @@ fn cmd_search(a: &Args) -> Result<()> {
         force_route: None,
         plan: None,
         threshold: None,
-        explain: false,
+        explain: a.has("explain"),
+        // The cold-tier fetch budget in bytes (S11). None = unbounded.
+        fetch_budget_bytes: a.parse_some("fetch-budget-bytes")?,
     };
 
     if a.has("exact") {

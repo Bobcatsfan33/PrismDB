@@ -182,6 +182,14 @@ pub struct Query {
     /// the engine's `Route` enum; the engine parses it.
     #[serde(default)]
     pub force_route: Option<String>,
+
+    /// The cold-tier **fetch budget**, in bytes (S11, [storage contract §6](../../../docs/STORAGE-CONTRACT.md)).
+    /// `None` = unbounded (fetch every rerank survivor's exact vector, the pre-S11 behaviour). When
+    /// set, execution fetches at most this many bytes of exact vectors — reranking the most-promising
+    /// candidates that fit and flagging the result `fetch_budget_exhausted` — rather than fetching
+    /// unbounded. A plan declares it; execution is bounded by it.
+    #[serde(default)]
+    pub fetch_budget_bytes: Option<usize>,
 }
 
 fn default_true() -> bool {
@@ -208,6 +216,7 @@ impl Default for Query {
             plan: None,
             threshold: None,
             explain: false,
+            fetch_budget_bytes: None,
         }
     }
 }
@@ -283,6 +292,16 @@ pub struct Counters {
     /// distance already narrows hard.
     #[serde(default)]
     pub predicate_evals: usize,
+    /// Cold-tier object requests this query issued (S11): one per part whose exact vectors were
+    /// fetched, coalesced ranged reads within a part counting as one logical request. The two-tier
+    /// bill, on every query (storage contract §6).
+    #[serde(default)]
+    pub object_requests: usize,
+    /// True if the declared `fetch_budget_bytes` was exhausted mid-rerank, so only the
+    /// most-promising candidates that fit the budget were reranked — a **named** degradation, not a
+    /// silent over-fetch or under-answer (storage contract §6).
+    #[serde(default)]
+    pub fetch_budget_exhausted: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -352,6 +371,20 @@ pub struct Explain {
     pub actual_parts_opened: usize,
     pub actual_ranges_scanned: usize,
     pub actual_bytes_read: usize,
+    /// The cold-tier economics (S11, storage contract §6): object requests issued, exact-vector
+    /// bytes retrieved, and an estimated per-query cost in micro-units (`object_requests ×
+    /// request-cost + retrieved_bytes × byte-cost`). Plus the declared fetch budget and whether it
+    /// was exhausted, so the two-tier bill and its bound are both on the query.
+    #[serde(default)]
+    pub object_requests: usize,
+    #[serde(default)]
+    pub retrieved_bytes: usize,
+    #[serde(default)]
+    pub estimated_cost_micros: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declared_fetch_budget_bytes: Option<usize>,
+    #[serde(default)]
+    pub fetch_budget_exhausted: bool,
 }
 
 #[cfg(test)]

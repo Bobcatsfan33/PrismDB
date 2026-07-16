@@ -125,6 +125,7 @@ impl Engine {
             plan: None,
             threshold: None,
             explain: false,
+            fetch_budget_bytes: None,
         })
     }
 

@@ -1,0 +1,35 @@
+//! Object storage, the local cache, and the two-tier cost model (S11).
+//!
+//! The cold tier (exact rerank vectors, bodies) lives on object storage; a local cache sits in
+//! front of it; and every query carries the two-tier bill. See [storage contract](../../../docs/STORAGE-CONTRACT.md).
+//! This module starts with the **cost model** — the thing that makes the bill a number — and grows
+//! to hold the `ObjectStore` trait, its backends, and the cache.
+
+/// The estimated cost of one cold-tier object request, in micro-units.
+///
+/// **Policy** ([C-3](../../../docs/DECISIONS.md)), **backend-conditional** (storage contract §5): an
+/// object request has a fixed per-call cost independent of its size — the round trip, the auth, the
+/// request charge. This is the local-object-store figure (a syscall's worth); an S3-over-WAN request
+/// is orders of magnitude more, and a receipt measured against one backend is not the number for the
+/// other. Named here so `EXPLAIN`'s per-query cost is a consistent unit, re-derived per backend.
+pub const OBJECT_REQUEST_COST_MICROS: u64 = 100;
+
+/// The estimated cost of retrieving one cold-tier byte, in **pico**-units.
+///
+/// **Policy** ([C-3](../../../docs/DECISIONS.md)), **backend-conditional** (storage contract §5): the
+/// per-byte egress/transfer cost. Local object storage is near-free per byte; S3-over-WAN egress is
+/// the dominant term of a real bill. The unit is pico so a megabyte is a meaningful integer and the
+/// two backends' figures stay distinguishable.
+pub const RETRIEVED_BYTE_COST_PICOS: u64 = 1;
+
+/// A query's estimated cold-tier cost, in micro-units: `requests × request-cost + bytes ×
+/// byte-cost`. The two-tier economics as a single number on every `EXPLAIN`.
+pub fn estimated_cost_micros(object_requests: usize, retrieved_bytes: usize) -> u64 {
+    (object_requests as u64)
+        .saturating_mul(OBJECT_REQUEST_COST_MICROS)
+        .saturating_add(
+            (retrieved_bytes as u64)
+                .saturating_mul(RETRIEVED_BYTE_COST_PICOS)
+                .saturating_div(1_000_000),
+        )
+}

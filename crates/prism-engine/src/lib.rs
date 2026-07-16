@@ -27,6 +27,7 @@ pub mod scheduler;
 pub mod search;
 pub mod source;
 pub mod sql;
+pub mod storage;
 pub mod topk;
 pub mod tsv;
 pub mod tuning;

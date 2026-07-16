@@ -296,6 +296,17 @@ pub fn constants() -> Vec<Constant> {
             value: crate::merge::MERGE_MAX_OPS as i64,
             kind: Kind::Policy,
         },
+        // --- S11: the cold-tier cost model (backend-conditional) ---
+        Constant {
+            name: "OBJECT_REQUEST_COST_MICROS",
+            value: crate::storage::OBJECT_REQUEST_COST_MICROS as i64,
+            kind: Kind::Policy,
+        },
+        Constant {
+            name: "RETRIEVED_BYTE_COST_PICOS",
+            value: crate::storage::RETRIEVED_BYTE_COST_PICOS as i64,
+            kind: Kind::Policy,
+        },
     ]
 }
 
