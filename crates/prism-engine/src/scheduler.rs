@@ -93,17 +93,17 @@ pub fn plan_merges(parts: &[PartRef]) -> MergePlan {
         }
     }
 
-    // Candidate ops: a tier with at least the fan-out of parts is ripe to merge. Consider smaller
-    // tiers first — merging the smallest parts reclaims the most part-count for the least bytes
-    // moved, which is what keeps write amplification down.
-    let mut candidates: Vec<(usize, MergeOp)> = Vec::new();
+    // Candidate ops: a tier with at least the fan-out of parts is ripe to merge. Grouped **by
+    // bucket** (a bucket is a tenant or a tenant-group), so admission can be fair across buckets and
+    // a saturating tenant cannot monopolise the cycle's budget (§7).
+    let mut by_bucket: BTreeMap<u32, Vec<(usize, MergeOp)>> = BTreeMap::new();
     for (key, tiers) in &by_partition {
         for (tier, members) in tiers {
             if members.len() >= MERGE_TIER_FANOUT {
                 let input_rows: usize = members.iter().map(|p| p.rows).sum();
                 let mut part_ids: Vec<String> = members.iter().map(|p| p.part_id.clone()).collect();
                 part_ids.sort(); // stable record; the merge answer does not depend on this order
-                candidates.push((
+                by_bucket.entry(key.bucket.id()).or_default().push((
                     input_rows,
                     MergeOp {
                         partition: describe(key),
@@ -121,20 +121,39 @@ pub fn plan_merges(parts: &[PartRef]) -> MergePlan {
             }
         }
     }
-    // Smallest input first (cheapest part-count reclamation).
-    candidates.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.partition.cmp(&b.1.partition)));
+    // Within a bucket, smallest input first (cheapest part-count reclamation).
+    for ops in by_bucket.values_mut() {
+        ops.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.partition.cmp(&b.1.partition)));
+    }
 
-    // Admit within the per-cycle I/O budget and the concurrency (max-ops) budget.
+    // Admit **round-robin across buckets** (the ingest fairness discipline, on merges — §7): one op
+    // per bucket per round, so a bucket with a hundred ripe tiers cannot starve a bucket with one.
+    // A small tenant's merge is admitted within a bounded number of rounds, whatever a loud tenant
+    // is doing. Cut off by the per-cycle I/O and concurrency budgets; the rest defer by name.
+    let mut queues: Vec<std::collections::VecDeque<(usize, MergeOp)>> = by_bucket
+        .into_values()
+        .map(std::collections::VecDeque::from)
+        .collect();
     let mut ops = Vec::new();
     let mut io_spent = 0usize;
     let mut deferred = 0usize;
-    for (rows, op) in candidates {
-        if ops.len() >= MERGE_MAX_OPS || io_spent.saturating_add(rows) > MERGE_IO_BUDGET_ROWS {
-            deferred += 1;
-            continue;
+    let mut progress = true;
+    while progress {
+        progress = false;
+        for q in queues.iter_mut() {
+            if let Some((rows, op)) = q.pop_front() {
+                progress = true;
+                if ops.len() >= MERGE_MAX_OPS
+                    || io_spent.saturating_add(rows) > MERGE_IO_BUDGET_ROWS
+                {
+                    deferred += 1 + q.len();
+                    q.clear();
+                    continue;
+                }
+                io_spent += rows;
+                ops.push(op);
+            }
         }
-        io_spent += rows;
-        ops.push(op);
     }
 
     MergePlan {
@@ -152,11 +171,15 @@ mod tests {
     use prism_part::partition::Bucket;
 
     fn pref(id: &str, bucket: usize, rows: usize) -> PartRef {
+        pref_w(id, bucket, 0, rows)
+    }
+
+    fn pref_w(id: &str, bucket: usize, window: i64, rows: usize) -> PartRef {
         PartRef {
             part_id: id.to_string(),
             partition: PartitionKey {
                 bucket: Bucket::Shared(bucket as u32),
-                window: 0,
+                window,
                 generation: "g".into(),
             },
             rows,
@@ -203,6 +226,32 @@ mod tests {
         assert!(
             plan.ops.is_empty(),
             "a tier below fan-out must not be merged"
+        );
+    }
+
+    /// **A saturating bucket cannot starve a quiet one** (§7): a small tenant's lone ripe merge is
+    /// admitted this cycle even when a loud tenant has far more than the whole op budget — bounded
+    /// delay, not a vague priority.
+    #[test]
+    fn a_loud_bucket_cannot_starve_a_quiet_one() {
+        let mut parts = Vec::new();
+        // Loud bucket 0: many ripe partitions (one per window), each a full small tier.
+        for w in 0..(MERGE_MAX_OPS * 3) as i64 {
+            for i in 0..MERGE_TIER_FANOUT {
+                parts.push(pref_w(&format!("loud_{w}_{i}"), 0, w, MERGE_TIER_BASE_ROWS));
+            }
+        }
+        // Quiet bucket 1: exactly one ripe partition.
+        for i in 0..MERGE_TIER_FANOUT {
+            parts.push(pref_w(&format!("quiet_{i}"), 1, 0, MERGE_TIER_BASE_ROWS));
+        }
+
+        let plan = plan_merges(&parts);
+        assert!(plan.ops.len() <= MERGE_MAX_OPS);
+        // The quiet bucket's op is admitted despite the loud bucket vastly outnumbering it.
+        assert!(
+            plan.ops.iter().any(|op| op.part_ids.iter().any(|id| id.starts_with("quiet_"))),
+            "the quiet bucket was starved by the loud one — fairness is a bounded delay, not a hope"
         );
     }
 

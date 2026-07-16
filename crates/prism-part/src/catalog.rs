@@ -115,7 +115,22 @@ pub struct Snapshot {
     /// Drift baselines, and — the point — the ones that are **degraded**.
     #[serde(default)]
     pub baselines: Vec<BaselineRef>,
+    /// Tombstones: the `event_id`s a user deleted, sorted. A tombstoned row is **logically
+    /// deleted** — excluded from every query answer as of this snapshot — while it may still be
+    /// physically present until a merge reconciles it away ([merge contract §6](../../../docs/MERGE-CONTRACT.md)).
+    /// A merge that rewrites a tombstoned row's part drops the row and clears the tombstone.
+    #[serde(default)]
+    pub tombstones: Vec<String>,
     pub created_at_ms: i64,
+}
+
+impl Snapshot {
+    /// Is this `event_id` deleted as of this snapshot? A binary search over the sorted set.
+    pub fn is_tombstoned(&self, event_id: &str) -> bool {
+        self.tombstones
+            .binary_search_by(|t| t.as_str().cmp(event_id))
+            .is_ok()
+    }
 }
 
 /// A declared bridge between two embedding spaces (generation contract §6).
@@ -229,6 +244,7 @@ impl Snapshot {
             generations: BTreeMap::new(),
             bridges: Vec::new(),
             baselines: Vec::new(),
+            tombstones: Vec::new(),
             created_at_ms: 0,
         }
     }
@@ -271,6 +287,7 @@ pub struct SnapshotMeta {
     pub generations: BTreeMap<String, GenerationState>,
     pub bridges: Vec<Bridge>,
     pub baselines: Vec<BaselineRef>,
+    pub tombstones: Vec<String>,
 }
 
 impl SnapshotMeta {
@@ -279,6 +296,7 @@ impl SnapshotMeta {
             generations: snap.generations.clone(),
             bridges: snap.bridges.clone(),
             baselines: snap.baselines.clone(),
+            tombstones: snap.tombstones.clone(),
         }
     }
 }
@@ -401,6 +419,7 @@ impl<'a> Catalog<'a> {
             generations: meta.generations,
             bridges: meta.bridges,
             baselines: meta.baselines,
+            tombstones: meta.tombstones,
             created_at_ms: now_ms,
         };
 

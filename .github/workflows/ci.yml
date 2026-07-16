@@ -320,6 +320,11 @@ jobs:
       # sustained ingest, and every merge decision records its plan (merge contract §2).
       - run: cargo test --release -p prism-engine --lib scheduler -- --nocapture
       - run: cargo test --release -p prism-cli --test merge_scheduler -- --nocapture
+      # Deletes are tombstones: logical at once, physical at merge, idempotent (merge contract §6).
+      - run: cargo test --release -p prism-cli --test tombstone -- --nocapture
+      # The accelerated soak: sustained ingest + queries + deletes + re-embed + tiered merge, with
+      # a steady-state part count/debt and a canary answer identical to cycle 1 (merge contract §8).
+      - run: cargo test --release -p prism-cli --test soak -- --nocapture
 
   layout:
     name: charter C-4 — the answer is a function of the data, not the layout

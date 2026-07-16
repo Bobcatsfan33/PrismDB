@@ -439,6 +439,10 @@ impl Engine {
                 if ev.tenant_id != req.tenant {
                     continue;
                 }
+                // Logically-deleted rows are not clustered (merge contract §6).
+                if snap.is_tombstoned(&ev.event_id) {
+                    continue;
+                }
                 if let Some(from) = req.time_from {
                     if ev.event_time < from {
                         continue;

@@ -786,7 +786,7 @@ impl Engine {
 
         // Attach the centroid each hit actually lives in, so the physical
         // clustering is inspectable from a result and not only from the counters.
-        let hits: Vec<Hit> = scored
+        let mut hits: Vec<Hit> = scored
             .iter()
             .take(q.k)
             .map(|s| {
@@ -810,6 +810,14 @@ impl Engine {
                 })
             })
             .collect::<Result<Vec<Hit>>>()?;
+
+        // A tombstoned row is logically deleted as of this snapshot — it is filtered from the
+        // answer even while it is still physically present, until a merge reconciles it away
+        // (merge contract §6). Filtering the final hits can return fewer than `k`, which is the
+        // honest count of surviving matches, exactly as a threshold can (§12).
+        if !snap.tombstones.is_empty() {
+            hits.retain(|h| !snap.is_tombstoned(&h.event.event_id));
+        }
 
         // --- 7. semantic grouping of the rerank survivors ---
         let clusters = match q.group_k {

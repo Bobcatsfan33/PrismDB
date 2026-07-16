@@ -149,6 +149,11 @@ impl Engine {
                 if ev.tenant_id != tenant {
                     continue;
                 }
+                // A deleted row leaves the baseline at the next scheduled recompute — which is this
+                // one (merge contract §6, D-064): a logically-deleted row is not "normal" any more.
+                if snap.is_tombstoned(&ev.event_id) {
+                    continue;
+                }
                 vectors.extend_from_slice(&all.vectors[i * dim..(i + 1) * dim]);
                 rows += 1;
             }

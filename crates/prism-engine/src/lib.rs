@@ -5,6 +5,7 @@ pub mod bench;
 pub mod cluster;
 pub mod cluster_corpus;
 pub mod corpus;
+pub mod delete;
 pub mod drift;
 pub mod engine;
 pub mod evidence;

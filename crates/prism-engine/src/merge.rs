@@ -233,6 +233,12 @@ impl Engine {
             let m = r.manifest.pq_m;
             for i in 0..rows.events.len() {
                 let ev = rows.events[i].clone();
+                // Reconcile tombstones: a deleted row is dropped, not carried forward (merge
+                // contract §6). A full merge reads every part, so any tombstoned id is gone
+                // afterward and the tombstone set is cleared below.
+                if snap.is_tombstoned(&ev.event_id) {
+                    continue;
+                }
                 let key = PartitionKey {
                     bucket: scheme.bucket_of(&ev.tenant_id),
                     window: scheme.window_of(ev.event_time),
@@ -307,11 +313,16 @@ impl Engine {
 
         let parts_in = snap.parts.len();
         let parts_out = new_parts.len();
-        let new_snap = self.catalog().commit(
+        // A full merge read every part and carried no tombstoned row forward, so every tombstone is
+        // now reconciled — clear the set (merge contract §6).
+        let mut meta = prism_part::catalog::SnapshotMeta::of(&snap);
+        meta.tombstones.clear();
+        let new_snap = self.catalog().commit_meta(
             &snap,
             new_parts,
             next_seq,
             snap.active_generation.clone(),
+            meta,
             now_ms,
         )?;
 
@@ -410,6 +421,12 @@ impl Engine {
                 let m = reader.manifest.pq_m;
                 for i in 0..rows.events.len() {
                     let ev = rows.events[i].clone();
+                    // Drop tombstoned rows from the parts this cycle touches (merge contract §6).
+                    // The tombstone set is carried forward, since an untouched part may still hold
+                    // the id; a full merge is what finally clears it.
+                    if snap.is_tombstoned(&ev.event_id) {
+                        continue;
+                    }
                     if key.is_none() {
                         key = Some(PartitionKey {
                             bucket: scheme.bucket_of(&ev.tenant_id),
@@ -437,7 +454,9 @@ impl Engine {
                     }
                 }
             }
-            let key = key.expect("a selected op has at least one part with at least one row");
+            // Every row in this op was tombstoned: the op's parts are consumed and no output part
+            // is written — a net deletion.
+            let Some(key) = key else { continue };
             let g = self.catalog().get_generation(&key.generation)?;
             let rows: Vec<RowIn> = merged.into_values().collect();
             rows_out += rows.len();
