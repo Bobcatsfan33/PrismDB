@@ -270,6 +270,32 @@ pub fn constants() -> Vec<Constant> {
             value: prism_part::catalog::LEASE_TTL_MS,
             kind: Kind::Policy,
         },
+        // --- S10: the merge scheduler ---
+        Constant {
+            name: "MERGE_TIER_FANOUT",
+            value: crate::merge::MERGE_TIER_FANOUT as i64,
+            kind: Kind::Policy,
+        },
+        Constant {
+            name: "MERGE_TIER_RATIO",
+            value: crate::merge::MERGE_TIER_RATIO as i64,
+            kind: Kind::Policy,
+        },
+        Constant {
+            name: "MERGE_TIER_BASE_ROWS",
+            value: crate::merge::MERGE_TIER_BASE_ROWS as i64,
+            kind: Kind::Policy,
+        },
+        Constant {
+            name: "MERGE_IO_BUDGET_ROWS",
+            value: crate::merge::MERGE_IO_BUDGET_ROWS as i64,
+            kind: Kind::Policy,
+        },
+        Constant {
+            name: "MERGE_MAX_OPS",
+            value: crate::merge::MERGE_MAX_OPS as i64,
+            kind: Kind::Policy,
+        },
     ]
 }
 

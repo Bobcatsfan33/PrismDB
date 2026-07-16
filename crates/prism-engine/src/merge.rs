@@ -14,7 +14,7 @@ use crate::engine::Engine;
 use prism_part::catalog::PartEntry;
 use prism_part::generation::Generation;
 use prism_part::part::{PartSpec, PartWriter, RowIn};
-use prism_part::partition::PartitionKey;
+use prism_part::partition::{PartRef, PartitionKey};
 use prism_quantizer::{CoarseCodebook, PqCodebook};
 use prism_types::error::{PrismError, Result};
 use prism_types::event::Event;
@@ -45,6 +45,15 @@ pub struct MergeReport {
     /// attempts). The reason names the free bytes and the requirement, so it is auditable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deferred: Option<String>,
+    /// The scheduler's decision for this cycle — the tiers, the ops, the budgets spent — recorded
+    /// so a human can reproduce *why* it merged what it merged ([merge contract §2](../../../docs/MERGE-CONTRACT.md)).
+    /// Present for the tiered scheduler (`merge_tiered`); `None` for the S0 full-compaction `merge`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<crate::scheduler::MergePlan>,
+    /// Excess parts beyond the ideal tiered shape, after this cycle. Bounded merge debt is the
+    /// soak's steady-state assertion (§8).
+    #[serde(default)]
+    pub merge_debt: usize,
 }
 
 /// Free-space headroom required **beyond** the projected merge output, so a merge never fills the
@@ -57,6 +66,39 @@ pub struct MergeReport {
 /// actually *relieve*. 64 MiB is the declared headroom. Measurement cannot pick it; it is a
 /// statement about how close to full we are willing to operate.
 pub const MERGE_SAFETY_MARGIN_BYTES: u64 = 64 * 1024 * 1024;
+
+/// How many parts must pile up in a size tier before it is merged.
+///
+/// **Policy** ([C-3](../../../docs/DECISIONS.md)): the size-tiered fan-out (merge contract §2). Too
+/// low and a partition merges constantly (write amplification); too high and part count drifts up
+/// before a merge fires. 4 is the boring middle: a tier holds at most 3 parts in steady state, so
+/// part count per partition is bounded by `~3 × tiers`. The soak gate binds it.
+pub const MERGE_TIER_FANOUT: usize = 4;
+
+/// The row-count ratio between adjacent size tiers.
+///
+/// **Policy** ([C-3](../../../docs/DECISIONS.md)): a part a tier up is this many times bigger.
+/// Equal to the fan-out on purpose — merging a full tier of `FANOUT` parts produces one part that
+/// lands exactly one tier up, so a merged part does not immediately re-trigger its new tier.
+pub const MERGE_TIER_RATIO: usize = 4;
+
+/// The upper row count of tier 0 — the smallest tier, where freshly-ingested batches land.
+///
+/// **Policy** ([C-3](../../../docs/DECISIONS.md)): near a typical ingest batch, so a batch lands in
+/// tier 0 and climbs from there.
+pub const MERGE_TIER_BASE_ROWS: usize = 256;
+
+/// The most rows a single merge cycle will move (the per-cycle I/O budget).
+///
+/// **Policy** ([C-3](../../../docs/DECISIONS.md)): a cycle admits ops until this is spent, then
+/// defers the rest by name, so one cycle can never rewrite the whole store (merge contract §2).
+pub const MERGE_IO_BUDGET_ROWS: usize = 1_000_000;
+
+/// The most merges a single cycle will run (the concurrency budget).
+///
+/// **Policy** ([C-3](../../../docs/DECISIONS.md)): bounds how many partitions a cycle touches;
+/// excess ops are deferred, not dropped.
+pub const MERGE_MAX_OPS: usize = 16;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ReembedReport {
@@ -118,6 +160,8 @@ impl Engine {
                 write_amplification: 0.0,
                 snapshot_id: snap.snapshot_id,
                 deferred: None,
+                merge_debt: 0,
+                plan: None,
             });
         }
 
@@ -156,6 +200,8 @@ impl Engine {
                          (projected output {input_logical_bytes} B + {MERGE_SAFETY_MARGIN_BYTES} B margin). \
                          The store is unchanged; the merge will run once space returns."
                     )),
+                    merge_debt: 0,
+                    plan: None,
                 });
             }
         }
@@ -285,6 +331,195 @@ impl Engine {
             },
             snapshot_id: new_snap.snapshot_id,
             deferred: None,
+            merge_debt: 0,
+            plan: None,
+        })
+    }
+
+    /// Size-tiered merge (S10) — the scheduler's one cycle.
+    ///
+    /// Unlike [`Engine::merge`], which compacts every part into one per partition, this merges only
+    /// the tiers the scheduler selected ([merge contract §2](../../../docs/MERGE-CONTRACT.md)),
+    /// leaving the rest, so write amplification stays bounded and part count reaches a steady state.
+    /// The returned report carries the scheduler's `plan` (why it chose what it chose) and the merge
+    /// debt after the cycle. A store holding a legacy-format part falls back to the full `merge`,
+    /// which is also how such parts are migrated forward.
+    pub fn merge_tiered(&self, now_ms: i64) -> Result<MergeReport> {
+        let snap = self.snapshot()?;
+        // Legacy parts must always be rewritten; the tiered path only understands Located parts, so
+        // defer to the full compactor when any legacy part is present.
+        let part_refs: Vec<PartRef> = snap
+            .parts
+            .iter()
+            .filter_map(|e| e.located().cloned())
+            .collect();
+        if part_refs.len() != snap.parts.len() {
+            return self.merge(now_ms);
+        }
+
+        let plan = crate::scheduler::plan_merges(&part_refs);
+        if plan.ops.is_empty() {
+            return Ok(MergeReport {
+                parts_in: snap.parts.len(),
+                parts_out: snap.parts.len(),
+                rows_in: 0,
+                rows_out: 0,
+                duplicates_reconciled: 0,
+                parts_migrated: 0,
+                bytes_read: 0,
+                bytes_written: 0,
+                write_amplification: 0.0,
+                snapshot_id: snap.snapshot_id,
+                deferred: None,
+                merge_debt: plan.merge_debt,
+                plan: Some(plan),
+            });
+        }
+
+        // The part_ids this cycle will consume, and the parts it will keep untouched.
+        let consumed: std::collections::BTreeSet<String> = plan
+            .ops
+            .iter()
+            .flat_map(|op| op.part_ids.iter().cloned())
+            .collect();
+
+        let dim = self.store.config.dim;
+        let scheme = self.store.config.partitions.clone();
+        let mut new_parts: Vec<PartEntry> = Vec::new();
+        let mut next_seq = snap.next_seq;
+        let mut bytes_read = 0usize;
+        let mut bytes_written = 0usize;
+        let mut rows_in = 0usize;
+        let mut rows_out = 0usize;
+        let mut duplicates = 0usize;
+
+        for op in &plan.ops {
+            // Reconcile only this op's parts, in one partition.
+            let mut merged: BTreeMap<String, RowIn> = BTreeMap::new();
+            let mut key: Option<PartitionKey> = None;
+            for pid in &op.part_ids {
+                let reader = prism_part::part::PartReader::open(&self.store.part_dir(pid))?;
+                bytes_read += reader
+                    .manifest
+                    .columns
+                    .iter()
+                    .map(|c| c.storage.logical_bytes() as usize)
+                    .sum::<usize>();
+                let rows = reader.read_all()?;
+                rows_in += rows.events.len();
+                let m = reader.manifest.pq_m;
+                for i in 0..rows.events.len() {
+                    let ev = rows.events[i].clone();
+                    if key.is_none() {
+                        key = Some(PartitionKey {
+                            bucket: scheme.bucket_of(&ev.tenant_id),
+                            window: scheme.window_of(ev.event_time),
+                            generation: reader.manifest.generation_id.clone(),
+                        });
+                    }
+                    let row = RowIn {
+                        centroid: rows.centroids[i],
+                        code: rows.codes[i * m..(i + 1) * m].to_vec(),
+                        vector: rows.vectors[i * dim..(i + 1) * dim].to_vec(),
+                        event: ev,
+                    };
+                    match merged.get(&row.event.event_id) {
+                        Some(existing) if !supersedes(&row.event, &existing.event) => {
+                            duplicates += 1;
+                        }
+                        Some(_) => {
+                            duplicates += 1;
+                            merged.insert(row.event.event_id.clone(), row);
+                        }
+                        None => {
+                            merged.insert(row.event.event_id.clone(), row);
+                        }
+                    }
+                }
+            }
+            let key = key.expect("a selected op has at least one part with at least one row");
+            let g = self.catalog().get_generation(&key.generation)?;
+            let rows: Vec<RowIn> = merged.into_values().collect();
+            rows_out += rows.len();
+            let spec = PartSpec {
+                partition: Some(key.clone()),
+                promote: self.store.config.promote.clone(),
+                lineage: Default::default(),
+            };
+            let manifest = PartWriter::write(
+                &self.store.parts_dir(),
+                next_seq,
+                &g.generation_id,
+                &g.model_id,
+                &g.model_version,
+                dim,
+                self.store.config.pq_m,
+                self.store.config.block_size,
+                &spec,
+                rows,
+                now_ms,
+            )?;
+            bytes_written += manifest
+                .columns
+                .iter()
+                .map(|c| c.storage.logical_bytes() as usize)
+                .sum::<usize>();
+            new_parts.push(PartEntry::Located(crate::ingest::part_ref(
+                &manifest, &key,
+            )?));
+            next_seq += 1;
+        }
+
+        prism_part::faults::maybe_kill("merge.after_part_before_commit");
+
+        // The new snapshot keeps every part the cycle did not consume, plus the merged outputs.
+        let mut kept: Vec<PartEntry> = snap
+            .parts
+            .iter()
+            .filter(|e| {
+                e.located()
+                    .map(|r| !consumed.contains(&r.part_id))
+                    .unwrap_or(true)
+            })
+            .cloned()
+            .collect();
+        kept.append(&mut new_parts);
+        let parts_in = snap.parts.len();
+        let parts_out = kept.len();
+        let new_snap = self.catalog().commit(
+            &snap,
+            kept,
+            next_seq,
+            snap.active_generation.clone(),
+            now_ms,
+        )?;
+
+        // Recompute debt on the post-merge shape for the report.
+        let after: Vec<PartRef> = new_snap
+            .parts
+            .iter()
+            .filter_map(|e| e.located().cloned())
+            .collect();
+        let merge_debt = crate::scheduler::plan_merges(&after).merge_debt;
+
+        Ok(MergeReport {
+            parts_in,
+            parts_out,
+            rows_in,
+            rows_out,
+            duplicates_reconciled: duplicates,
+            parts_migrated: 0,
+            bytes_read,
+            bytes_written,
+            write_amplification: if bytes_read == 0 {
+                0.0
+            } else {
+                bytes_written as f64 / bytes_read as f64
+            },
+            snapshot_id: new_snap.snapshot_id,
+            deferred: None,
+            merge_debt,
+            plan: Some(plan),
         })
     }
 

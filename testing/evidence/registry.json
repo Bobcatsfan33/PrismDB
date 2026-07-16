@@ -358,6 +358,36 @@
       "value": 3600000,
       "kind": "policy",
       "rationale": "docs/MERGE-CONTRACT.md#5 \u2014 the maximum time a reader may hold a snapshot pinned across a paginated query (invariant 4/6). A query paginating longer than this has its lease expire and its next page returns the explicit expired-snapshot error rather than a stale answer. One hour is generous for an interactive paginating reader and short enough that a crashed reader does not pin storage for long. This is the ONE lifecycle-timing constant; GC grace and the reclaim horizon are derived const fns of it (catalog::GC_GRACE_MS/GC_HORIZON_MS), never registered separately, so grace<lease can never arise and orphan a live reader."
+    },
+    {
+      "name": "MERGE_TIER_FANOUT",
+      "value": 4,
+      "kind": "policy",
+      "rationale": "docs/MERGE-CONTRACT.md#2 \u2014 parts per size tier before it is merged. Too low merges constantly (write amplification); too high lets part count drift up (read amplification) before a merge fires. 4 is the boring middle: a tier holds at most 3 parts in steady state, so part count per partition is bounded by ~3xtiers. The soak gate binds it \u2014 an unbounded part count fails it."
+    },
+    {
+      "name": "MERGE_TIER_RATIO",
+      "value": 4,
+      "kind": "policy",
+      "rationale": "docs/MERGE-CONTRACT.md#2 \u2014 the row-count ratio between adjacent size tiers. Equal to the fan-out on purpose: merging a full tier of FANOUT parts produces one part that lands exactly one tier up, so a merged part does not immediately re-trigger its new tier."
+    },
+    {
+      "name": "MERGE_TIER_BASE_ROWS",
+      "value": 256,
+      "kind": "policy",
+      "rationale": "docs/MERGE-CONTRACT.md#2 \u2014 the upper row count of tier 0, where freshly-ingested batches land, so a batch lands in tier 0 and climbs from there. Near a typical ingest batch size."
+    },
+    {
+      "name": "MERGE_IO_BUDGET_ROWS",
+      "value": 1000000,
+      "kind": "policy",
+      "rationale": "docs/MERGE-CONTRACT.md#2 \u2014 the most rows a single merge cycle will move. A cycle admits ops until this is spent, then defers the rest by name, so one cycle can never rewrite the whole store even under an ingest burst. Generous enough that steady-state merges are never starved."
+    },
+    {
+      "name": "MERGE_MAX_OPS",
+      "value": 16,
+      "kind": "policy",
+      "rationale": "docs/MERGE-CONTRACT.md#2 \u2014 the most merges a single cycle runs (concurrency budget). Bounds how many partitions a cycle touches, so no cycle's work is unbounded even on a store with thousands of partitions. Excess ops are deferred, not dropped."
     }
   ]
 }

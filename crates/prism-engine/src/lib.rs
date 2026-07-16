@@ -22,6 +22,7 @@ pub mod otlp;
 pub mod plan;
 pub mod rowsource;
 pub mod sample;
+pub mod scheduler;
 pub mod search;
 pub mod source;
 pub mod sql;

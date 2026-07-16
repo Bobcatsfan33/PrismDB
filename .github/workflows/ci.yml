@@ -308,6 +308,19 @@ jobs:
       # stale cursor gets the explicit expired-snapshot error (merge contract §5, query contract §2).
       - run: cargo test --release -p prism-cli --test lease -- --nocapture
 
+  merge-scheduler:
+    name: the S10 gate — size-tiered merges, bounded steady state, answers unchanged
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # A merge is compaction: the top-k over the same rows is identical after any number of merge
+      # cycles (C-4/C-5). Size-tiered selection keeps part count and merge debt bounded under
+      # sustained ingest, and every merge decision records its plan (merge contract §2).
+      - run: cargo test --release -p prism-engine --lib scheduler -- --nocapture
+      - run: cargo test --release -p prism-cli --test merge_scheduler -- --nocapture
+
   layout:
     name: charter C-4 — the answer is a function of the data, not the layout
     runs-on: ubuntu-latest
