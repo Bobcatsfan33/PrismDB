@@ -387,3 +387,117 @@ fn cas_publish_reads_back_on_an_ambiguous_failure() {
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+
+// --- answer-invariance through the object store, under the fault proxy (storage §3/§4) ---
+
+fn cold_over(fault: Arc<FaultStore>) -> Arc<CachedObjectStore> {
+    Arc::new(CachedObjectStore::new(fault, CACHE_QUOTA_BYTES))
+}
+
+fn top_ids(engine: &Engine) -> Vec<String> {
+    let q = Query {
+        text: "the tool call timed out retrying".into(),
+        k: 15,
+        tenant: Some("t1".into()),
+        rerank: 40,
+        ..Default::default()
+    };
+    engine
+        .search(&q)
+        .unwrap()
+        .hits
+        .iter()
+        .map(|h| h.event.event_id.clone())
+        .collect()
+}
+
+/// **A cache state never changes the answer** (D-033 family, storage §3): the same query answered
+/// with the cold tier forced cold (empty cache), forced hot (warmed), and on a fresh store is
+/// byte-identical — only the counters differ.
+#[test]
+fn the_cache_state_never_changes_the_answer() {
+    let (engine, root) = store();
+    let path = root.clone();
+
+    // Forced cold: a fresh object store with an empty cache. Every block is a miss on the first run.
+    let fault = Arc::new(FaultStore::new(LocalObjectStore::new(&path)));
+    let cold_engine = Engine::open(&path).unwrap().with_cold(cold_over(fault));
+    let cold_answer = top_ids(&cold_engine);
+    assert!(!cold_answer.is_empty());
+    assert!(
+        cold_engine.cold.cache().stats().misses > 0,
+        "the cold run must miss the cache"
+    );
+
+    // Forced hot: run again on the same engine — now the blocks are cached (hits), same answer.
+    let hot_answer = top_ids(&cold_engine);
+    assert!(
+        cold_engine.cold.cache().stats().hits > 0,
+        "the hot run must hit the cache"
+    );
+    assert_eq!(
+        cold_answer, hot_answer,
+        "a warm cache changed the answer — storage §3 violated"
+    );
+
+    // And identical to the default (mmap-style local) engine.
+    assert_eq!(
+        cold_answer,
+        top_ids(&engine),
+        "the object-store path answered differently than the default"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// **A transient remote fault is ridden out by a bounded retry — the answer is correct** (storage §4).
+#[test]
+fn a_transient_cold_fault_retries_to_the_correct_answer() {
+    let (engine, root) = store();
+    let baseline = top_ids(&engine);
+
+    let fault = Arc::new(FaultStore::new(LocalObjectStore::new(&root)));
+    let faulted = Engine::open(&root)
+        .unwrap()
+        .with_cold(cold_over(fault.clone()));
+    // A single injected 5xx on the next cold fetch: the bounded retry re-fetches and the answer is
+    // correct, not short.
+    fault.set(FaultConfig {
+        fail_next: true,
+        ..Default::default()
+    });
+    assert_eq!(
+        top_ids(&faulted),
+        baseline,
+        "a transient fault must retry to the correct answer"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// **A persistent remote outage is a named condition, never a silently short result** (storage §4).
+#[test]
+fn a_dead_remote_names_the_condition_never_a_short_answer() {
+    let (_engine, root) = store();
+    let fault = Arc::new(FaultStore::new(LocalObjectStore::new(&root)));
+    let faulted = Engine::open(&root)
+        .unwrap()
+        .with_cold(cold_over(fault.clone()));
+    // The remote is down and the cache is cold: an uncached cold fetch must fail with the named
+    // condition, not return fewer rows as if that were the whole answer.
+    fault.set(FaultConfig {
+        unavailable: true,
+        ..Default::default()
+    });
+    let q = Query {
+        text: "the tool call timed out retrying".into(),
+        k: 15,
+        tenant: Some("t1".into()),
+        rerank: 40,
+        ..Default::default()
+    };
+    let err = faulted.search(&q).unwrap_err().to_string();
+    assert!(
+        err.contains("remote unavailable"),
+        "a dead remote must be named, not a short answer: {err}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}

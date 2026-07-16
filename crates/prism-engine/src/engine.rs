@@ -9,26 +9,55 @@ use std::sync::Arc;
 pub struct Engine {
     pub store: Store,
     pub plane: Arc<dyn ModelPlane>,
+    /// The cold tier's object store, with a content-verified cache in front (S11). Every exact
+    /// rerank-vector fetch goes through this, so the cold tier can be local (the default backend
+    /// points at the store's own `parts/` directory — behaviour-preserving) or remote (an
+    /// `S3ObjectStore`). A cache state is a physical layout, and a physical layout may not change an
+    /// answer ([storage contract §3](../../../docs/STORAGE-CONTRACT.md)).
+    pub cold: Arc<crate::storage::CachedObjectStore>,
 }
 
 impl Engine {
+    /// The default cold-tier store: a cache over a local backend rooted at the store, so a cold
+    /// read fetches `parts/<id>/rerank.vec` from the local disk exactly as the mmap path did.
+    fn default_cold(store: &Store) -> Arc<crate::storage::CachedObjectStore> {
+        let backend = crate::storage::object::LocalObjectStore::new(store.root.clone());
+        Arc::new(crate::storage::CachedObjectStore::new(
+            Arc::new(backend),
+            crate::storage::CACHE_QUOTA_BYTES,
+        ))
+    }
+
     pub fn init(root: &Path, config: StoreConfig) -> Result<Engine> {
         let store = Store::init(root, config)?;
+        let cold = Self::default_cold(&store);
         Ok(Engine {
             store,
             plane: Arc::new(HashModelPlane::new()),
+            cold,
         })
     }
 
     pub fn open(root: &Path) -> Result<Engine> {
+        let store = Store::open(root)?;
+        let cold = Self::default_cold(&store);
         Ok(Engine {
-            store: Store::open(root)?,
+            store,
             plane: Arc::new(HashModelPlane::new()),
+            cold,
         })
     }
 
     pub fn with_plane(mut self, plane: Arc<dyn ModelPlane>) -> Self {
         self.plane = plane;
+        self
+    }
+
+    /// Override the cold-tier object store (a fresh cache, a fault-injecting backend, or an
+    /// `S3ObjectStore` for the remote gate). Used by the answer-invariance gate to force cache
+    /// states and inject remote faults.
+    pub fn with_cold(mut self, cold: Arc<crate::storage::CachedObjectStore>) -> Self {
+        self.cold = cold;
         self
     }
 

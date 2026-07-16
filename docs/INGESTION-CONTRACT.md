@@ -57,6 +57,8 @@ Two things are being promised and they are not the same promise.
 
 An ack means **durable**, not **visible**. A batch is acknowledged once it has been appended to the **durable admission log (WAL)** and `fsync`ed. At that instant, the events are guaranteed to become queryable — even if the process dies immediately afterwards, because recovery will replay the WAL.
 
+**S11 extends what "durable" covers, without moving the ack** ([D-068](DECISIONS.md)). Once the cold tier lives on remote object storage, a part is durable only when its bytes are **remote-verified** ([storage contract §2](STORAGE-CONTRACT.md)) — so the WAL's coverage stretches from "embed → part write → catalog commit" to "embed → part write → **upload → verify → CAS publication**". The ack still fires at the local WAL fsync (not at a remote round trip), and it still means *the WAL will carry these events all the way to remote-durable-and-visible*: recovery re-embeds, re-writes the part, **re-uploads and re-verifies it**, and re-commits, landing exactly once. A part written locally but not yet uploaded-verified-and-referenced is **neither queryable nor acked-durable on its own** — the WAL is what makes its events durable, and there is no local-only-and-trusted third state. The ack-after-log choice is deliberate; the synchronous alternative (ack waits for the upload) is written down and rejected in [D-068](DECISIONS.md).
+
 ### 3b. The source's offset
 
 A source offset is **only ever advanced after the catalog commit that makes those events visible.** Never on ack. Never on WAL append.

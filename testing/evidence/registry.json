@@ -406,6 +406,18 @@
       "value": 268435456,
       "kind": "policy",
       "rationale": "docs/STORAGE-CONTRACT.md#4 \u2014 the local NVMe block cache byte quota. The cache is a bounded, disposable optimization: sized, not unbounded, so it cannot itself become the thing that fills the disk. A full cache evicts under pressure and at the hard limit reports S10 OutOfSpace backpressure rather than growing without bound. 256 MiB is a working default; the real size is a deployment knob. Backend-conditional numbers ride on it."
+    },
+    {
+      "name": "COLD_FETCH_MAX_RETRIES",
+      "value": 3,
+      "kind": "policy",
+      "rationale": "docs/STORAGE-CONTRACT.md#4 \u2014 bounded retries of a transient cold-tier fetch (5xx, dropped connection) before the query fails with the named remote condition. BACKEND-CONDITIONAL: a remote read hiccups; a small bounded retry turns a transient blip into the correct answer, and the bound turns a dead remote into a NAMED failure not an unbounded hang. Three rides out a blip and names a genuinely-down remote quickly. A truncated/corrupt read is NOT retried \u2014 named byte error at once."
+    },
+    {
+      "name": "MULTIPART_THRESHOLD_BYTES",
+      "value": 16777216,
+      "kind": "policy",
+      "rationale": "docs/STORAGE-CONTRACT.md#2 \u2014 object size at/above which an upload uses multipart instead of a single PUT. BACKEND-CONDITIONAL: a single PUT is fine to the backend's limit, but a large object wants multipart so a mid-upload crash resumes and its server-side incomplete parts are swept by GC rather than re-sent whole. 16 MiB is a common part size; a cold-tier rerank.vec crosses it at scale. The multipart client path + GC sweep are filed (issue #6); this is where it engages."
     }
   ]
 }

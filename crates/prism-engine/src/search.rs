@@ -647,7 +647,10 @@ impl Engine {
         for (pi, rows) in &by_part {
             let r = eligible[*pi];
             let ctx = ctxs.get(&r.manifest.generation_id).unwrap();
-            let vectors = r.read_vectors_for_rows(rows)?;
+            // The cold tier goes through the object store + cache (S11): a cache state is a physical
+            // layout and may not change the answer, and a transient remote fault is a bounded retry
+            // or a named condition, never a silently short fetch (storage contract §3/§4).
+            let vectors = self.cold_read_vectors(r, rows)?;
             let ids = r.read_event_ids_for_rows(rows)?;
             c.exact_vectors_fetched += vectors.len();
             c.exact_bytes_fetched += vectors.len() * dim * 4;

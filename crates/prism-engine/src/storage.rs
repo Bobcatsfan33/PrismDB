@@ -43,6 +43,27 @@ pub fn estimated_cost_micros(object_requests: usize, retrieved_bytes: usize) -> 
 /// deployment knob. Backend-conditional numbers ride on it (storage contract §5).
 pub const CACHE_QUOTA_BYTES: usize = 256 * 1024 * 1024;
 
+/// How many times a transient cold-tier fetch (a 5xx, a dropped connection) is retried before the
+/// query fails with the named remote condition.
+///
+/// **Policy** ([C-3](../../../docs/DECISIONS.md)), backend-conditional: a remote read hiccups; a
+/// small bounded retry turns a transient blip into the correct answer, and the *bound* turns a
+/// dead remote into a **named** failure rather than an unbounded hang (storage contract §4). Three
+/// is enough to ride out a blip and few enough that a genuinely-down remote is named quickly. A
+/// truncated/corrupt read is *not* retried — it is a named byte error at once.
+pub const COLD_FETCH_MAX_RETRIES: usize = 3;
+
+/// The object size at or above which an upload uses **multipart** instead of a single `PUT`.
+///
+/// **Policy** ([C-3](../../../docs/DECISIONS.md)), backend-conditional: a single `PUT` is fine up to
+/// the backend's limit, but a large object wants multipart so a mid-upload crash can be resumed and
+/// its server-side incomplete parts swept, rather than re-sent whole. 16 MiB is a common multipart
+/// part size; a cold-tier part's `rerank.vec` crosses it at scale. (The multipart list/abort client
+/// path and the GC sweep are the remaining S11 work, [#6](https://github.com/Bobcatsfan33/PrismDB/issues/6);
+/// this constant is where it engages, tagged by backend so the S3 number is not the MinIO one.)
+pub const MULTIPART_THRESHOLD_BYTES: usize = 16 * 1024 * 1024;
+
+pub mod cold;
 pub mod object;
 pub mod s3;
 pub mod sigv4;

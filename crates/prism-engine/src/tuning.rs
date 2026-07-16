@@ -312,6 +312,16 @@ pub fn constants() -> Vec<Constant> {
             value: crate::storage::CACHE_QUOTA_BYTES as i64,
             kind: Kind::Policy,
         },
+        Constant {
+            name: "COLD_FETCH_MAX_RETRIES",
+            value: crate::storage::COLD_FETCH_MAX_RETRIES as i64,
+            kind: Kind::Policy,
+        },
+        Constant {
+            name: "MULTIPART_THRESHOLD_BYTES",
+            value: crate::storage::MULTIPART_THRESHOLD_BYTES as i64,
+            kind: Kind::Policy,
+        },
     ]
 }
 
