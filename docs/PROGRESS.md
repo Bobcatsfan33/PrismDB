@@ -14,7 +14,7 @@ Sprint gates from [PRISM.md](PRISM.md) Part IV. **A sprint is done when its gate
 | **S7** | GPU compressed scan + rerank | GPU meets recall/tolerance vs the CPU oracle; p99 bounded under saturation; speedups end-to-end | 🟡 **GPU-ready, GPU-off** — device-agnostic machinery built + tested against a CPU reference of the GPU route; the GPU gate is **not** claimed (no GPU runner) |
 | **S8** | Cost-based hybrid optimizer + full SQL semantics | SQL ≡ direct-executor results; fuzzing cannot bypass tenant policy; plan selection beats any fixed plan | ✅ **complete** |
 | **S9** | Semantic GROUP BY at scale + novelty/drift | 100M-row filtered set < 10s single node; ARI ≥ 0.8 vs oracle; injected-novelty precision/recall ≥ 0.9 | 🟡 **semantics complete; 100M<10s not claimed** — ARI, determinism, merge-invariance, and injected-novelty precision/recall all gated; the scale gate is measured honestly and filed (D-062), like S7's GPU |
-| S10 | Merge scheduler + mutations under load | sustained ingest → steady part count and merge debt; kills during merge/delete never expose partial results | ⬜ |
+| **S10** | Merge scheduler + mutations under load | sustained ingest → steady part count and merge debt; kills during merge/delete never expose partial results | ✅ **complete** |
 | S11 | Object storage + local cache | cold/warm/thrash SLOs; cache corruption repaired from remote; rerank fetch bytes bounded by the plan | ⬜ |
 | S12 | Shared-nothing distribution | near-linear scaling; declared snapshot consistency under faults; a lost shard is documented, never silent | ⬜ |
 | S13 | Production model plane | a model crash cannot corrupt or mislabel a part; every semantic value traceable to exact hashes | ⬜ |
@@ -689,3 +689,37 @@ The oracle is **ground-truth labels**, not a reference clusterer — labeled syn
 - **A single k-means++ draw is a lottery** on this corpus (ARI 0.76); restarts make the fit a function of the data, the same lesson D-036 taught the codebook.
 - **A few synthetic novel classes collide into the baseline's hash buckets** (a 64-dim hash-embedder artifact) and are not actually novel; the benchmark injects the genuinely-far classes and records the caveat, because labelling a colliding class "novel" would benchmark the embedder, not the alarm.
 - **The 100M gate needs a scale profile, not a faster core** — the shipped quality params are ~1000× too slow for it, and no committed number supports a 10s claim, so none is made.
+
+---
+
+## S10 — complete
+
+**Gate:** *sustained ingest → steady part count and merge debt; random kills during query/merge/delete never expose partial results; a re-embed migration pauses/resumes/rolls back.* Contract first: [docs/MERGE-CONTRACT.md](MERGE-CONTRACT.md) was written before the scheduler.
+
+### 1. ENOSPC is a first-class fault — the lesson the build host taught
+
+This clause exists because the storage engine's own build host ran out of disk during the project. `PrismError::OutOfSpace` is a **named** condition (a real errno 28 maps to it, so a genuine full disk degrades exactly like an injected one), merge admission refuses a merge **before it starts** unless the projected output plus a safety margin fits free space (a named `deferred`, store untouched, recovers unaided), and a new injectable out-of-space fault fills the disk **mid-part-write, mid-snapshot-commit, and mid-CURRENT-swap** — each degrades old-or-new-never-hybrid and recovers when space returns. The temp+rename discipline made this safe by construction; the tests make it proven.
+
+### 2. The merge scheduler — size-tiered, explainable, bounded, fair
+
+Merge is now **size-tiered** ([`scheduler.rs`](../crates/prism-engine/src/scheduler.rs)): parts bucket by size, a tier at the fan-out is merged and graduates one tier up, so part count reaches a **steady state** and write amplification stays bounded — proven by a sustained-ingest test whose part count and merge debt stay bounded across 40 cycles instead of growing. The decision is **explainable, not deterministic** ([merge contract §2](MERGE-CONTRACT.md)): every op records its tier, parts, debt, and budgets spent, enough to reproduce *why* — but the scheduler is not coupled to a global order, because a merge changes no answer (C-4/C-5), so there is nothing for merge-determinism to protect. Admission is **round-robin across buckets**, so a saturating tenant cannot starve a quiet one's merges (bounded delay, property-tested). Every constant is a registered C-1 policy with a rationale.
+
+### 3. Reader leases and GC grace, by construction
+
+There is **one** lifecycle-timing constant, `LEASE_TTL_MS`; GC grace and the reclaim horizon are `const fn`s of it, so `grace < lease` can never arise and orphan a live reader ([merge contract §5](MERGE-CONTRACT.md), invariant 6 by construction). A reader within its lease survives GC even at `retain = 1`; a crashed/expired reader's snapshot is reclaimed and its stale cursor returns the explicit expired-snapshot error — proven both halves.
+
+### 4. Deletes are tombstones, and when a deleted row leaves a baseline is decided
+
+A delete writes a **tombstone** (one atomic catalog commit): logical at once (queries filter it), physical at merge (reconciled away, a full merge clears the set), idempotent. And the directive's demanded decision is written down ([D-064](DECISIONS.md)): a deleted row leaves the drift baselines at the **next scheduled baseline snapshot**, not at merge time — three named clocks (query answers at tombstone commit, baselines at the next recompute, bytes at merge), none secretly driving another. Frozen receipt corpora are never touched.
+
+### 5. The gate is a soak
+
+The accelerated soak runs sustained ingest **and** queries **and** deletes **and** a re-embed migration together, with the tiered scheduler compacting throughout, and asserts a **steady-state part count**, **bounded merge debt**, and a **canary exact answer byte-identical to cycle 1** — the S8/v1 recall-stability discipline, now with mutations underneath it. The full-length soak is nightly; kill-injection at merge boundaries is the fault matrix's half (an abort cannot run in-process), and the ENOSPC matrix is new this sprint.
+
+### Findings
+
+- **A database must beat the standard its build environment failed** — so ENOSPC became a first-class, injectable, tested fault, not a generic I/O error.
+- **Explainability, not determinism, is the right bar for a scheduler** — answers are layout-invariant already, so coupling the scheduler to a global order would only make it depend on things it must not see.
+- **One constant, not two that can drift** — deriving GC grace from the lease makes invariant 6 hold by construction instead of by a reviewer noticing `grace < lease`.
+- **Deletion has three clocks** — query, baseline, and bytes — and naming each (D-064) is what keeps a compliance-relevant fact from silently depending on merge cadence.
+- **Remaining honest gap:** per-tenant write amplification is not yet a broken-out counter (the store-wide `write_amplification` is; per-tenant accounting rides on the fairness round-robin and is the next increment), and the CLI has no `delete` subcommand yet (the engine API is gated).
