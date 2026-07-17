@@ -64,6 +64,7 @@ pub const COLD_FETCH_MAX_RETRIES: usize = 3;
 pub const MULTIPART_THRESHOLD_BYTES: usize = 16 * 1024 * 1024;
 
 pub mod cold;
+pub mod mirror;
 pub mod object;
 pub mod s3;
 pub mod sigv4;

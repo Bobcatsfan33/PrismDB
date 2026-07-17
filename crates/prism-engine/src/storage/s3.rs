@@ -524,6 +524,20 @@ impl S3ObjectStore {
 
     // --- multipart upload (initiate / part / complete / abort) — plain SigV4, one part per chunk.
 
+    /// Create the configured bucket (idempotent: an existing bucket is not an error). Used by tests
+    /// to isolate each store in its own bucket; a real deployment provisions the bucket out of band.
+    pub fn create_bucket(&self) -> Result<()> {
+        let r = self.send("PUT", &format!("/{}", self.cfg.bucket), &[], b"")?;
+        match r.status {
+            // 200 created; 409 BucketAlreadyOwnedByYou / BucketAlreadyExists — both fine.
+            200 | 409 => Ok(()),
+            s => Err(PrismError::Io(format!(
+                "create bucket `{}` returned HTTP {s}",
+                self.cfg.bucket
+            ))),
+        }
+    }
+
     /// Begin a multipart upload; returns the `UploadId` that identifies its server-side parts.
     pub fn initiate_multipart(&self, key: &str) -> Result<String> {
         let path = format!("{}?uploads=", self.object_path(key));

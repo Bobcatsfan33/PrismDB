@@ -86,6 +86,18 @@ fn s3(cfg: &S3Config) -> S3ObjectStore {
     S3ObjectStore::new(cfg.clone())
 }
 
+/// A config in a **fresh, per-test bucket**, created on demand. The catalog mirror key
+/// (`catalog/SNAPSHOT-<seq>`) is not content-addressed — every fresh store's first snapshot is
+/// `s00000001` — so tests that ingest-and-mirror must not share a bucket, or one store's mirror
+/// looks like another writer's to the split-brain check. One bucket per deployment is the production
+/// model (scope §8); one bucket per test is its honest test-time analogue.
+fn isolated(cfg: &S3Config, tag: &str) -> S3Config {
+    let mut c = cfg.clone();
+    c.bucket = format!("prism-{tag}-{}", std::process::id());
+    s3(&c).create_bucket().expect("create isolated bucket");
+    c
+}
+
 fn top_ids(engine: &prism_engine::Engine) -> Vec<String> {
     let q = Query {
         text: "the tool call timed out retrying".into(),
@@ -227,6 +239,7 @@ fn reconcile_reclaims_remote_orphans_but_never_the_live_set() {
         eprintln!("skipping MinIO reconciliation: PRISM_S3_ENDPOINT is not set");
         return;
     };
+    let cfg = isolated(&cfg, "rec");
     let root = std::env::temp_dir().join(format!("prism-s3rec-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
 
@@ -246,17 +259,22 @@ fn reconcile_reclaims_remote_orphans_but_never_the_live_set() {
     let live_parts = engine.snapshot().unwrap().part_ids();
     assert!(!live_parts.is_empty());
 
-    // Plant orphans on the remote: a cold tier no snapshot names, and a mirror snapshot past the
-    // recovery depth. Plus a live mirror snapshot, which must be protected.
+    // The live mirror snapshot is already on the remote — the ingest above CAS-wrote it (D-069), and
+    // reconciliation must protect it. Plant orphans it must reclaim: a cold tier no snapshot names,
+    // and a mirror snapshot past the recovery depth.
     let probe = s3(&cfg);
+    assert!(
+        probe
+            .head(&format!("catalog/SNAPSHOT-{live_snapshot}"))
+            .unwrap()
+            .is_some(),
+        "the live snapshot was not mirrored to MinIO by ingest"
+    );
     probe
         .put("parts/p99999999-orphanaaaa/rerank.vec", b"orphaned bytes")
         .unwrap();
     probe
         .put("catalog/SNAPSHOT-s00000099", b"stale mirror")
-        .unwrap();
-    probe
-        .put(&format!("catalog/SNAPSHOT-{live_snapshot}"), b"live mirror")
         .unwrap();
 
     // Leak an incomplete multipart upload — a large-object publication that crashed mid-upload
@@ -394,6 +412,67 @@ fn a_large_object_round_trips_through_multipart() {
     store.delete(&key).ok();
 }
 
+/// **Gate (iii) on real object storage — the disaster drill against MinIO (D-069).** The catalog
+/// mirror lives on MinIO. Delete the local catalog entirely, as a disk failure would; recovery
+/// restores the highest verified snapshot from MinIO and the store answers byte-identically. This is
+/// the mirror's reason to exist, proven against a real remote.
+#[test]
+fn a_lost_local_catalog_is_recovered_from_the_minio_mirror() {
+    let Some(cfg) = minio() else {
+        eprintln!("skipping MinIO disaster drill: PRISM_S3_ENDPOINT is not set");
+        return;
+    };
+    let cfg = isolated(&cfg, "dr");
+    let root = std::env::temp_dir().join(format!("prism-s3dr-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+
+    let mk = || {
+        prism_engine::Engine::open(&root)
+            .unwrap()
+            .with_cold(Arc::new(CachedObjectStore::new(
+                Arc::new(s3(&cfg)),
+                CACHE_QUOTA_BYTES,
+            )))
+    };
+
+    let engine = prism_engine::Engine::init(&root, store_cfg())
+        .unwrap()
+        .with_cold(Arc::new(CachedObjectStore::new(
+            Arc::new(s3(&cfg)),
+            CACHE_QUOTA_BYTES,
+        )));
+    engine
+        .ingest(
+            prism_engine::corpus::generate(prism_engine::corpus::Kind::Zipf, 2000, 5),
+            1_760_000_000_000,
+        )
+        .unwrap();
+    let golden = top_ids(&engine);
+    let snap_before = engine.snapshot().unwrap().snapshot_id;
+    assert!(!golden.is_empty());
+
+    // Disk failure: the local catalog authority is gone. Parts + cold tier stay; the mirror is on
+    // MinIO.
+    std::fs::remove_file(root.join("catalog/CURRENT")).ok();
+    std::fs::remove_dir_all(root.join("catalog/snapshots")).ok();
+    let broken = mk();
+    assert!(
+        broken.snapshot().unwrap().parts.is_empty(),
+        "precondition: the store must read empty with its catalog deleted"
+    );
+
+    // Recovery from the MinIO mirror.
+    let restored = broken.recover_catalog_from_mirror().unwrap();
+    assert_eq!(restored.as_deref(), Some(snap_before.as_str()));
+    assert_eq!(
+        top_ids(&mk()),
+        golden,
+        "the store recovered from the MinIO mirror answered differently"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 fn store_cfg() -> StoreConfig {
     StoreConfig {
         format_version: STORE_VERSION,
@@ -419,6 +498,7 @@ fn cold_tier_is_published_and_verified_to_minio_before_reference() {
         eprintln!("skipping MinIO publication: PRISM_S3_ENDPOINT is not set");
         return;
     };
+    let cfg = isolated(&cfg, "pub");
     let root = std::env::temp_dir().join(format!("prism-s3pub-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
 

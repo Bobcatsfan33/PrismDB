@@ -274,6 +274,11 @@ impl Engine {
             self.publish_part_cold(id)?;
         }
 
+        // **Catalog mirror convergence (D-069).** Before committing the new snapshot, bring the
+        // mirror up to the parent — healing any earlier crash between a `CURRENT` rename and its
+        // mirror write. Safe because the mirror never leads; idempotent when already caught up.
+        self.mirror_snapshot(snap)?;
+
         let new_snap = self.catalog().commit(
             snap,
             parts,
@@ -281,6 +286,14 @@ impl Engine {
             Some(generation.generation_id.clone()),
             now_ms,
         )?;
+
+        // **The catalog mirror (D-069).** Local `CURRENT` has been renamed — the commit is live. Now
+        // CAS-write the snapshot to the object-store mirror, which lags the local truth and never
+        // leads it. A crash at this kill point leaves the mirror one snapshot behind; the next write
+        // (which re-mirrors the parent above) or an explicit recovery converges it — old-or-new holds
+        // because the local rename already decided the outcome.
+        prism_part::faults::maybe_kill("mirror.after_rename_before_mirror");
+        self.mirror_snapshot(&new_snap)?;
 
         Ok(IngestReport {
             admitted,

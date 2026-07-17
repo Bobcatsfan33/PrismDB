@@ -437,6 +437,75 @@ fn orphans_left_by_a_crash_are_invisible_to_readers_and_reclaimable_by_gc() {
 }
 
 #[test]
+fn killing_between_the_rename_and_the_mirror_heals_on_the_next_write() {
+    // D-069: the object-store catalog mirror lags local CURRENT and never leads it. A crash after
+    // the local rename but before the mirror CAS leaves the mirror one snapshot behind — and the
+    // next write converges it (it re-mirrors the parent before its own commit). Old-or-new holds
+    // because the local rename already decided the outcome; the mirror is a follower.
+    let (dir, root, old_snapshot, old_rows) = seeded_store("mirror");
+    let seed_mirror = root
+        .join("catalog")
+        .join(format!("SNAPSHOT-{old_snapshot}"));
+    assert!(
+        seed_mirror.exists(),
+        "the seed snapshot was never mirrored to the object store"
+    );
+
+    let second = write_corpus(&dir, "second.tsv", Kind::Uniform, 400, 2, "b");
+    let out = run(
+        &[
+            "ingest",
+            "--path",
+            root.to_str().unwrap(),
+            "--file",
+            second.to_str().unwrap(),
+        ],
+        Some("mirror.after_rename_before_mirror"),
+    );
+    assert!(died_abnormally(&out), "the mirror kill point did not fire");
+
+    // Local CURRENT is the NEW snapshot: the rename committed, the mirror is what lagged.
+    let h = assert_healthy(&root);
+    assert_eq!(
+        h.rows,
+        old_rows + 400,
+        "the local commit must be live despite the mirror crash"
+    );
+    assert_ne!(h.snapshot, old_snapshot);
+    let new_mirror = root
+        .join("catalog")
+        .join(format!("SNAPSHOT-{}", h.snapshot));
+    assert!(
+        !new_mirror.exists(),
+        "the mirror was written despite the kill before it — it is not a follower"
+    );
+
+    // The next write heals: it re-mirrors the parent (the un-mirrored CURRENT) before its own commit.
+    let third = write_corpus(&dir, "third.tsv", Kind::Uniform, 100, 3, "c");
+    let out = run(
+        &[
+            "ingest",
+            "--path",
+            root.to_str().unwrap(),
+            "--file",
+            third.to_str().unwrap(),
+        ],
+        None,
+    );
+    assert!(
+        out.status.success(),
+        "the store would not accept a write after the mirror crash: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        new_mirror.exists(),
+        "the mirror did not converge to the lagged snapshot on the next write"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn every_declared_kill_point_is_reachable() {
     // A kill point nobody ever fires is a kill point that is lying about being
     // tested. Every point in KILL_POINTS must be exercised by some test above;
@@ -457,6 +526,7 @@ fn every_declared_kill_point_is_reachable() {
         "ingest.after_publish_before_offset_commit",
         "publish.after_upload_before_verify",
         "publish.after_verify_before_reference",
+        "mirror.after_rename_before_mirror",
     ];
     for p in KILL_POINTS {
         assert!(

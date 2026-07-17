@@ -47,6 +47,11 @@ pub const KILL_POINTS: &[&str] = &[
     // commit that would reference the part has not run. Still an orphan, still
     // old-or-new: the snapshot is unchanged.
     "publish.after_verify_before_reference",
+    // Local CURRENT has been renamed (the commit is live), but the object-store
+    // catalog mirror has not been CAS-written yet (D-069). The mirror is one
+    // snapshot behind; the next write or an explicit recovery converges it. The
+    // outcome is already decided — old-or-new by the local rename.
+    "mirror.after_rename_before_mirror",
 ];
 
 /// The points at which an out-of-space fault can be injected. Unlike [`KILL_POINTS`], these are
