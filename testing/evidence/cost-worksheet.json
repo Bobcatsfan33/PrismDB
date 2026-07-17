@@ -78,6 +78,22 @@
   "request_counts": {
     "_rule": "Cold-tier object requests per query, from Counters.object_requests: one per part whose exact vectors are fetched, coalesced ranged reads within a part counting as one. A query touching P eligible parts issues <= P cold requests; the fetch budget (§6) bounds the bytes those requests move.",
     "cold_requests_per_query": "<= eligible parts touched",
-    "bytes_per_request_bounded_by": "Query.fetch_budget_bytes (storage contract §6)"
+    "bytes_per_request_bounded_by": "Query.fetch_budget_bytes (storage contract §6)",
+
+    "measured": {
+      "_source": "crates/prism-cli/tests/storage.rs::cold_path_request_counts_are_measured_and_bounded (permanent, storage CI job) — prints the numbers below; the S11 MinIO gate exercises the same path against a real remote.",
+      "_backend_independent": "object_requests and retrieved_bytes are a function of the query and the data, NOT the backend: cold_read_vectors fetches the same rows from the same parts whether the bytes come from local disk or MinIO (answer-invariance §3). So this measurement on the local backend is the number the MinIO gate reports.",
+      "config": { "dim": 64, "k": 15, "rerank": 40 },
+      "object_requests": 1,
+      "retrieved_bytes": 10240,
+      "eligible_parts": 4,
+      "bytes_per_request": 10240,
+      "_note": "40 rerank survivors x 64 dim x 4 B = 10240 B, coalesced into 1 object request (all survivors in one part); 1 <= 4 eligible parts, the per-part bound holds.",
+      "projected_at_768d": {
+        "_rule": "PROJECTION: object_requests is dimension-independent (one per part touched); retrieved_bytes scales linearly with dimension (40 x 768 x 4).",
+        "object_requests": 1,
+        "retrieved_bytes": 122880
+      }
+    }
   }
 }

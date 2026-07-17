@@ -127,6 +127,52 @@ fn reconcile_reclaims_orphans_but_never_the_live_set() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// **The cold-path request count is MEASURED, not asserted (storage §7).** A query's cold tier
+/// issues one object request per part it fetches exact vectors from — bounded above by the eligible
+/// parts — and the fetch budget bounds the bytes those requests move. The count is a function of the
+/// query and the data, not the backend (answer-invariance §3), so this measurement on the local
+/// backend is the same the MinIO gate would report. It prints the numbers the cost worksheet records.
+#[test]
+fn cold_path_request_counts_are_measured_and_bounded() {
+    let (engine, root) = store();
+    let total_parts = engine.snapshot().unwrap().part_ids().len();
+
+    let q = Query {
+        text: "the tool call timed out retrying".into(),
+        k: 15,
+        tenant: Some("t1".into()),
+        rerank: 40,
+        explain: true,
+        ..Default::default()
+    };
+    let res = engine.search(&q).unwrap();
+    let ex = res.explain.expect("explain requested");
+    eprintln!(
+        "MEASURED cold-path (dim=64, k=15, rerank=40): object_requests={} retrieved_bytes={} \
+         eligible_parts={} bytes_per_request={}",
+        ex.object_requests,
+        ex.retrieved_bytes,
+        total_parts,
+        ex.retrieved_bytes
+            .checked_div(ex.object_requests)
+            .unwrap_or(0)
+    );
+
+    assert!(
+        ex.object_requests >= 1,
+        "a cold fetch is at least one request"
+    );
+    assert!(
+        ex.object_requests <= total_parts,
+        "cold requests {} exceeded the {} eligible parts — the per-part bound is violated",
+        ex.object_requests,
+        total_parts
+    );
+    assert_eq!(ex.retrieved_bytes, res.counters.exact_bytes_fetched);
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// **The declared byte budget bounds the cold-tier fetch, and exhaustion is named.**
 #[test]
 fn the_fetch_budget_bounds_the_cold_tier_and_names_exhaustion() {

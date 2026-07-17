@@ -56,11 +56,11 @@ pub const COLD_FETCH_MAX_RETRIES: usize = 3;
 /// The object size at or above which an upload uses **multipart** instead of a single `PUT`.
 ///
 /// **Policy** ([C-3](../../../docs/DECISIONS.md)), backend-conditional: a single `PUT` is fine up to
-/// the backend's limit, but a large object wants multipart so a mid-upload crash can be resumed and
-/// its server-side incomplete parts swept, rather than re-sent whole. 16 MiB is a common multipart
-/// part size; a cold-tier part's `rerank.vec` crosses it at scale. (The multipart list/abort client
-/// path and the GC sweep are the remaining S11 work, [#6](https://github.com/Bobcatsfan33/PrismDB/issues/6);
-/// this constant is where it engages, tagged by backend so the S3 number is not the MinIO one.)
+/// the backend's limit, but a large object wants multipart so a mid-upload crash leaves resumable
+/// server-side parts that GC's list-and-abort sweep reclaims, rather than re-sent whole. This is both
+/// the threshold and the part size (16 MiB > S3's 5 MiB minimum); a cold-tier part's `rerank.vec`
+/// crosses it at scale. The multipart client path (initiate/part/complete/abort) and the GC sweep are
+/// implemented (S11 boundary d); this constant is where they engage.
 pub const MULTIPART_THRESHOLD_BYTES: usize = 16 * 1024 * 1024;
 
 pub mod cold;
