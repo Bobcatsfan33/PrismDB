@@ -27,10 +27,14 @@ pub fn set_available_override(bytes: Option<u64>) {
 
 /// Free bytes available on the device holding `path`, or `None` if it cannot be determined.
 pub fn available_bytes(path: &Path) -> Option<u64> {
-    if let Some(b) = *OVERRIDE.lock().expect("disk override lock") {
-        return Some(b);
-    }
-    real_available_bytes(path)
+    resolve_available_bytes(*OVERRIDE.lock().expect("disk override lock"), path)
+}
+
+/// The pure resolution rule: an injected override wins, else the real measurement. Split out from
+/// the process-global [`OVERRIDE`] so tests exercise the rule by **passing the value in** rather than
+/// racing a global — zero-flake by construction, not by serialization.
+fn resolve_available_bytes(overridden: Option<u64>, path: &Path) -> Option<u64> {
+    overridden.or_else(|| real_available_bytes(path))
 }
 
 #[cfg(target_os = "linux")]
@@ -88,10 +92,14 @@ fn real_available_bytes(_path: &Path) -> Option<u64> {
 mod tests {
     use super::*;
 
+    // These test the pure resolution rule by INJECTING the override value, never touching the
+    // process-global `OVERRIDE` — so they are zero-flake under parallel execution, where two tests
+    // racing the global would otherwise clobber each other's setting. (The global is exercised
+    // end-to-end by `tests/enospc.rs`, which drives merge admission.)
+
     #[test]
     fn reports_a_plausible_free_count_for_the_temp_dir() {
-        set_available_override(None);
-        let got = available_bytes(&std::env::temp_dir());
+        let got = resolve_available_bytes(None, &std::env::temp_dir());
         // On the CI and dev targets this must succeed and be non-trivial; elsewhere None is allowed.
         if let Some(bytes) = got {
             assert!(bytes > 1024, "implausibly small free space: {bytes}");
@@ -99,9 +107,16 @@ mod tests {
     }
 
     #[test]
-    fn the_override_wins_and_clears() {
-        set_available_override(Some(4242));
-        assert_eq!(available_bytes(Path::new("/nonexistent")), Some(4242));
-        set_available_override(None);
+    fn the_injected_override_wins_over_the_real_measurement() {
+        // An injected value is returned verbatim, even for a path the syscall would fail on.
+        assert_eq!(
+            resolve_available_bytes(Some(4242), Path::new("/nonexistent")),
+            Some(4242)
+        );
+        // With no override, the rule falls through to the real measurement.
+        assert_eq!(
+            resolve_available_bytes(None, Path::new("/nonexistent")),
+            real_available_bytes(Path::new("/nonexistent"))
+        );
     }
 }
