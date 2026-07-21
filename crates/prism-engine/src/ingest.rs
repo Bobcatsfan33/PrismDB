@@ -25,6 +25,15 @@ use std::collections::BTreeMap;
 use std::fs::OpenOptions;
 use std::io::Write;
 
+/// A trained-but-not-yet-committed bootstrap generation and the embeddings it was trained from —
+/// the output of [`Engine::train_generation`], reused by the single-store bootstrap (which writes
+/// the parts) and the cluster (which discards the embeddings and installs the generation).
+pub struct Trained {
+    pub generation: Generation,
+    pub events: Vec<Event>,
+    pub vectors: Vec<Vec<f32>>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct IngestReport {
     pub admitted: usize,
@@ -84,60 +93,26 @@ impl Engine {
         let (generation, trained) = match &snap.active_generation {
             Some(g) => (self.catalog().get_generation(g)?, false),
             None => {
-                let embedder = self.plane.default_embedder(dim);
-                let (kept, failed) = embed_all(&*embedder, admitted);
-                admitted = kept.0;
-                let vectors = kept.1;
-                dead.extend(failed);
-
-                if vectors.is_empty() {
-                    return self.finish_empty(&snap, dead, now_ms);
-                }
-
                 // The bootstrap generation: the one honest exception to "never the first
-                // batch", because the first batch is all there is. It is stratified, keyed on
-                // event_id, and recorded as PROVISIONAL -- which is exactly what `prism
-                // generation create` exists to replace. A provisional generation is not a bug;
-                // a provisional generation nobody told you about is.
-                let (sample, prov) = crate::sample::stratified_sample(
-                    &crate::generations::sample_rows(&admitted, &vectors),
-                    crate::sample::TRAIN_SAMPLE_MAX,
-                    self.store.config.seed,
-                    &snap.snapshot_id,
+                // batch", because the first batch is all there is. Training is factored out
+                // (`train_generation`) so a cluster can train it the SAME way over a cluster-wide
+                // sample and install it on every shard — a codebook fit to one shard's tenants is
+                // the D-072 mistake ([D-072](../../../docs/DECISIONS.md)).
+                let (trained, failed) = self.train_generation(&snap.snapshot_id, admitted)?;
+                dead.extend(failed);
+                let Some(t) = trained else {
+                    return self.finish_empty(&snap, dead, now_ms);
+                };
+                self.catalog().put_generation(&t.generation)?;
+                return self.write_and_commit(
+                    &snap,
+                    &t.generation,
+                    t.events,
+                    t.vectors,
+                    dead,
                     true,
-                )?;
-                let n = prov.rows_sampled;
-                let coarse = CoarseCodebook::train_restarts(
-                    &sample,
-                    n,
-                    dim,
-                    self.store.config.nlist,
-                    self.store.config.seed,
-                    self.store.config.kmeans_restarts,
-                )?;
-                let pq = PqCodebook::train_restarts(
-                    &sample,
-                    n,
-                    dim,
-                    self.store.config.pq_m,
-                    self.store.config.seed,
-                    self.store.config.kmeans_restarts,
-                )?;
-                let g = Generation::new(
-                    embedder.model_id(),
-                    embedder.model_version(),
-                    dim,
-                    coarse,
-                    pq,
-                    &format!(
-                        "bootstrap (PROVISIONAL): stratified sample of {n} vectors from the \
-                         first ingest, keyed on event_id"
-                    ),
-                )?
-                .with_training(crate::generations::provenance(&prov));
-                self.catalog().put_generation(&g)?;
-
-                return self.write_and_commit(&snap, &g, admitted, vectors, dead, true, now_ms);
+                    now_ms,
+                );
             }
         };
 
@@ -148,6 +123,71 @@ impl Engine {
         dead.extend(failed);
 
         self.write_and_commit(&snap, &generation, kept.0, kept.1, dead, trained, now_ms)
+    }
+
+    /// Train a bootstrap generation from a batch — the shared trainer the single-store bootstrap and
+    /// the cluster both use. Deterministic in `(events, seed, config, snapshot_id)`: the stratified
+    /// sample is seeded on `snapshot_id`, and the codebooks on `config.seed`, so training the same
+    /// events with the same seed yields a **byte-identical, content-addressed** generation — which is
+    /// exactly what lets a cluster train one codebook over a cluster-wide sample and install it on
+    /// every shard ([D-072](../../../docs/DECISIONS.md)). Does **not** commit; the caller installs it.
+    /// Returns `None` when nothing embeds (the caller finishes empty), plus the dead-letters either way.
+    pub fn train_generation(
+        &self,
+        snapshot_id: &str,
+        admitted: Vec<Event>,
+    ) -> Result<(Option<Trained>, Vec<DeadLetter>)> {
+        let dim = self.store.config.dim;
+        let embedder = self.plane.default_embedder(dim);
+        let (kept, dead) = embed_all(&*embedder, admitted);
+        let (events, vectors) = kept;
+        if vectors.is_empty() {
+            return Ok((None, dead));
+        }
+        let (sample, prov) = crate::sample::stratified_sample(
+            &crate::generations::sample_rows(&events, &vectors),
+            crate::sample::TRAIN_SAMPLE_MAX,
+            self.store.config.seed,
+            snapshot_id,
+            true,
+        )?;
+        let n = prov.rows_sampled;
+        let coarse = CoarseCodebook::train_restarts(
+            &sample,
+            n,
+            dim,
+            self.store.config.nlist,
+            self.store.config.seed,
+            self.store.config.kmeans_restarts,
+        )?;
+        let pq = PqCodebook::train_restarts(
+            &sample,
+            n,
+            dim,
+            self.store.config.pq_m,
+            self.store.config.seed,
+            self.store.config.kmeans_restarts,
+        )?;
+        let generation = Generation::new(
+            embedder.model_id(),
+            embedder.model_version(),
+            dim,
+            coarse,
+            pq,
+            &format!(
+                "bootstrap (PROVISIONAL): stratified sample of {n} vectors from the first ingest, \
+                 keyed on event_id"
+            ),
+        )?
+        .with_training(crate::generations::provenance(&prov));
+        Ok((
+            Some(Trained {
+                generation,
+                events,
+                vectors,
+            }),
+            dead,
+        ))
     }
 
     fn finish_empty(

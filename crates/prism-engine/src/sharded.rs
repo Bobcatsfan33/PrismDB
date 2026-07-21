@@ -16,17 +16,28 @@
 
 use crate::cluster::{ClusterRequest, SemanticClusterResult};
 use crate::engine::Engine;
+use crate::storage::object::{LocalObjectStore, ObjectStore};
+use prism_part::generation::Generation;
 use prism_part::partition::{Bucket, PartitionScheme};
 use prism_part::store::StoreConfig;
 use prism_types::error::{PrismError, Result};
 use prism_types::{Event, Query, SearchResult};
 use std::path::Path;
+use std::sync::Arc;
 
 /// A cluster of shards. Each shard is a whole [`Engine`] over its own store; the cluster routes by
-/// tenant bucket and never lets a tenant bucket straddle two shards.
+/// tenant bucket and never lets a tenant bucket straddle two shards. The **generation store** holds
+/// the one cluster-global codebook, content-addressed, that every shard installs and serves
+/// ([D-072](../../../docs/DECISIONS.md)) — shards never train their own.
 pub struct Cluster {
     shards: Vec<Engine>,
     scheme: PartitionScheme,
+    gen_store: Arc<dyn ObjectStore>,
+}
+
+/// The generation store key for a content-addressed codebook.
+fn gen_key(id: &str) -> String {
+    format!("generations/{id}")
 }
 
 /// A stable ordinal for a bucket, disjoint across `Shared`/`Dedicated`, so a bucket maps to exactly
@@ -55,7 +66,12 @@ impl Cluster {
                 config.clone(),
             )?);
         }
-        Ok(Cluster { shards, scheme })
+        let gen_store = Arc::new(LocalObjectStore::new(root.join("cluster-generations")));
+        Ok(Cluster {
+            shards,
+            scheme,
+            gen_store,
+        })
     }
 
     pub fn num_shards(&self) -> usize {
@@ -85,10 +101,63 @@ impl Cluster {
             .collect()
     }
 
-    /// Ingest a batch, routing each event to the shard that owns its tenant bucket. One event's
-    /// placement is a pure function of its tenant, so the same corpus lands identically on the same
-    /// shard regardless of shard count (modulo which shard index that is).
+    /// The generation every shard serves (they serve one, uniformly), or `None` before the first
+    /// ingest has installed it.
+    pub fn installed_generation(&self) -> Result<Option<String>> {
+        Ok(self.shards[0].snapshot()?.active_generation)
+    }
+
+    /// Publish a trained codebook to the cluster's generation store, content-addressed and
+    /// idempotent — the store is a codebook's natural home ([D-071](../../../docs/DECISIONS.md)).
+    fn publish_generation(&self, g: &Generation) -> Result<()> {
+        g.verify_content_address()?;
+        let key = gen_key(&g.generation_id);
+        if self.gen_store.head(&key)?.is_none() {
+            self.gen_store.put(&key, &serde_json::to_vec(g)?)?;
+        }
+        Ok(())
+    }
+
+    /// Install a published generation on **every** shard: fetch-by-hash, verify the bytes hash to the
+    /// id asked for (the capability check — the store cannot hand a shard the wrong codebook), then
+    /// activate. Returns only once every shard serves it: the **order invariant**
+    /// ([D-071](../../../docs/DECISIONS.md)) — no shard writes a part pinned to a generation, or
+    /// serves a query against it, before every assigned shard has installed and verified it.
+    fn install_generation_everywhere(&self, id: &str, now_ms: i64) -> Result<()> {
+        let bytes = self.gen_store.get(&gen_key(id))?;
+        let g: Generation = serde_json::from_slice(&bytes)?;
+        if g.generation_id != id {
+            return Err(PrismError::Corrupt(format!(
+                "the generation store returned `{}` for key `{id}` — not the codebook asked for",
+                g.generation_id
+            )));
+        }
+        for shard in &self.shards {
+            shard.install_generation(&g, now_ms)?;
+        }
+        Ok(())
+    }
+
+    /// Ingest a batch, routing each event to the shard that owns its tenant bucket. **The first
+    /// ingest trains the one cluster-global generation over a cluster-wide sample** (every event, not
+    /// one shard's slice — a per-shard codebook is the [D-072](../../../docs/DECISIONS.md) mistake),
+    /// publishes it, and installs it on every shard *before* any part is written. Thereafter every
+    /// shard codes under the same codebook, so the same corpus lands byte-identically on 1, 2, or 4
+    /// shards.
     pub fn ingest(&self, events: Vec<Event>, now_ms: i64) -> Result<()> {
+        if self.installed_generation()?.is_none() {
+            // Train cluster-wide, seeded on the empty snapshot id so the codebook is identical at any
+            // shard count. `train_generation` does not commit — the install path does.
+            let seed_snapshot = prism_part::catalog::Snapshot::empty().snapshot_id;
+            let (trained, _dead) =
+                self.shards[0].train_generation(&seed_snapshot, events.clone())?;
+            if let Some(t) = trained {
+                self.publish_generation(&t.generation)?;
+                self.install_generation_everywhere(&t.generation.generation_id, now_ms)?;
+            }
+            // If nothing embeds, no generation is installed and each shard's ingest finishes empty.
+        }
+
         let mut by_shard: Vec<Vec<Event>> = vec![Vec::new(); self.shards.len()];
         for e in events {
             let s = self.shard_index(&e.tenant_id);

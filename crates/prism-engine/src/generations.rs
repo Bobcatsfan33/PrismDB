@@ -353,6 +353,41 @@ impl Engine {
         Ok(s.snapshot_id)
     }
 
+    /// **Install an externally-trained generation and make it active** — the cluster path
+    /// ([D-071](../../../docs/DECISIONS.md), [D-072](../../../docs/DECISIONS.md)). A codebook is
+    /// content-addressed, so installing is `put + verify`: the id is re-derived from the bytes and
+    /// must match (`verify_content_address`), which is the capability check — a shard cannot be handed
+    /// a generation that is not what it claims. **Idempotent**: a generation already active is a no-op
+    /// (re-installing the same hash changes nothing). This is how a shard comes to *serve* a
+    /// generation without ever *training* one — shard-local training is forbidden in cluster mode
+    /// ([D-072](../../../docs/DECISIONS.md)); the codebook is trained once, cluster-wide, and installed.
+    pub fn install_generation(&self, g: &Generation, now_ms: i64) -> Result<()> {
+        g.verify_content_address()?;
+        let snap = self.snapshot()?;
+        if snap.active_generation.as_deref() == Some(g.generation_id.as_str()) {
+            return Ok(()); // already installed and active — idempotent
+        }
+        self.catalog().put_generation(g)?;
+        let mut meta = SnapshotMeta::of(&snap);
+        if let Some(active) = &snap.active_generation {
+            if active != &g.generation_id {
+                meta.generations
+                    .insert(active.clone(), GenerationState::Deprecated);
+            }
+        }
+        meta.generations
+            .insert(g.generation_id.clone(), GenerationState::Active);
+        self.catalog().commit_meta(
+            &snap,
+            snap.parts.clone(),
+            snap.next_seq,
+            Some(g.generation_id.clone()),
+            meta,
+            now_ms,
+        )?;
+        Ok(())
+    }
+
     /// Re-embed the remaining parts into the active generation. Resumable: it is a no-op once
     /// nothing is left, and running it twice is running it once.
     pub fn generation_migrate(

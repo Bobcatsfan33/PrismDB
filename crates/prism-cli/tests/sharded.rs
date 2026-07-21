@@ -1,17 +1,20 @@
 //! **The S12 cluster scaffold gate.** Sharding by tenant bucket, routing, and the snapshot vector
 //! ([query §19/§20](../../../docs/QUERY-CONTRACT.md), [D-071](../../../docs/DECISIONS.md)).
 //!
-//! This gate proves the scaffold: a tenant bucket lands whole on one shard (placement = isolation),
-//! a tenant-scoped query routes to that shard and its answer equals reading the owner shard directly,
-//! no tenant's rows leak to another shard, the snapshot vector reflects every shard, and a
-//! cross-tenant query is **named**, never answered from one shard. The full *byte-identical across 1/
-//! 2/4 shards* layout gate needs a **cluster-global generation** (each shard otherwise bootstraps a
-//! different codebook on its data subset, which changes candidate selection — [D-072](../../../docs/DECISIONS.md));
-//! that is the next increment, built against this scaffold.
+//! Scaffold: a tenant bucket lands whole on one shard (placement = isolation), a tenant-scoped query
+//! routes to that shard and equals reading the owner shard directly, no rows leak, the snapshot
+//! vector reflects every shard, a cross-tenant query is **named**.
+//!
+//! **Checkpoint 1 of the thesis exam:** with the one **cluster-global generation** installed on every
+//! shard ([D-072](../../../docs/DECISIONS.md)), the same corpus on 1/2/4 shards answers
+//! **byte-identically** for tenant-scoped search and semantic `GROUP BY`. The cross-tenant
+//! global-candidate-set merge (checkpoint 2) and the full plan/route-flip exam are the next steps.
 
+use prism_engine::cluster::ClusterRequest;
 use prism_engine::sharded::Cluster;
 use prism_part::store::{StoreConfig, STORE_VERSION};
 use prism_types::Query;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -119,6 +122,86 @@ fn the_cluster_routes_by_tenant_bucket_and_places_a_bucket_whole_on_one_shard() 
     );
 
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A byte-exact fingerprint of a tenant's answers — search hit order + the semantic GROUP BY
+/// (assignments, cluster shape, and centroids to the bit) — so a comparison is truly byte-identical.
+fn tenant_fingerprint(cluster: &Cluster, t: &str) -> (Vec<String>, GroupByRepr) {
+    let hits = hit_ids(&cluster.search(&query(Some(t))).unwrap());
+    let gb = cluster
+        .semantic_cluster(&ClusterRequest::new(t, 4))
+        .unwrap();
+    let repr = GroupByRepr {
+        assignments: gb.assignments.clone(),
+        k_effective: gb.k_effective,
+        rows: gb.rows,
+        quality_bits: gb.quality.to_bits(),
+        centroid_bits: gb.centroids.iter().map(|f| f.to_bits()).collect(),
+    };
+    (hits, repr)
+}
+
+#[derive(PartialEq, Eq, Debug)]
+struct GroupByRepr {
+    assignments: Vec<(String, usize)>,
+    k_effective: usize,
+    rows: usize,
+    quality_bits: u64,
+    centroid_bits: Vec<u32>,
+}
+
+fn cluster_answers(num_shards: usize, tag: &str) -> BTreeMap<String, (Vec<String>, GroupByRepr)> {
+    let cluster = Cluster::init(&tmp(tag), num_shards, config()).unwrap();
+    cluster
+        .ingest(
+            prism_engine::corpus::generate(prism_engine::corpus::Kind::Zipf, 3000, 5),
+            TS,
+        )
+        .unwrap();
+    TENANTS
+        .iter()
+        .map(|t| (t.to_string(), tenant_fingerprint(&cluster, t)))
+        .collect()
+}
+
+/// **Checkpoint 1 of the thesis exam: sharding is a layout for tenant-scoped queries.** With the one
+/// cluster-global generation installed on every shard (D-072), the same corpus on 1, 2, and 4 shards
+/// answers **byte-identically** for every tenant — search hit order and the semantic GROUP BY to the
+/// bit. (The cross-tenant global-candidate-set merge is checkpoint 2.)
+#[test]
+fn sharding_is_a_layout_for_tenant_scoped_queries() {
+    let a1 = cluster_answers(1, "layout1");
+    let a2 = cluster_answers(2, "layout2");
+    let a4 = cluster_answers(4, "layout4");
+    assert_eq!(a1, a2, "2-way sharding changed a tenant-scoped answer");
+    assert_eq!(a1, a4, "4-way sharding changed a tenant-scoped answer");
+    assert!(!a1.is_empty());
+}
+
+/// The one cluster-global generation is identical at every shard count — the codebook is a function
+/// of the cluster-wide sample, not the placement (D-072).
+#[test]
+fn the_cluster_generation_is_identical_at_every_shard_count() {
+    let mk = |n, tag| {
+        let c = Cluster::init(&tmp(tag), n, config()).unwrap();
+        c.ingest(
+            prism_engine::corpus::generate(prism_engine::corpus::Kind::Zipf, 3000, 5),
+            TS,
+        )
+        .unwrap();
+        c.installed_generation().unwrap().unwrap()
+    };
+    let g1 = mk(1, "gen1");
+    let g2 = mk(2, "gen2");
+    let g4 = mk(4, "gen4");
+    assert_eq!(
+        g1, g2,
+        "the cluster generation differs between 1 and 2 shards"
+    );
+    assert_eq!(
+        g1, g4,
+        "the cluster generation differs between 1 and 4 shards"
+    );
 }
 
 /// The routed shard for a tenant is independent of shard count for the buckets that map to it — the
