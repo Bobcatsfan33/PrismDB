@@ -605,10 +605,42 @@ impl Engine {
             }
         }
 
-        c.candidates_considered = topk.len();
+        let candidates: Vec<crate::topk::Candidate> = topk.into_sorted(); // nearest first
+        c.candidates_considered = candidates.len();
+        self.rerank_phase(
+            snap,
+            q,
+            &eligible,
+            &ctxs,
+            &gen_ids,
+            &plan_choice,
+            candidates,
+            c,
+        )
+    }
+
+    /// The **rerank phase**: exact-score a bounded PQ candidate set, apply the fetch budget and the
+    /// similarity threshold, take the top-`k` with the C-4 `event_id` tie-break, materialize, and
+    /// group. Factored out of [`search_at`](Self::search_at) so a distributed query reranks a
+    /// *global* candidate set with the **same code** a single node runs on a local one — one
+    /// implementation, no divergence ([query §20](../../../docs/QUERY-CONTRACT.md)). Single-store
+    /// search is the degenerate one-shard case: `search_at` = candidate phase then this.
+    #[allow(clippy::too_many_arguments)]
+    fn rerank_phase(
+        &self,
+        snap: &prism_part::catalog::Snapshot,
+        q: &Query,
+        eligible: &[&prism_part::part::PartReader],
+        ctxs: &BTreeMap<String, SpaceContext>,
+        gen_ids: &BTreeSet<String>,
+        plan_choice: &crate::plan::PlanChoice,
+        candidates: Vec<crate::topk::Candidate>,
+        mut c: Counters,
+    ) -> Result<SearchResult> {
+        let dim = self.store.config.dim;
 
         // --- 5. exact rerank, within the declared fetch budget ---
-        let mut candidates: Vec<crate::topk::Candidate> = topk.into_sorted(); // nearest first
+        let mut candidates = candidates;
         candidates.truncate(q.rerank);
         // The fetch budget is a **byte** ceiling on the cold tier (storage contract §6): a plan may
         // declare how many bytes of exact vectors it is willing to pull, and execution is bounded by
@@ -894,7 +926,7 @@ impl Engine {
             hits,
             clusters,
             counters: c,
-            generations: gen_ids.into_iter().collect(),
+            generations: gen_ids.iter().cloned().collect(),
             bridge: None,
             explain,
             snapshot_id: snap.snapshot_id.clone(),
