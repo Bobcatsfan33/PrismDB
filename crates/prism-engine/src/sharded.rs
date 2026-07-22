@@ -194,15 +194,56 @@ impl Cluster {
     /// budget. The coordinator then runs the **shared** `finalize` (the same code single-store search
     /// runs) over the merged scores, materializing the survivors back on their shards.
     fn search_cross_shard(&self, q: &Query) -> Result<SearchResult> {
-        let dim = self.shards[0].store.config.dim;
+        // Pin the snapshot vector AT PLANNING (query §19): one snapshot per shard, captured once and
+        // read from for BOTH rounds — a publication landing mid-query cannot change the answer. A
+        // cursor paginating this query carries exactly this vector.
+        let vector = self.snapshot_vector_pinned()?;
+        self.search_cross_shard_at(&vector, q)
+    }
 
-        // Pin the snapshot vector: one snapshot per shard, captured now and read from for the whole
-        // query (query §19). Their ids compose the query's snapshot; their tombstones union.
-        let snaps: Vec<prism_part::catalog::Snapshot> = self
-            .shards
+    /// The snapshots the coordinator pins for a query: one per shard, captured at planning.
+    fn snapshot_vector_pinned(&self) -> Result<Vec<prism_part::catalog::Snapshot>> {
+        self.shards
             .iter()
             .map(|s| s.snapshot())
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<Result<Vec<_>>>()
+    }
+
+    /// Pin the snapshot vector — one snapshot per shard, captured now. A paginated query captures
+    /// this once and carries it in its cursor, so every page reads the same corpus ([query §19](../../../docs/QUERY-CONTRACT.md)).
+    pub fn pin_vector(&self) -> Result<Vec<prism_part::catalog::Snapshot>> {
+        self.snapshot_vector_pinned()
+    }
+
+    /// Answer a query against an explicitly **pinned snapshot vector** — the door a cursor resumes
+    /// through. A tenant-scoped query reads its owner shard's pinned snapshot; a cross-tenant query
+    /// runs the two-round merge against the whole vector. Nothing published after the vector was
+    /// pinned is visible ([query §19](../../../docs/QUERY-CONTRACT.md)).
+    pub fn search_at_vector(
+        &self,
+        vector: &[prism_part::catalog::Snapshot],
+        q: &Query,
+    ) -> Result<SearchResult> {
+        match q.tenant.as_deref() {
+            Some(t) => {
+                let owner = self.shard_index(t);
+                self.shards[owner].search_at(&vector[owner], q)
+            }
+            None => self.search_cross_shard_at(vector, q),
+        }
+    }
+
+    /// Execute the two-round merge against an **already-pinned** snapshot vector ([query §19](../../../docs/QUERY-CONTRACT.md)).
+    /// Round 1 scans each shard's pinned snapshot; round 2 rescores the immutable parts those
+    /// snapshots named. Nothing published after `vector` was captured can change the answer — which is
+    /// what makes a mid-query (or mid-pagination) publication invisible.
+    fn search_cross_shard_at(
+        &self,
+        vector: &[prism_part::catalog::Snapshot],
+        q: &Query,
+    ) -> Result<SearchResult> {
+        let dim = self.shards[0].store.config.dim;
+        let snaps = vector;
         let snapshot_id = snaps
             .iter()
             .map(|s| s.snapshot_id.as_str())

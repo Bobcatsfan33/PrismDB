@@ -348,6 +348,69 @@ fn cross_tenant_search_and_group_by_are_a_layout_1_2_4_way() {
     }
 }
 
+/// Events whose body is exactly the query text — so they dominate the top-k the moment they land,
+/// which makes "did a publication become visible?" a sharp, deterministic question. Built by
+/// overriding real corpus events (valid attributes, spread across tenants).
+fn matching_events(n: usize, tag: &str) -> Vec<prism_types::Event> {
+    prism_engine::corpus::generate(prism_engine::corpus::Kind::Uniform, n, 99)
+        .into_iter()
+        .enumerate()
+        .map(|(i, mut e)| {
+            e.event_id = format!("{tag}-{i:04}");
+            e.body = "the tool call timed out retrying".into();
+            e
+        })
+        .collect()
+}
+
+/// **Item 3 — the snapshot vector is pinned at planning (QUERY-CONTRACT §19).** A cross-tenant query
+/// captures the vector once and runs both rounds against it, so a publication landing after the pin
+/// is **invisible** to a query resumed against that vector — while a live query sees it. This is the
+/// contract's declared consistency made real, at 1, 2, and 4 shards; the cursor merely carries the
+/// vector this proves the engine already honours.
+#[test]
+fn a_pinned_snapshot_vector_hides_later_publications() {
+    for n in [1usize, 2, 4] {
+        let cluster = Cluster::init(&tmp(&format!("pin-{n}")), n, config()).unwrap();
+        cluster
+            .ingest(
+                prism_engine::corpus::generate(prism_engine::corpus::Kind::Zipf, 3000, 5),
+                TS,
+            )
+            .unwrap();
+
+        // Pin the vector, and record the answer against it.
+        let vector = cluster.pin_vector().unwrap();
+        let q = cross_tenant_query(None);
+        let pinned_before = hit_fp(&cluster.search_at_vector(&vector, &q).unwrap());
+        assert!(!pinned_before.is_empty());
+
+        // Publish more — events that would dominate the top-k the instant they are visible.
+        cluster
+            .ingest(matching_events(50, "late"), TS + 10_000)
+            .unwrap();
+
+        // The pinned query is unchanged: the publication is invisible to it.
+        let pinned_after = hit_fp(&cluster.search_at_vector(&vector, &q).unwrap());
+        assert_eq!(
+            pinned_after, pinned_before,
+            "{n}-shard: a publication after the pin changed a pinned query's answer (§19 violated)"
+        );
+
+        // A live query DOES see it — otherwise the pin proves nothing.
+        let live = cluster.search(&q).unwrap();
+        assert!(
+            live.hits.iter().any(|h| h.event.event_id.starts_with("late-")),
+            "{n}-shard: a live query did not see the publication — the test cannot distinguish pinned"
+        );
+        assert_ne!(
+            hit_fp(&live),
+            pinned_before,
+            "{n}-shard: the live answer must differ from the pinned one after a publication"
+        );
+    }
+}
+
 /// The routed shard for a tenant is independent of shard count for the buckets that map to it — the
 /// same tenant hashes to the same bucket everywhere (a placement invariant the layout gate builds on).
 #[test]
