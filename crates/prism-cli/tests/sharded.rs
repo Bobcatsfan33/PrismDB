@@ -293,6 +293,16 @@ fn cross_tenant_search_and_group_by_are_a_layout_1_2_4_way() {
             q.plan = Some("semantic-first".into());
             q
         }),
+        ("route-cpu", {
+            let mut q = cross_tenant_query(None);
+            q.force_route = Some("cpu".into());
+            q
+        }),
+        ("route-gpu-reference", {
+            let mut q = cross_tenant_query(None);
+            q.force_route = Some("gpu-reference".into());
+            q
+        }),
     ];
 
     for (tag, q) in &variants {
