@@ -42,6 +42,46 @@ fn gen_key(id: &str) -> String {
     format!("generations/{id}")
 }
 
+/// A paginated cross-tenant query's cursor: the **pinned snapshot vector** (one id per shard) plus
+/// the keyset position (score DESC, `event_id` ASC). Opaque and checksummed, exactly like the
+/// single-node cursor ([query §19](../../../docs/QUERY-CONTRACT.md)).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ClusterCursor {
+    snapshots: Vec<String>,
+    last_score: f32,
+    last_event_id: String,
+}
+
+impl ClusterCursor {
+    fn encode(&self) -> Result<String> {
+        let json = serde_json::to_vec(self)?;
+        let mut out = format!("{:08x}", prism_types::hash::crc32(&json));
+        for b in &json {
+            out.push_str(&format!("{b:02x}"));
+        }
+        Ok(out)
+    }
+
+    fn decode(s: &str) -> Result<ClusterCursor> {
+        let bad = || PrismError::Invalid("cursor is malformed".to_string());
+        if s.len() < 8 || s.len() % 2 != 0 {
+            return Err(bad());
+        }
+        let want = u32::from_str_radix(&s[..8], 16).map_err(|_| bad())?;
+        let mut bytes = Vec::with_capacity((s.len() - 8) / 2);
+        for pair in s.as_bytes()[8..].chunks_exact(2) {
+            let h = std::str::from_utf8(pair).map_err(|_| bad())?;
+            bytes.push(u8::from_str_radix(h, 16).map_err(|_| bad())?);
+        }
+        if prism_types::hash::crc32(&bytes) != want {
+            return Err(PrismError::Invalid(
+                "cursor failed its checksum; it has been truncated or edited".into(),
+            ));
+        }
+        Ok(serde_json::from_slice(&bytes)?)
+    }
+}
+
 /// A stable ordinal for a bucket, disjoint across `Shared`/`Dedicated`, so a bucket maps to exactly
 /// one shard and two tenants in the same bucket always land together.
 fn bucket_ordinal(scheme: &PartitionScheme, b: &Bucket) -> u64 {
@@ -231,6 +271,93 @@ impl Cluster {
             }
             None => self.search_cross_shard_at(vector, q),
         }
+    }
+
+    /// Load the pinned vector a cursor names, by snapshot id per shard. A snapshot id that no longer
+    /// loads is the **expired** condition — the cursor's corpus has been reclaimed.
+    fn load_vector(&self, ids: &[String]) -> Result<Vec<prism_part::catalog::Snapshot>> {
+        if ids.len() != self.shards.len() {
+            return Err(PrismError::Invalid(
+                "this cursor is for a cluster of a different shard count".into(),
+            ));
+        }
+        ids.iter()
+            .enumerate()
+            .map(|(si, id)| {
+                self.shards[si].catalog().load_snapshot(id).map_err(|_| {
+                    PrismError::NotFound(format!(
+                        "the cursor's pinned snapshot vector is expired: shard {si}'s snapshot `{id}` \
+                         has been reclaimed. Re-run the query to pin the current vector."
+                    ))
+                })
+            })
+            .collect()
+    }
+
+    /// **One page of a paginated query, resumed against the pinned snapshot vector** ([query §19](../../../docs/QUERY-CONTRACT.md)).
+    /// Page 1 pins the vector; the returned cursor carries it, so every later page reads the same
+    /// corpus — a publication (or a merge) landing between pages is invisible. The order is the same
+    /// total order every result uses (score DESC, C-4 `event_id` ASC), so the pages tile the answer
+    /// with no duplicate and no gap; the keyset is written longhand for that reason. Returns the page
+    /// and the next cursor (`None` on the last page).
+    pub fn search_page(
+        &self,
+        q: &Query,
+        cursor: Option<&str>,
+    ) -> Result<(SearchResult, Option<String>)> {
+        let (vector, cur) = match cursor {
+            None => (self.pin_vector()?, None),
+            Some(tok) => {
+                let body = ClusterCursor::decode(tok)?;
+                (self.load_vector(&body.snapshots)?, Some(body))
+            }
+        };
+
+        // Run against the pinned vector, materializing the whole ordered result set (up to the rerank
+        // width) so pagination has something to page over — the survivors are the result set.
+        let mut full = q.clone();
+        full.k = q.rerank.max(q.k);
+        let result = self.search_at_vector(&vector, &full)?;
+        let ordered = &result.hits;
+
+        // Keyset skip: "strictly after (last_score DESC, last_event_id ASC)". Longhand, because a
+        // tuple compare would treat an equal-score smaller-id row as after and rewind pagination.
+        let start = match &cur {
+            None => 0,
+            Some(c) => ordered
+                .iter()
+                .position(|h| match c.last_score.total_cmp(&h.score) {
+                    std::cmp::Ordering::Greater => true,
+                    std::cmp::Ordering::Equal => {
+                        h.event.event_id.as_str() > c.last_event_id.as_str()
+                    }
+                    std::cmp::Ordering::Less => false,
+                })
+                .unwrap_or(ordered.len()),
+        };
+
+        let page: Vec<prism_types::Hit> = ordered.iter().skip(start).take(q.k).cloned().collect();
+        let next = if start + page.len() < ordered.len() && !page.is_empty() {
+            let last = page.last().unwrap();
+            Some(
+                ClusterCursor {
+                    snapshots: vector.iter().map(|s| s.snapshot_id.clone()).collect(),
+                    last_score: last.score,
+                    last_event_id: last.event.event_id.clone(),
+                }
+                .encode()?,
+            )
+        } else {
+            None
+        };
+
+        Ok((
+            SearchResult {
+                hits: page,
+                ..result
+            },
+            next,
+        ))
     }
 
     /// Execute the two-round merge against an **already-pinned** snapshot vector ([query §19](../../../docs/QUERY-CONTRACT.md)).

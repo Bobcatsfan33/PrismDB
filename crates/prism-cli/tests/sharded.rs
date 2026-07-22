@@ -411,6 +411,62 @@ fn a_pinned_snapshot_vector_hides_later_publications() {
     }
 }
 
+/// **Item 3, gate (b): pagination against the pinned vector, with a mid-pagination publication.** A
+/// paginated cross-tenant query pins the vector on page 1 and carries it in the cursor, so the pages
+/// **tile the pinned answer with no duplicate and no gap** even as a publication lands between pages —
+/// which is invisible to the cursor. Holds at 1, 2, and 4 shards.
+#[test]
+fn cross_tenant_pagination_tiles_the_pinned_answer_across_a_publication() {
+    for n in [1usize, 2, 4] {
+        let cluster = Cluster::init(&tmp(&format!("page-{n}")), n, config()).unwrap();
+        cluster
+            .ingest(
+                prism_engine::corpus::generate(prism_engine::corpus::Kind::Zipf, 3000, 5),
+                TS,
+            )
+            .unwrap();
+
+        // The reference: the whole ordered result against the vector page 1 will pin (current now).
+        let vector = cluster.pin_vector().unwrap();
+        let mut full_q = cross_tenant_query(None);
+        full_q.k = full_q.rerank;
+        let full: Vec<String> = hit_ids(&cluster.search_at_vector(&vector, &full_q).unwrap());
+        assert!(full.len() > 10, "need enough survivors to paginate");
+
+        // Paginate five at a time, publishing after the first page.
+        let mut page_q = cross_tenant_query(None);
+        page_q.k = 5;
+        let mut collected: Vec<String> = Vec::new();
+        let mut cursor: Option<String> = None;
+        let mut published = false;
+        loop {
+            let (page, next) = cluster.search_page(&page_q, cursor.as_deref()).unwrap();
+            collected.extend(hit_ids(&page));
+            if !published {
+                cluster
+                    .ingest(matching_events(50, "mid"), TS + 10_000)
+                    .unwrap();
+                published = true;
+            }
+            match next {
+                Some(c) => cursor = Some(c),
+                None => break,
+            }
+        }
+
+        // The pages tiled exactly the pinned answer — no duplicate, no gap — and the mid-pagination
+        // publication is invisible (no `mid-` event leaked in).
+        assert_eq!(
+            collected, full,
+            "{n}-shard: pagination did not tile the pinned answer across a publication"
+        );
+        assert!(
+            !collected.iter().any(|id| id.starts_with("mid-")),
+            "{n}-shard: a mid-pagination publication leaked into the cursor"
+        );
+    }
+}
+
 /// **Item 3, gate (c): an expired pinned vector is a named condition, never a short answer.** When
 /// the parts a pinned vector names have been reclaimed (here, simulated by removing a part the way
 /// GC past the lease horizon would), a query resumed against that vector fails with the **named**
