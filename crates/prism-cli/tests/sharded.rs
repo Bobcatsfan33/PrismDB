@@ -411,6 +411,45 @@ fn a_pinned_snapshot_vector_hides_later_publications() {
     }
 }
 
+/// **Item 3, gate (c): an expired pinned vector is a named condition, never a short answer.** When
+/// the parts a pinned vector names have been reclaimed (here, simulated by removing a part the way
+/// GC past the lease horizon would), a query resumed against that vector fails with the **named**
+/// expired-snapshot error — the S3 contract, at the cluster.
+#[test]
+fn a_pinned_vector_whose_parts_were_reclaimed_is_expired_by_name() {
+    let cluster = Cluster::init(&tmp("expired"), 2, config()).unwrap();
+    cluster
+        .ingest(
+            prism_engine::corpus::generate(prism_engine::corpus::Kind::Zipf, 3000, 5),
+            TS,
+        )
+        .unwrap();
+    let vector = cluster.pin_vector().unwrap();
+    let q = cross_tenant_query(None);
+    assert!(!cluster
+        .search_at_vector(&vector, &q)
+        .unwrap()
+        .hits
+        .is_empty());
+
+    // Reclaim a part the vector names, as GC past the lease horizon would.
+    let part = vector
+        .iter()
+        .enumerate()
+        .find_map(|(si, s)| s.part_ids().into_iter().next().map(|p| (si, p)))
+        .unwrap();
+    std::fs::remove_dir_all(cluster.shard(part.0).store.part_dir(&part.1)).unwrap();
+
+    let err = cluster
+        .search_at_vector(&vector, &q)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("expired") && err.contains(&part.1),
+        "an expired pinned vector must be named, got: {err}"
+    );
+}
+
 /// The routed shard for a tenant is independent of shard count for the buckets that map to it — the
 /// same tenant hashes to the same bucket everywhere (a placement invariant the layout gate builds on).
 #[test]

@@ -254,6 +254,23 @@ impl Cluster {
             .flat_map(|s| s.tombstones.iter().cloned())
             .collect();
 
+        // The pinned vector is only answerable while the parts it names still exist. Without a
+        // distributed reader lease (its own S12 increment), GC past the reader-lease horizon can
+        // reclaim a superseded snapshot's parts; a query resumed against such a vector is **expired**,
+        // a named condition ([query §2/§19](../../../docs/QUERY-CONTRACT.md)) — never a short answer.
+        for (si, snap) in snaps.iter().enumerate() {
+            for pid in snap.part_ids() {
+                if !self.shards[si].store.part_dir(&pid).exists() {
+                    return Err(PrismError::NotFound(format!(
+                        "the pinned snapshot vector is expired: shard {si}'s snapshot `{}` names \
+                         part `{pid}`, which has been reclaimed (GC past the reader-lease horizon). \
+                         Re-run the query to pin the current vector.",
+                        snap.snapshot_id
+                    )));
+                }
+            }
+        }
+
         // --- round 1: candidates from every shard, merged to the global set ---
         // (dist, event_id, shard, part_id, row)
         let mut global: Vec<(f32, String, usize, String, usize)> = Vec::new();
