@@ -48,6 +48,26 @@ struct SpaceContext {
     ranked_dists: Vec<f32>,
 }
 
+/// The outcome of the candidate phase: either the query is **done here** (an empty set, a bridge
+/// fusion, or a refusal — the unhappy paths) or it produced a candidate set to **rerank**.
+enum CandidatePhase {
+    Done(SearchResult),
+    Rerank(CandidateSet),
+}
+
+/// The candidate set plus the context the rerank phase needs. Owns its readers so it can cross the
+/// phase boundary; `eligible` indexes into `readers` (in scan order), and each candidate's `part`
+/// indexes into `eligible` — the same indirection the scan used, preserved so the rerank is identical.
+struct CandidateSet {
+    readers: Vec<PartReader>,
+    eligible: Vec<usize>,
+    ctxs: BTreeMap<String, SpaceContext>,
+    candidates: Vec<crate::topk::Candidate>,
+    gen_ids: BTreeSet<String>,
+    plan_choice: crate::plan::PlanChoice,
+    counters: Counters,
+}
+
 impl Engine {
     /// Search the live snapshot.
     pub fn search(&self, q: &Query) -> Result<SearchResult> {
@@ -179,7 +199,10 @@ impl Engine {
         sel.clamp(0.0001, 1.0)
     }
 
-    /// Search a **specific** snapshot.
+    /// Search a **specific** snapshot. Single-store search is the **degenerate one-shard case** of
+    /// the phased path ([query §20](../../../docs/QUERY-CONTRACT.md)): the candidate phase, then the
+    /// rerank phase — the same two units a distributed query fans out and merges over. One
+    /// implementation, so a single node and a cluster cannot diverge.
     ///
     /// This is what makes pagination correct. A paginated query is a query whose lifetime
     /// spans several requests, and invariant 4 says a reader pins a snapshot for the
@@ -189,6 +212,822 @@ impl Engine {
     /// touching the old ones. Pagination needed no new invariant; it needed the ones we
     /// already had to be true.
     pub fn search_at(
+        &self,
+        snap: &prism_part::catalog::Snapshot,
+        q: &Query,
+    ) -> Result<SearchResult> {
+        match self.candidate_phase(snap, q)? {
+            CandidatePhase::Done(result) => Ok(result),
+            CandidatePhase::Rerank(cs) => {
+                let eligible: Vec<&PartReader> =
+                    cs.eligible.iter().map(|i| &cs.readers[*i]).collect();
+                self.rerank_phase(
+                    snap,
+                    q,
+                    &eligible,
+                    &cs.ctxs,
+                    &cs.gen_ids,
+                    &cs.plan_choice,
+                    cs.candidates,
+                    cs.counters,
+                )
+            }
+        }
+    }
+
+    /// The **candidate phase**: validate, prune partitions, open eligible parts, embed the query,
+    /// scan the compressed codes under the chosen strategy, and bound a candidate set by PQ distance.
+    /// This is round 1 of a distributed query (each shard runs it) and the front half of single-store
+    /// search. It returns the candidates plus the context the rerank phase needs
+    /// ([`CandidatePhase::Rerank`]), or a **finished result** for a path that terminates here — an
+    /// empty eligible set, a bridge fusion, or a refusal ([`CandidatePhase::Done`]) — so the unhappy
+    /// paths fork in exactly one place, provable against the monolith oracle.
+    fn candidate_phase(
+        &self,
+        snap: &prism_part::catalog::Snapshot,
+        q: &Query,
+    ) -> Result<CandidatePhase> {
+        if q.k == 0 {
+            return Err(PrismError::Invalid("k must be positive".into()));
+        }
+        if q.nprobe == 0 {
+            return Err(PrismError::Invalid("nprobe must be positive".into()));
+        }
+        if q.text.trim().is_empty() {
+            return Err(PrismError::Invalid("query text is empty".into()));
+        }
+
+        let dim = self.store.config.dim;
+
+        // Time bounds from the query AND, conservatively, from the predicate's top-level
+        // conjunction. `time_bounds` never narrows across an OR: pruning that can lose a row is
+        // not pruning, it is sampling.
+        let (pred_from, pred_to) = match &q.predicate {
+            Some(p) => prism_types::predicate::time_bounds(p),
+            None => (None, None),
+        };
+        let from = match (q.time_from, pred_from) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        };
+        let to = match (q.time_to, pred_to) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+
+        // --- 0. PARTITION PRUNING, IN THE CATALOG, BEFORE ANY PART IS OPENED (S4) ---
+        //
+        // This is the line that makes "cross-tenant reads are physically impossible" an I/O
+        // property rather than a slogan. A part outside this query's partitions is never
+        // opened, never checksummed, never read -- so another tenant's partitions could be
+        // filled with unreadable garbage and this query would still answer correctly, because
+        // it never looked.
+        let (readers, catalog_pruned) =
+            self.open_candidates(snap, q.tenant.as_deref(), from, to)?;
+
+        let mut c = Counters {
+            parts_total: snap.parts.len(),
+            parts_pruned: catalog_pruned,
+            ..Default::default()
+        };
+
+        // --- 1. per-tenant zone maps, inside the parts we did open ---
+        //
+        // A shared bucket's part-level zone map describes the BUCKET, not the tenant. Using it
+        // would both leak (tenant A learns tenant B's time range) and under-prune (A cannot skip
+        // a part whose range is wide only because of B). So a query consults its OWN tenant's
+        // section (directive 3).
+        let mut eligible: Vec<&PartReader> = Vec::new();
+        // `eligible_idx[i]` is the index into `readers` of `eligible[i]` — carried so the candidate
+        // set can own `readers` and cross the phase boundary without a self-referential borrow.
+        let mut eligible_idx: Vec<usize> = Vec::new();
+        for (ridx, r) in readers.iter().enumerate() {
+            // **No part is ever decoded with the wrong codebook.** The catalog says which
+            // generation this part is in; the part itself says so too. If they ever disagree,
+            // one of them is lying, and the cost of guessing which is not a crash -- it is a
+            // PLAUSIBLE WRONG ANSWER, because a PQ code read against the wrong codebook still
+            // produces a number, and the number looks fine. So: refuse.
+            if let Some(pr) = snap
+                .parts
+                .iter()
+                .find_map(|e| e.located().filter(|pr| pr.part_id == r.manifest.part_id))
+            {
+                if pr.partition.generation != r.manifest.generation_id {
+                    return Err(PrismError::Corrupt(format!(
+                        "part {} is filed in the catalog under generation {} but its manifest \
+                         says it was encoded under {}. Decoding it with either codebook would \
+                         produce a number, and the number would look fine. Refusing.",
+                        r.manifest.part_id, pr.partition.generation, r.manifest.generation_id
+                    )));
+                }
+            }
+            let keep = match (
+                q.tenant.as_deref(),
+                r.manifest.s4()?.stats_for_owned(q.tenant.as_deref()),
+            ) {
+                (Some(_), Some(st)) => st.may_match(from, to),
+                _ => r.manifest.may_match(q.tenant.as_deref(), from, to),
+            };
+            if keep {
+                eligible.push(r);
+                eligible_idx.push(ridx);
+            } else {
+                c.parts_pruned += 1;
+            }
+        }
+
+        // --- 2. embedding-space check (invariant 9) ---
+        let mut spaces: BTreeSet<String> = BTreeSet::new();
+        for r in &eligible {
+            spaces.insert(format!(
+                "{}:{}",
+                r.manifest.model_id, r.manifest.model_version
+            ));
+        }
+        if spaces.len() > 1 {
+            match &q.space {
+                Some(want) => {
+                    if !spaces.contains(want) {
+                        return Err(PrismError::Invalid(format!(
+                            "no eligible parts are in embedding space `{want}`; \
+                             present spaces: {:?}",
+                            spaces
+                        )));
+                    }
+                    let before = eligible.len();
+                    // Filter `eligible` and `eligible_idx` in lockstep so the index mapping the
+                    // candidate set carries stays valid after a space narrows the set.
+                    let mut kept_eligible = Vec::new();
+                    let mut kept_idx = Vec::new();
+                    for (r, idx) in eligible.iter().zip(eligible_idx.iter()) {
+                        if format!("{}:{}", r.manifest.model_id, r.manifest.model_version) == *want
+                        {
+                            kept_eligible.push(*r);
+                            kept_idx.push(*idx);
+                        }
+                    }
+                    eligible = kept_eligible;
+                    eligible_idx = kept_idx;
+                    // Parts dropped by the space filter are PRUNED, and must be counted as such.
+                    // Naming a space narrows the query, and a narrowing a caller cannot see in
+                    // the counters is a narrowing they cannot audit.
+                    c.parts_pruned += before - eligible.len();
+                }
+                None => {
+                    // A bridge, if somebody declared one, is the ONLY way across (generation
+                    // contract §6). It does not merge scores -- it fuses ranks, which are
+                    // unitless. Obeying invariant 9 rather than working around it.
+                    let list: Vec<&String> = spaces.iter().collect();
+                    if list.len() == 2 {
+                        if let Some(b) = snap.bridge(list[0], list[1]) {
+                            return Ok(CandidatePhase::Done(
+                                self.search_bridged(snap, q, &spaces, b)?,
+                            ));
+                        }
+                    }
+                    // The error is written to TEACH (docs/QUERY-CONTRACT.md §13): this is invariant
+                    // 9 surfacing where a SQL user first meets it, and a terse "spaces differ" would
+                    // leave them guessing why their perfectly reasonable query was refused.
+                    let mut names: Vec<&str> = spaces.iter().map(|s| s.as_str()).collect();
+                    names.sort();
+                    let (a, b) = (names[0], names.get(1).copied().unwrap_or(""));
+                    return Err(PrismError::Invariant(format!(
+                        "this query spans two embedding spaces — {a} and {b} — whose scores are \
+                         not comparable (a cosine of 0.8 in one is not a cosine of 0.8 in the \
+                         other). PrismDB will not merge them into one ranking. Either name one \
+                         space with `USING SPACE '{b}'`, declare a bridge to fuse their ranks \
+                         (`prism bridge declare`), or finish the re-embed migration so a single \
+                         space remains."
+                    )));
+                }
+            }
+        }
+
+        c.rows_eligible = eligible.iter().map(|r| r.manifest.row_count).sum();
+
+        if eligible.is_empty() {
+            return Ok(CandidatePhase::Done(SearchResult {
+                hits: Vec::new(),
+                clusters: None,
+                counters: c,
+                generations: Vec::new(),
+                bridge: None,
+                explain: None,
+                snapshot_id: snap.snapshot_id.clone(),
+            }));
+        }
+
+        // --- 3. one query embedding + one ADC table per generation ---
+        //
+        // Different codebook generations within the same embedding space are
+        // fine: each gets its own table, and they merge at exact-score time,
+        // where both agree on what a vector means.
+        let gen_ids: BTreeSet<String> = eligible
+            .iter()
+            .map(|r| r.manifest.generation_id.clone())
+            .collect();
+
+        let mut ctxs: BTreeMap<String, SpaceContext> = BTreeMap::new();
+        for gid in &gen_ids {
+            let g = self.catalog().get_generation(gid)?;
+            let embedder = self.plane.embedder(&g.model_id, &g.model_version, dim)?;
+            let qv = embedder.embed(&q.text)?;
+            let adc = g.pq.adc_table(&qv)?;
+            let scored = g.coarse.rank(&qv);
+            let ranked: Vec<u32> = scored.iter().map(|(id, _)| *id).collect();
+            let ranked_dists: Vec<f32> = scored.iter().map(|(_, d)| *d).collect();
+            c.centroids_scored += ranked.len();
+            ctxs.insert(
+                gid.clone(),
+                SpaceContext {
+                    query_vector: qv,
+                    adc,
+                    ranked,
+                    ranked_dists,
+                },
+            );
+        }
+
+        // --- 4. scan the selected centroid ranges ---
+
+        // Pick the kernel once, for the whole query, and record it. Every kernel returns
+        // bit-identical distances (docs/DETERMINISM-CONTRACT.md §1), so this changes the query's
+        // speed and never its answer.
+        let isa = prism_quantizer::kernel::best();
+        c.scan_isa = isa.name().to_string();
+
+        // Pre-load every eligible part's scalar columns, once, and keep them alive for the whole
+        // scan. The top-k's tie-break borrows event ids out of these instead of owning copies, so
+        // a row entering the top-k allocates nothing (§4). These columns are read anyway -- the
+        // fused mask needs tenant and time -- so this only moves the read earlier, it does not add
+        // one.
+        let part_scalars: Vec<prism_part::part::Scalars> = eligible
+            .iter()
+            .map(|r| r.read_scalars())
+            .collect::<Result<Vec<_>>>()?;
+        let id_of =
+            |part: u32, row: u32| -> &str { part_scalars[part as usize].event_id_at(row as usize) };
+        let mut topk = crate::topk::TopK::new(q.candidates, &id_of);
+
+        // One distance buffer, sized once to the largest range any eligible part holds, and
+        // reused for every range of every part. The centroid ranges are in the manifest, so this
+        // needs no I/O -- and it is what makes the hot loop allocate nothing (§4).
+        let max_range_rows = eligible
+            .iter()
+            .flat_map(|r| r.manifest.centroid_ranges.iter())
+            .map(|cr| cr.row_count)
+            .max()
+            .unwrap_or(0);
+        let mut dists = vec![0.0f32; max_range_rows];
+
+        // --- choose the physical strategy (S8) ---
+        //
+        // The strategy is invisible to the answer (plan-invariance, docs/QUERY-CONTRACT.md §9), so
+        // the optimizer chooses on cost alone. A forced plan (test override, or a per-query hint)
+        // wins, so the plan-invariance gate can prove every strategy answers identically.
+        let plan_choice = {
+            let forced = crate::plan::forced_plan_override()
+                .or_else(|| q.plan.as_deref().and_then(crate::plan::Strategy::parse));
+            self.choose_plan(q, &eligible, forced)
+        };
+        let strategy = plan_choice.strategy;
+        c.plan = strategy.name().to_string();
+
+        for (pi, r) in eligible.iter().enumerate() {
+            c.parts_opened += 1;
+            let ctx = ctxs.get(&r.manifest.generation_id).ok_or_else(|| {
+                PrismError::Corrupt("part references an absent generation".into())
+            })?;
+
+            let scalars = &part_scalars[pi];
+            let times = &scalars.times;
+
+            // The row predicate, if any. Columns load lazily and only if the predicate
+            // actually names them — a filter that never mentions `body` must not cost a
+            // `body` decode.
+            let rows_view = match &q.predicate {
+                Some(p) => Some(crate::rowsource::PartRows::new(r, Some(p))?),
+                None => None,
+            };
+
+            let by_centroid: BTreeMap<u32, &prism_part::part::CentroidRange> = r
+                .manifest
+                .centroid_ranges
+                .iter()
+                .map(|cr| (cr.centroid, cr))
+                .collect();
+
+            // Adaptive probing (S6): a boundary query may probe ABOVE the base nprobe, never
+            // below it, so recall can only improve and the receipts stay valid as floors. On a
+            // query deep inside a cluster the margin is not met and this is exactly q.nprobe.
+            let eff_nprobe = if q.adaptive {
+                prism_types::query::adaptive_nprobe(
+                    &ctx.ranked_dists,
+                    q.nprobe,
+                    q.adaptive_margin
+                        .unwrap_or(prism_types::query::ADAPTIVE_MARGIN),
+                    prism_types::query::ADAPTIVE_MAX_NPROBE,
+                )
+            } else {
+                q.nprobe.min(ctx.ranked.len())
+            };
+            c.probes_taken += eff_nprobe;
+            c.probes_widened += eff_nprobe.saturating_sub(q.nprobe.min(ctx.ranked.len()));
+
+            let probes = ctx.ranked.iter().take(eff_nprobe);
+            for &cid in probes {
+                let Some(range) = by_centroid.get(&cid) else {
+                    // This part has no rows in that centroid. The probe costs
+                    // nothing: no range, no read.
+                    continue;
+                };
+
+                // Range-level zone map: a probe whose whole time span is outside
+                // the predicate is skipped without a read.
+                if let Some(f) = q.time_from {
+                    if range.time_max < f {
+                        continue;
+                    }
+                }
+                if let Some(t) = q.time_to {
+                    if range.time_min > t {
+                        continue;
+                    }
+                }
+
+                let codes = r.read_pq_range(range)?;
+                c.ranges_scanned += 1;
+                c.pq_bytes_scanned += codes.len();
+                c.rows_scanned_pq += range.row_count;
+
+                let m = r.manifest.pq_m;
+
+                // The scalar mask, one closure so all three strategies apply the *same* predicate
+                // to the *same* rows. `pe` counts general-predicate evaluations (the expensive
+                // part; tenant and time are cheap columnar checks).
+                let mask = |row: usize, pe: &mut usize| -> Result<bool> {
+                    if let Some(t) = &q.tenant {
+                        if !scalars.tenant_is(row, t) {
+                            return Ok(false);
+                        }
+                    }
+                    if let Some(f) = q.time_from {
+                        if times[row] < f {
+                            return Ok(false);
+                        }
+                    }
+                    if let Some(t) = q.time_to {
+                        if times[row] > t {
+                            return Ok(false);
+                        }
+                    }
+                    if let (Some(p), Some(view)) = (&q.predicate, &rows_view) {
+                        *pe += 1;
+                        if !prism_types::predicate::eval(p, view, row)? {
+                            return Ok(false);
+                        }
+                    }
+                    Ok(true)
+                };
+
+                let mut pe = 0usize; // predicate evals this range
+                let mut dc = 0usize; // distances computed this range
+
+                // **Three strategies, one candidate set (docs/QUERY-CONTRACT.md §9).** Every branch
+                // offers exactly the predicate-passing rows, with their PQ distance, to the same
+                // bounded top-k. They differ only in when the predicate runs relative to the
+                // distance -- which changes the work, never the set. Plan-invariance is therefore
+                // by construction, and the gate proves it.
+                match strategy {
+                    crate::plan::Strategy::Interleaved => {
+                        // Distance every probed row (batched SIMD), filter inline.
+                        prism_quantizer::kernel::adc_scan(
+                            isa,
+                            ctx.adc.table(),
+                            m,
+                            &codes,
+                            &mut dists[..range.row_count],
+                        );
+                        dc += range.row_count;
+                        for (i, &dist) in dists[..range.row_count].iter().enumerate() {
+                            let row = range.first_row + i;
+                            if !mask(row, &mut pe)? {
+                                continue;
+                            }
+                            c.rows_passing_filter += 1;
+                            topk.offer(crate::topk::Candidate {
+                                dist,
+                                part: pi as u32,
+                                row: row as u32,
+                            });
+                        }
+                    }
+                    crate::plan::Strategy::ScalarFirst => {
+                        // Filter first; compute a distance ONLY for survivors. When the predicate is
+                        // selective, most distances are never computed.
+                        for i in 0..range.row_count {
+                            let row = range.first_row + i;
+                            if !mask(row, &mut pe)? {
+                                continue;
+                            }
+                            c.rows_passing_filter += 1;
+                            let dist = ctx.adc.distance(&codes[i * m..(i + 1) * m]);
+                            dc += 1;
+                            topk.offer(crate::topk::Candidate {
+                                dist,
+                                part: pi as u32,
+                                row: row as u32,
+                            });
+                        }
+                    }
+                    crate::plan::Strategy::SemanticFirst => {
+                        // Distance first; evaluate the predicate ONLY for rows near enough to enter
+                        // the selection. When the distance already narrows hard, the predicate is
+                        // barely consulted. `would_admit` is conservative -- it never skips a row
+                        // that could enter -- so the offered set is identical.
+                        prism_quantizer::kernel::adc_scan(
+                            isa,
+                            ctx.adc.table(),
+                            m,
+                            &codes,
+                            &mut dists[..range.row_count],
+                        );
+                        dc += range.row_count;
+                        for (i, &dist) in dists[..range.row_count].iter().enumerate() {
+                            if !topk.would_admit(dist) {
+                                continue;
+                            }
+                            let row = range.first_row + i;
+                            if !mask(row, &mut pe)? {
+                                continue;
+                            }
+                            c.rows_passing_filter += 1;
+                            topk.offer(crate::topk::Candidate {
+                                dist,
+                                part: pi as u32,
+                                row: row as u32,
+                            });
+                        }
+                    }
+                }
+                c.predicate_evals += pe;
+                c.distances_computed += dc;
+            }
+        }
+
+        let candidates: Vec<crate::topk::Candidate> = topk.into_sorted(); // nearest first
+        c.candidates_considered = candidates.len();
+
+        // The candidate phase ends here. Drop the borrowed views (`eligible`, `part_scalars`) so the
+        // owned `readers` can move into the candidate set; `eligible_idx` preserves the mapping.
+        drop(eligible);
+        drop(part_scalars);
+        Ok(CandidatePhase::Rerank(CandidateSet {
+            readers,
+            eligible: eligible_idx,
+            ctxs,
+            candidates,
+            gen_ids,
+            plan_choice,
+            counters: c,
+        }))
+    }
+
+    /// The **rerank phase**: exact-score a bounded PQ candidate set, apply the fetch budget and the
+    /// similarity threshold, take the top-`k` with the C-4 `event_id` tie-break, materialize, and
+    /// group. Factored out of [`search_at`](Self::search_at) so a distributed query reranks a
+    /// *global* candidate set with the **same code** a single node runs on a local one — one
+    /// implementation, no divergence ([query §20](../../../docs/QUERY-CONTRACT.md)). Single-store
+    /// search is the degenerate one-shard case: `search_at` = candidate phase then this.
+    #[allow(clippy::too_many_arguments)]
+    fn rerank_phase(
+        &self,
+        snap: &prism_part::catalog::Snapshot,
+        q: &Query,
+        eligible: &[&prism_part::part::PartReader],
+        ctxs: &BTreeMap<String, SpaceContext>,
+        gen_ids: &BTreeSet<String>,
+        plan_choice: &crate::plan::PlanChoice,
+        candidates: Vec<crate::topk::Candidate>,
+        mut c: Counters,
+    ) -> Result<SearchResult> {
+        let dim = self.store.config.dim;
+
+        // --- 5. exact rerank, within the declared fetch budget ---
+        let mut candidates = candidates;
+        candidates.truncate(q.rerank);
+        // The fetch budget is a **byte** ceiling on the cold tier (storage contract §6): a plan may
+        // declare how many bytes of exact vectors it is willing to pull, and execution is bounded by
+        // it — not an unbounded fetch. Exhausting it reranks only the most-promising candidates that
+        // fit (they are already in PQ-distance order, so this keeps the best) and **flags** the
+        // result as budget-limited rather than silently over-fetching or silently under-answering.
+        let bytes_per_vector = dim * 4;
+        if let Some(budget) = q.fetch_budget_bytes {
+            let max_vectors = budget / bytes_per_vector.max(1);
+            if candidates.len() > max_vectors {
+                candidates.truncate(max_vectors);
+                c.fetch_budget_exhausted = true;
+            }
+        }
+        c.rerank_width = candidates.len();
+
+        let mut by_part: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        for cand in &candidates {
+            by_part
+                .entry(cand.part as usize)
+                .or_default()
+                .push(cand.row as usize);
+        }
+
+        // Fetch every candidate's exact vector and id FIRST, separating I/O from the rerank
+        // compute. This is what makes a device-route degradation a pure recompute: if the GPU
+        // route faults, we re-score the already-fetched vectors on the CPU without touching disk.
+        struct Fetched {
+            part: usize,
+            row: usize,
+            vector: Vec<f32>,
+            event_id: String,
+            query_vector: Vec<f32>,
+        }
+        let mut fetched: Vec<Fetched> = Vec::with_capacity(candidates.len());
+        for (pi, rows) in &by_part {
+            let r = eligible[*pi];
+            let ctx = ctxs.get(&r.manifest.generation_id).unwrap();
+            // The cold tier goes through the object store + cache (S11): a cache state is a physical
+            // layout and may not change the answer, and a transient remote fault is a bounded retry
+            // or a named condition, never a silently short fetch (storage contract §3/§4).
+            let vectors = self.cold_read_vectors(r, rows)?;
+            let ids = r.read_event_ids_for_rows(rows)?;
+            c.exact_vectors_fetched += vectors.len();
+            c.exact_bytes_fetched += vectors.len() * dim * 4;
+            // One cold-tier object request per part touched (S11 EXPLAIN economics, §6). Coalesced
+            // ranged reads within a part are one logical request against the object.
+            c.object_requests += 1;
+            for ((row, v), event_id) in rows.iter().zip(vectors).zip(ids) {
+                fetched.push(Fetched {
+                    part: *pi,
+                    row: *row,
+                    vector: v,
+                    event_id,
+                    query_vector: ctx.query_vector.clone(),
+                });
+            }
+        }
+
+        // --- route the rerank (S7) ---
+        //
+        // The route is invisible to the answer (selection-identity, determinism contract §9), so
+        // the planner chooses on cost alone. With the GPU off this is always CPU; a test may force
+        // a device route to prove the answer survives the route change.
+        // Precedence: an explicit per-query route (which a cursor sets, to pin a paginated query
+        // to one route) wins over the global test override, which wins over the cost model. The
+        // cursor's route MUST win, or a route flip between pages would corrupt pagination.
+        let forced = q
+            .force_route
+            .as_deref()
+            .map(|s| match s {
+                "gpu-reference" => crate::gpu::Route::GpuReference,
+                "cuda" => crate::gpu::Route::Cuda,
+                _ => crate::gpu::Route::Cpu,
+            })
+            .or_else(crate::gpu::forced_route_override);
+        let mut plan = crate::gpu::plan_route(fetched.len(), forced);
+
+        // Per-tenant device admission: a device route reserves its footprint before running, and a
+        // tenant over its share is DEGRADED to CPU rather than allowed to fail another tenant
+        // (determinism contract §11). The reservation releases on drop.
+        let _reservation = if plan.route.is_device() {
+            let bytes = fetched.len() * dim * 4;
+            let tenant = q.tenant.as_deref().unwrap_or("(none)");
+            match crate::gpu::admission().try_reserve(tenant, bytes) {
+                Some(res) => Some(res),
+                None => {
+                    // Not enough of this tenant's device share; degrade, do not fail.
+                    plan = crate::gpu::RoutePlan {
+                        route: crate::gpu::Route::Cpu,
+                        reason: "device admission refused this tenant's footprint; degraded".into(),
+                    };
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // Rerank on the chosen route, degrading to CPU on a device fault. A device is an
+        // accelerator, not a dependency: a query answerable on the CPU is always answered.
+        let score_all = |route: crate::gpu::Route| -> std::result::Result<Vec<Scored>, crate::gpu::DeviceFault> {
+            let fault = if route.is_device() {
+                crate::gpu::injected_fault()
+            } else {
+                None
+            };
+            let mut out = Vec::with_capacity(fetched.len());
+            for f in &fetched {
+                // Exact cosine on the stored float32 vector. This is the answer; the PQ distance
+                // was only ever a way to avoid computing this for everything.
+                let score = crate::gpu::rerank_score(route, &f.query_vector, &f.vector, fault)?;
+                out.push(Scored {
+                    score,
+                    part: f.part,
+                    row: f.row,
+                    vector: f.vector.clone(),
+                    event_id: f.event_id.clone(),
+                });
+            }
+            Ok(out)
+        };
+
+        let scored: Vec<Scored> = match score_all(plan.route) {
+            Ok(s) => {
+                c.rerank_route = plan.route.name().to_string();
+                s
+            }
+            Err(fault) => {
+                // Degrade to CPU, logged and observable. Never a failed query. The log makes a
+                // degradation loud -- a GPU that quietly stopped being used is one you are paying
+                // for and not getting -- and `route_degraded` carries it in the counters too.
+                eprintln!(
+                    "prism: device route `{}` faulted at {} ({}); degraded to CPU for tenant {:?}",
+                    plan.route.name(),
+                    fault.phase.name(),
+                    fault.reason,
+                    q.tenant.as_deref().unwrap_or("(none)")
+                );
+                c.route_degraded = true;
+                c.rerank_route = crate::gpu::Route::Cpu.name().to_string();
+                score_all(crate::gpu::Route::Cpu).expect("the CPU route cannot fault")
+            }
+        };
+        drop(_reservation);
+        let mut scored = scored;
+
+        // Descending score, ties broken on `event_id`.
+        //
+        // Not on (part, row). Bodies repeat in real telemetry, so exact score
+        // ties are common, and a tie-break on physical position means the same
+        // query returns a different order after a merge moves rows between
+        // parts. Order must be a function of the data, not of the layout — the
+        // exact oracle breaks ties the same way, so the two paths agree on tied
+        // results and recall stays measurable.
+        scored.sort_by(|a, b| {
+            b.score
+                .total_cmp(&a.score)
+                .then(a.event_id.cmp(&b.event_id))
+        });
+
+        // Similarity threshold (docs/QUERY-CONTRACT.md §12): keep only rows whose EXACT rerank
+        // score clears the bar, THEN apply `k`. Threshold first, LIMIT second. Applied to the
+        // exact score, never the approximate PQ distance -- a threshold on an approximate score
+        // would admit rows the exact score rejects. Fewer than `k` clearing the bar is the honest
+        // count, not an error.
+        if let Some(tau) = q.threshold {
+            scored.retain(|s| s.score >= tau);
+        }
+
+        // --- 6. materialize only what we return ---
+        //
+        // Bodies are the most expensive column and the least useful one to a
+        // scan. Only the rows a caller will actually see pay for theirs.
+        let take = if q.group_k.is_some() {
+            scored.len()
+        } else {
+            q.k
+        };
+        let needed: BTreeSet<(usize, usize)> =
+            scored.iter().take(take).map(|s| (s.part, s.row)).collect();
+
+        let mut per_part: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        for (p, r) in &needed {
+            per_part.entry(*p).or_default().push(*r);
+        }
+        let mut events: BTreeMap<(usize, usize), Event> = BTreeMap::new();
+        for (pi, rows) in &per_part {
+            let evs = eligible[*pi].read_events_for_rows(rows)?;
+            for (row, ev) in rows.iter().zip(evs) {
+                events.insert((*pi, *row), ev);
+            }
+        }
+
+        // Attach the centroid each hit actually lives in, so the physical
+        // clustering is inspectable from a result and not only from the counters.
+        let mut hits: Vec<Hit> = scored
+            .iter()
+            .take(q.k)
+            .map(|s| {
+                let r = eligible[s.part];
+                let centroid = r
+                    .manifest
+                    .centroid_ranges
+                    .iter()
+                    .find(|cr| s.row >= cr.first_row && s.row < cr.first_row + cr.row_count)
+                    .map(|cr| cr.centroid)
+                    .ok_or_else(|| {
+                        PrismError::Corrupt(format!(
+                            "row {} of part {} is in no centroid range",
+                            s.row, r.manifest.part_id
+                        ))
+                    })?;
+                Ok(Hit {
+                    event: events.get(&(s.part, s.row)).unwrap().clone(),
+                    score: s.score,
+                    centroid,
+                })
+            })
+            .collect::<Result<Vec<Hit>>>()?;
+
+        // A tombstoned row is logically deleted as of this snapshot — it is filtered from the
+        // answer even while it is still physically present, until a merge reconciles it away
+        // (merge contract §6). Filtering the final hits can return fewer than `k`, which is the
+        // honest count of surviving matches, exactly as a threshold can (§12).
+        if !snap.tombstones.is_empty() {
+            hits.retain(|h| !snap.is_tombstoned(&h.event.event_id));
+        }
+
+        // --- 7. semantic grouping of the rerank survivors ---
+        let clusters = match q.group_k {
+            Some(gk) if gk > 0 && !scored.is_empty() => {
+                Some(group(&scored, &events, gk, dim, self.store.config.seed)?)
+            }
+            _ => None,
+        };
+
+        // What the disk actually moved, as opposed to what the plan asked for.
+        c.physical_bytes_read = eligible.iter().map(|r| r.io_bytes()).sum();
+
+        // EXPLAIN (S8, §14): estimates alongside actuals, so cost-model drift is a visible number.
+        let explain = if q.explain {
+            // Pass rate among rows the predicate was ACTUALLY evaluated on. For interleaved and
+            // scalar-first that is every scanned row, so it is the true selectivity; semantic-first
+            // evaluates a biased near subset, so its number is only a lower bound -- EXPLAIN says
+            // which plan produced it, so the reader knows.
+            let actual_selectivity = if c.predicate_evals > 0 {
+                c.rows_passing_filter as f64 / c.predicate_evals as f64
+            } else if c.rows_scanned_pq > 0 {
+                // No general predicate: selectivity is the tenant/time pass rate over scanned rows.
+                c.rows_passing_filter as f64 / c.rows_scanned_pq as f64
+            } else {
+                1.0
+            };
+            Some(prism_types::Explain {
+                chosen_plan: c.plan.clone(),
+                plan_reason: plan_choice.reason.clone(),
+                chosen_route: c.rerank_route.clone(),
+                estimated_selectivity: plan_choice.estimated_selectivity,
+                actual_selectivity,
+                estimated_nprobe: q.nprobe,
+                actual_nprobe: c.probes_taken,
+                actual_candidates: c.candidates_considered,
+                actual_rerank: c.rerank_width,
+                actual_k: hits.len(),
+                actual_parts_opened: c.parts_opened,
+                actual_ranges_scanned: c.ranges_scanned,
+                actual_bytes_read: c.physical_bytes_read,
+                object_requests: c.object_requests,
+                retrieved_bytes: c.exact_bytes_fetched,
+                estimated_cost_micros: crate::storage::estimated_cost_micros(
+                    c.object_requests,
+                    c.exact_bytes_fetched,
+                ),
+                declared_fetch_budget_bytes: q.fetch_budget_bytes,
+                fetch_budget_exhausted: c.fetch_budget_exhausted,
+            })
+        } else {
+            None
+        };
+
+        Ok(SearchResult {
+            hits,
+            clusters,
+            counters: c,
+            generations: gen_ids.iter().cloned().collect(),
+            bridge: None,
+            explain,
+            snapshot_id: snap.snapshot_id.clone(),
+        })
+    }
+
+    /// Answer a query that spans two embedding spaces, through a **declared bridge**.
+    ///
+    /// > *"Scores from different embedding spaces are never merged without an explicit,
+    /// > validated bridge policy."* — PRISM.md, invariant 9
+    ///
+    /// **This does not merge scores. It merges ranks.** Each space answers the query natively —
+    /// its own query embedding, its own codebooks, its own cosines, entirely inside its own
+    /// geometry — and then the two *rankings* are fused. A rank is unitless, which is exactly why
+    /// this obeys the invariant rather than sneaking around it. A cosine of 0.83 in one model's
+    /// space and 0.83 in another's are two different numbers that happen to be printed the same
+    /// way, and averaging them would be a category error with a plausible-looking result.
+    ///
+    /// Reciprocal-rank fusion: a row's fused score is the sum of `1 / (K + rank)` over the spaces
+    /// that returned it. The score in the output is the **fusion score, not a cosine**, and
+    /// `bridge` is set so nobody can mistake it for one.
+    /// **TEST ORACLE (S12 inc2) — deleted at the exit criterion.** The frozen, self-contained
+    /// monolithic search, kept only so the phased path can be proven identical to it — same rows,
+    /// same errors, same named conditions, same degraded behavior, same counters — before it is
+    /// removed and the phased path becomes the sole implementation ([query §20](../../../docs/QUERY-CONTRACT.md)).
+    #[doc(hidden)]
+    pub fn search_at_monolith(
         &self,
         snap: &prism_part::catalog::Snapshot,
         q: &Query,
@@ -605,42 +1444,10 @@ impl Engine {
             }
         }
 
-        let candidates: Vec<crate::topk::Candidate> = topk.into_sorted(); // nearest first
-        c.candidates_considered = candidates.len();
-        self.rerank_phase(
-            snap,
-            q,
-            &eligible,
-            &ctxs,
-            &gen_ids,
-            &plan_choice,
-            candidates,
-            c,
-        )
-    }
-
-    /// The **rerank phase**: exact-score a bounded PQ candidate set, apply the fetch budget and the
-    /// similarity threshold, take the top-`k` with the C-4 `event_id` tie-break, materialize, and
-    /// group. Factored out of [`search_at`](Self::search_at) so a distributed query reranks a
-    /// *global* candidate set with the **same code** a single node runs on a local one — one
-    /// implementation, no divergence ([query §20](../../../docs/QUERY-CONTRACT.md)). Single-store
-    /// search is the degenerate one-shard case: `search_at` = candidate phase then this.
-    #[allow(clippy::too_many_arguments)]
-    fn rerank_phase(
-        &self,
-        snap: &prism_part::catalog::Snapshot,
-        q: &Query,
-        eligible: &[&prism_part::part::PartReader],
-        ctxs: &BTreeMap<String, SpaceContext>,
-        gen_ids: &BTreeSet<String>,
-        plan_choice: &crate::plan::PlanChoice,
-        candidates: Vec<crate::topk::Candidate>,
-        mut c: Counters,
-    ) -> Result<SearchResult> {
-        let dim = self.store.config.dim;
+        c.candidates_considered = topk.len();
 
         // --- 5. exact rerank, within the declared fetch budget ---
-        let mut candidates = candidates;
+        let mut candidates: Vec<crate::topk::Candidate> = topk.into_sorted(); // nearest first
         candidates.truncate(q.rerank);
         // The fetch budget is a **byte** ceiling on the cold tier (storage contract §6): a plan may
         // declare how many bytes of exact vectors it is willing to pull, and execution is bounded by
@@ -926,28 +1733,13 @@ impl Engine {
             hits,
             clusters,
             counters: c,
-            generations: gen_ids.iter().cloned().collect(),
+            generations: gen_ids.into_iter().collect(),
             bridge: None,
             explain,
             snapshot_id: snap.snapshot_id.clone(),
         })
     }
 
-    /// Answer a query that spans two embedding spaces, through a **declared bridge**.
-    ///
-    /// > *"Scores from different embedding spaces are never merged without an explicit,
-    /// > validated bridge policy."* — PRISM.md, invariant 9
-    ///
-    /// **This does not merge scores. It merges ranks.** Each space answers the query natively —
-    /// its own query embedding, its own codebooks, its own cosines, entirely inside its own
-    /// geometry — and then the two *rankings* are fused. A rank is unitless, which is exactly why
-    /// this obeys the invariant rather than sneaking around it. A cosine of 0.83 in one model's
-    /// space and 0.83 in another's are two different numbers that happen to be printed the same
-    /// way, and averaging them would be a category error with a plausible-looking result.
-    ///
-    /// Reciprocal-rank fusion: a row's fused score is the sum of `1 / (K + rank)` over the spaces
-    /// that returned it. The score in the output is the **fusion score, not a cosine**, and
-    /// `bridge` is set so nobody can mistake it for one.
     fn search_bridged(
         &self,
         snap: &prism_part::catalog::Snapshot,
