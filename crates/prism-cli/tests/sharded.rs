@@ -12,8 +12,9 @@
 
 use prism_engine::cluster::ClusterRequest;
 use prism_engine::sharded::Cluster;
+use prism_engine::Engine;
 use prism_part::store::{StoreConfig, STORE_VERSION};
-use prism_types::Query;
+use prism_types::{Query, SearchResult};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -114,11 +115,12 @@ fn the_cluster_routes_by_tenant_bucket_and_places_a_bucket_whole_on_one_shard() 
         }
     }
 
-    // A cross-tenant query is named, never answered from a single shard.
-    let err = cluster.search(&query(None)).unwrap_err().to_string();
+    // A cross-tenant query now fans out and answers (the two-round merge, checkpoint 2), never a
+    // single shard's short answer.
+    let cross = cluster.search(&query(None)).unwrap();
     assert!(
-        err.contains("cross-shard") || err.contains("cross-tenant"),
-        "a cross-tenant cluster query must be named, got: {err}"
+        !cross.hits.is_empty(),
+        "a cross-tenant cluster query must fan out and answer"
     );
 
     let _ = std::fs::remove_dir_all(&root);
@@ -202,6 +204,86 @@ fn the_cluster_generation_is_identical_at_every_shard_count() {
         g1, g4,
         "the cluster generation differs between 1 and 4 shards"
     );
+}
+
+/// Hits as (event_id, exact-score bits) — a byte-exact fingerprint of a search answer.
+fn hit_fp(r: &SearchResult) -> Vec<(String, u32)> {
+    r.hits
+        .iter()
+        .map(|h| (h.event.event_id.clone(), h.score.to_bits()))
+        .collect()
+}
+
+fn cross_tenant_query(group_k: Option<usize>) -> Query {
+    Query {
+        text: "the tool call timed out retrying".into(),
+        k: 20,
+        tenant: None,
+        rerank: 60,
+        nprobe: 8,
+        candidates: 200,
+        group_k,
+        ..Default::default()
+    }
+}
+
+/// **Checkpoint 2 of the thesis exam: the two-round cross-shard merge is a layout.** A cross-tenant
+/// query — one that fans out to every shard — answers **byte-identically** on a single engine (the
+/// ground truth), and on the cluster at 1, 2, and 4 shards. The coordinator reconstructs the global
+/// candidate set, reranks within one global budget, and merges with the C-4 `event_id` tie, so the
+/// placement of tenants across shards is invisible to the answer — search and cross-tenant GROUP BY.
+#[test]
+fn cross_tenant_search_and_group_by_are_a_layout_1_2_4_way() {
+    let corpus = || prism_engine::corpus::generate(prism_engine::corpus::Kind::Zipf, 3000, 5);
+
+    // Ground truth: a single engine over the whole corpus (same generation the cluster trains).
+    let root = tmp("xt-single");
+    let single = Engine::init(&root, config()).unwrap();
+    single.ingest(corpus(), TS).unwrap();
+    let g_search = hit_fp(&single.search(&cross_tenant_query(None)).unwrap());
+    let g_group = single.search(&cross_tenant_query(Some(4))).unwrap();
+    assert!(
+        !g_search.is_empty(),
+        "the ground-truth cross-tenant search is empty"
+    );
+
+    let cluster_answers = |n: usize, tag: &str| -> (Vec<(String, u32)>, SearchResult) {
+        let c = Cluster::init(&tmp(tag), n, config()).unwrap();
+        c.ingest(corpus(), TS).unwrap();
+        (
+            hit_fp(&c.search(&cross_tenant_query(None)).unwrap()),
+            c.search(&cross_tenant_query(Some(4))).unwrap(),
+        )
+    };
+
+    for n in [1usize, 2, 4] {
+        let (s, grp) = cluster_answers(n, &format!("xt-{n}"));
+        assert_eq!(
+            s, g_search,
+            "{n}-shard cross-tenant SEARCH diverged from the single-engine ground truth"
+        );
+        // Cross-tenant semantic GROUP BY: the exemplars + per-cluster shape must match too.
+        let a: Vec<_> = grp
+            .clusters
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|c| (c.exemplar.event_id.clone(), c.count))
+            .collect();
+        let b: Vec<_> = g_group
+            .clusters
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|c| (c.exemplar.event_id.clone(), c.count))
+            .collect();
+        assert_eq!(
+            a, b,
+            "{n}-shard cross-tenant GROUP BY diverged from the ground truth"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// The routed shard for a tenant is independent of shard count for the buckets that map to it — the

@@ -16,12 +16,14 @@
 
 use crate::cluster::{ClusterRequest, SemanticClusterResult};
 use crate::engine::Engine;
+use crate::search::Scored;
 use crate::storage::object::{LocalObjectStore, ObjectStore};
 use prism_part::generation::Generation;
 use prism_part::partition::{Bucket, PartitionScheme};
 use prism_part::store::StoreConfig;
 use prism_types::error::{PrismError, Result};
-use prism_types::{Event, Query, SearchResult};
+use prism_types::{Counters, Event, Query, SearchResult};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -177,14 +179,141 @@ impl Cluster {
     /// increment — and is named, never silently answered from one shard.
     pub fn search(&self, q: &Query) -> Result<SearchResult> {
         match q.tenant.as_deref() {
+            // A tenant-scoped query lives on one shard: route to it, unchanged.
             Some(t) => self.shards[self.shard_index(t)].search(q),
-            None => Err(PrismError::Invalid(
-                "a cross-tenant (tenant = None) cluster search needs the cross-shard \
-                 global-candidate-set merge (query contract §20), which is the next S12 increment; \
-                 refusing to answer it from a single shard rather than return a short answer"
-                    .into(),
-            )),
+            // A cross-tenant query fans out: the two-round global-candidate-set merge (query §20).
+            None => self.search_cross_shard(q),
         }
+    }
+
+    /// **The two-round cross-shard search** ([query §20](../../../docs/QUERY-CONTRACT.md),
+    /// [D-073](../../../docs/DECISIONS.md)). Round 1: every shard returns its bounded candidates by PQ
+    /// distance. The coordinator merges to the **global** candidate set (PQ distance, C-4 `event_id`
+    /// tie) and bounds it once — to the rerank width and the **single global fetch budget**. Round 2:
+    /// each owning shard exact-scores exactly its subset, so total exact fetches stay within that one
+    /// budget. The coordinator then runs the **shared** `finalize` (the same code single-store search
+    /// runs) over the merged scores, materializing the survivors back on their shards.
+    fn search_cross_shard(&self, q: &Query) -> Result<SearchResult> {
+        let dim = self.shards[0].store.config.dim;
+
+        // Pin the snapshot vector: one snapshot per shard, captured now and read from for the whole
+        // query (query §19). Their ids compose the query's snapshot; their tombstones union.
+        let snaps: Vec<prism_part::catalog::Snapshot> = self
+            .shards
+            .iter()
+            .map(|s| s.snapshot())
+            .collect::<Result<Vec<_>>>()?;
+        let snapshot_id = snaps
+            .iter()
+            .map(|s| s.snapshot_id.as_str())
+            .collect::<Vec<_>>()
+            .join("+");
+        let tombstones: BTreeSet<String> = snaps
+            .iter()
+            .flat_map(|s| s.tombstones.iter().cloned())
+            .collect();
+
+        // --- round 1: candidates from every shard, merged to the global set ---
+        // (dist, event_id, shard, part_id, row)
+        let mut global: Vec<(f32, String, usize, String, usize)> = Vec::new();
+        for (si, shard) in self.shards.iter().enumerate() {
+            for cand in shard.search_candidates(&snaps[si], q)? {
+                global.push((cand.dist, cand.event_id, si, cand.part_id, cand.row));
+            }
+        }
+        // Merge by PQ distance, ties on event_id (C-4 across the wire).
+        global.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+
+        // Bound ONCE, globally: rerank width, then the declared byte budget — for the query, not per
+        // shard × N. Exhaustion is the same named degradation single-store reports (storage §6).
+        global.truncate(q.rerank);
+        let mut fetch_budget_exhausted = false;
+        if let Some(budget) = q.fetch_budget_bytes {
+            let max_vectors = budget / (dim * 4).max(1);
+            if global.len() > max_vectors {
+                global.truncate(max_vectors);
+                fetch_budget_exhausted = true;
+            }
+        }
+
+        // --- round 2: each owning shard exact-scores its subset of the global set ---
+        let mut by_shard: BTreeMap<usize, Vec<(String, usize)>> = BTreeMap::new();
+        for (_, _, si, pid, row) in &global {
+            by_shard.entry(*si).or_default().push((pid.clone(), *row));
+        }
+        let mut scored: Vec<Scored> = Vec::new();
+        // handle[gidx] = (shard, part_id, row) — how the coordinator routes materialization back.
+        let mut handle: Vec<(usize, String, usize)> = Vec::new();
+        let mut exact_bytes_fetched = 0usize;
+        let mut object_requests = 0usize;
+        for (si, sel) in &by_shard {
+            for s in self.shards[*si].search_rerank_selected(q, sel)? {
+                let gidx = handle.len();
+                handle.push((*si, s.part_id.clone(), s.row));
+                exact_bytes_fetched += s.vector.len() * 4;
+                scored.push(Scored {
+                    score: s.score,
+                    part: gidx,
+                    row: s.row,
+                    vector: s.vector,
+                    event_id: s.event_id,
+                });
+            }
+            object_requests += 1;
+        }
+
+        // --- finalize: the SHARED implementation, with a materializer that routes to the shards ---
+        let materialize =
+            |needed: &BTreeSet<(usize, usize)>| -> Result<BTreeMap<(usize, usize), (Event, u32)>> {
+                // Group survivors by shard, keeping each survivor's global handle to map results back.
+                let mut by_shard_mat: BTreeMap<usize, Vec<(usize, String, usize)>> =
+                    BTreeMap::new();
+                for (gidx, row) in needed {
+                    let (si, pid, _) = &handle[*gidx];
+                    by_shard_mat
+                        .entry(*si)
+                        .or_default()
+                        .push((*gidx, pid.clone(), *row));
+                }
+                let mut out: BTreeMap<(usize, usize), (Event, u32)> = BTreeMap::new();
+                for (si, reqs) in &by_shard_mat {
+                    let sel: Vec<(String, usize)> = reqs
+                        .iter()
+                        .map(|(_, pid, row)| (pid.clone(), *row))
+                        .collect();
+                    let mats = self.shards[*si].search_materialize(&sel)?;
+                    for ((gidx, _, row), (ev, cen)) in reqs.iter().zip(mats) {
+                        out.insert((*gidx, *row), (ev, cen));
+                    }
+                }
+                Ok(out)
+            };
+
+        let gen_ids: BTreeSet<String> = self.installed_generation()?.into_iter().collect();
+        let plan_choice = crate::plan::PlanChoice {
+            strategy: crate::plan::Strategy::Interleaved,
+            reason: "cluster coordinator (query §20)".into(),
+            estimated_selectivity: f64::NAN,
+        };
+        let c = Counters {
+            rerank_width: global.len(),
+            fetch_budget_exhausted,
+            exact_bytes_fetched,
+            object_requests,
+            ..Default::default()
+        };
+
+        self.shards[0].finalize(
+            &tombstones,
+            &snapshot_id,
+            q,
+            scored,
+            &gen_ids,
+            &plan_choice,
+            c,
+            materialize,
+            || 0,
+        )
     }
 
     /// A tenant-scoped semantic `GROUP BY`, routed to the owner shard. Cross-tenant clustering needs

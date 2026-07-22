@@ -29,12 +29,31 @@ use prism_types::{ClusterSummary, Counters, Hit, Query, SearchResult};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// A candidate that survived into the rerank set and has an exact score.
-struct Scored {
-    score: f32,
-    part: usize,
-    row: usize,
-    vector: Vec<f32>,
-    event_id: String,
+pub(crate) struct Scored {
+    pub(crate) score: f32,
+    pub(crate) part: usize,
+    pub(crate) row: usize,
+    pub(crate) vector: Vec<f32>,
+    pub(crate) event_id: String,
+}
+
+/// A round-1 candidate a shard hands the coordinator: its PQ distance, its `event_id` (the tie the
+/// global merge breaks on, C-4), and the `(part_id, row)` handle the coordinator returns in round 2.
+pub(crate) struct ShardCandidate {
+    pub(crate) dist: f32,
+    pub(crate) event_id: String,
+    pub(crate) part_id: String,
+    pub(crate) row: usize,
+}
+
+/// A round-2 exact score from a shard: the exact rerank score, the `event_id`, the `(part_id, row)`
+/// handle, and the exact vector (which the coordinator needs only for a semantic `GROUP BY`).
+pub(crate) struct ShardScored {
+    pub(crate) score: f32,
+    pub(crate) event_id: String,
+    pub(crate) part_id: String,
+    pub(crate) row: usize,
+    pub(crate) vector: Vec<f32>,
 }
 
 /// Everything a query needs from one generation, computed once.
@@ -199,6 +218,44 @@ impl Engine {
         sel.clamp(0.0001, 1.0)
     }
 
+    /// Build one query embedding + ADC table per generation present in `eligible` — the per-space
+    /// context the scan and the rerank share ("different codebook generations within one embedding
+    /// space are fine: each gets its own table, and they merge at exact-score time"). Extracted so a
+    /// cluster's round two can rebuild it for the parts it re-opens, without a second copy.
+    fn build_space_contexts(
+        &self,
+        eligible: &[&prism_part::part::PartReader],
+        q: &Query,
+        c: &mut Counters,
+    ) -> Result<(BTreeMap<String, SpaceContext>, BTreeSet<String>)> {
+        let dim = self.store.config.dim;
+        let gen_ids: BTreeSet<String> = eligible
+            .iter()
+            .map(|r| r.manifest.generation_id.clone())
+            .collect();
+        let mut ctxs: BTreeMap<String, SpaceContext> = BTreeMap::new();
+        for gid in &gen_ids {
+            let g = self.catalog().get_generation(gid)?;
+            let embedder = self.plane.embedder(&g.model_id, &g.model_version, dim)?;
+            let qv = embedder.embed(&q.text)?;
+            let adc = g.pq.adc_table(&qv)?;
+            let scored = g.coarse.rank(&qv);
+            let ranked: Vec<u32> = scored.iter().map(|(id, _)| *id).collect();
+            let ranked_dists: Vec<f32> = scored.iter().map(|(_, d)| *d).collect();
+            c.centroids_scored += ranked.len();
+            ctxs.insert(
+                gid.clone(),
+                SpaceContext {
+                    query_vector: qv,
+                    adc,
+                    ranked,
+                    ranked_dists,
+                },
+            );
+        }
+        Ok((ctxs, gen_ids))
+    }
+
     /// Search a **specific** snapshot. Single-store search is the **degenerate one-shard case** of
     /// the phased path ([query §20](../../../docs/QUERY-CONTRACT.md)): the candidate phase, then the
     /// rerank phase — the same two units a distributed query fans out and merges over. One
@@ -256,8 +313,6 @@ impl Engine {
         if q.text.trim().is_empty() {
             return Err(PrismError::Invalid("query text is empty".into()));
         }
-
-        let dim = self.store.config.dim;
 
         // Time bounds from the query AND, conservatively, from the predicate's top-level
         // conjunction. `time_bounds` never narrows across an OR: pruning that can lose a row is
@@ -418,35 +473,7 @@ impl Engine {
         }
 
         // --- 3. one query embedding + one ADC table per generation ---
-        //
-        // Different codebook generations within the same embedding space are
-        // fine: each gets its own table, and they merge at exact-score time,
-        // where both agree on what a vector means.
-        let gen_ids: BTreeSet<String> = eligible
-            .iter()
-            .map(|r| r.manifest.generation_id.clone())
-            .collect();
-
-        let mut ctxs: BTreeMap<String, SpaceContext> = BTreeMap::new();
-        for gid in &gen_ids {
-            let g = self.catalog().get_generation(gid)?;
-            let embedder = self.plane.embedder(&g.model_id, &g.model_version, dim)?;
-            let qv = embedder.embed(&q.text)?;
-            let adc = g.pq.adc_table(&qv)?;
-            let scored = g.coarse.rank(&qv);
-            let ranked: Vec<u32> = scored.iter().map(|(id, _)| *id).collect();
-            let ranked_dists: Vec<f32> = scored.iter().map(|(_, d)| *d).collect();
-            c.centroids_scored += ranked.len();
-            ctxs.insert(
-                gid.clone(),
-                SpaceContext {
-                    query_vector: qv,
-                    adc,
-                    ranked,
-                    ranked_dists,
-                },
-            );
-        }
+        let (ctxs, gen_ids) = self.build_space_contexts(&eligible, q, &mut c)?;
 
         // --- 4. scan the selected centroid ranges ---
 
@@ -771,8 +798,10 @@ impl Engine {
 
         // `physical_bytes_read` is read AFTER materialization, because materializing the survivor
         // bodies is itself disk the query moved — computing it before would undercount.
+        let tombstones: BTreeSet<String> = snap.tombstones.iter().cloned().collect();
         self.finalize(
-            snap,
+            &tombstones,
+            &snap.snapshot_id,
             q,
             scored,
             gen_ids,
@@ -918,9 +947,10 @@ impl Engine {
     /// single node, the owning shards in a cluster, D-073), filter tombstones, and group. Shared by
     /// both paths, so a single node and a cluster resolve ties, thresholds, and limits identically.
     #[allow(clippy::too_many_arguments)]
-    fn finalize(
+    pub(crate) fn finalize(
         &self,
-        snap: &prism_part::catalog::Snapshot,
+        tombstones: &BTreeSet<String>,
+        snapshot_id: &str,
         q: &Query,
         mut scored: Vec<Scored>,
         gen_ids: &BTreeSet<String>,
@@ -977,9 +1007,10 @@ impl Engine {
             .collect::<Result<Vec<Hit>>>()?;
 
         // A tombstoned row is logically deleted as of this snapshot — filtered from the answer even
-        // while still physically present, until a merge reconciles it away (merge §6).
-        if !snap.tombstones.is_empty() {
-            hits.retain(|h| !snap.is_tombstoned(&h.event.event_id));
+        // while still physically present, until a merge reconciles it away (merge §6). In a cluster
+        // the set is the union of the shards' tombstones (each keyed by event_id).
+        if !tombstones.is_empty() {
+            hits.retain(|h| !tombstones.contains(&h.event.event_id));
         }
 
         // Semantic grouping of the rerank survivors (§7): clusters the survivor vectors, with the
@@ -1037,8 +1068,159 @@ impl Engine {
             generations: gen_ids.iter().cloned().collect(),
             bridge: None,
             explain,
-            snapshot_id: snap.snapshot_id.clone(),
+            snapshot_id: snapshot_id.to_string(),
         })
+    }
+
+    // --- the cluster's three round-trips (S12, [D-073](../../../docs/DECISIONS.md)) ------------
+    //
+    // A shard exposes exactly what the coordinator needs and nothing about its parts: round-1
+    // candidates, round-2 exact scores for the coordinator's chosen rows, and materialization of the
+    // final survivors. The coordinator never holds a reader.
+
+    /// **Round 1.** Run the candidate phase and return its candidates as a serializable list — each a
+    /// PQ distance, an `event_id` (the C-4 tie the coordinator merges on), and the `(part_id, row)`
+    /// handle it sends back in round 2. An empty eligible set yields no candidates; a multi-space
+    /// query (a bridge) is refused for now — cross-shard rank-fusion is not in this increment.
+    pub(crate) fn search_candidates(
+        &self,
+        snap: &prism_part::catalog::Snapshot,
+        q: &Query,
+    ) -> Result<Vec<ShardCandidate>> {
+        match self.candidate_phase(snap, q)? {
+            CandidatePhase::Done(r) => {
+                if r.hits.is_empty() && r.bridge.is_none() {
+                    Ok(Vec::new())
+                } else {
+                    Err(PrismError::Invalid(
+                        "a cross-tenant cluster query that spans two embedding spaces (a bridge) is \
+                         not supported yet — rank-fusion across shards is a later increment"
+                            .into(),
+                    ))
+                }
+            }
+            CandidatePhase::Rerank(cs) => {
+                let eligible: Vec<&prism_part::part::PartReader> =
+                    cs.eligible.iter().map(|i| &cs.readers[*i]).collect();
+                // Read event ids in one pass per part.
+                let mut by_part: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+                for cand in &cs.candidates {
+                    by_part
+                        .entry(cand.part as usize)
+                        .or_default()
+                        .push(cand.row as usize);
+                }
+                let mut eid: BTreeMap<(usize, usize), String> = BTreeMap::new();
+                for (pi, rows) in &by_part {
+                    let ids = eligible[*pi].read_event_ids_for_rows(rows)?;
+                    for (row, id) in rows.iter().zip(ids) {
+                        eid.insert((*pi, *row), id);
+                    }
+                }
+                Ok(cs
+                    .candidates
+                    .iter()
+                    .map(|cand| ShardCandidate {
+                        dist: cand.dist,
+                        event_id: eid[&(cand.part as usize, cand.row as usize)].clone(),
+                        part_id: eligible[cand.part as usize].manifest.part_id.clone(),
+                        row: cand.row as usize,
+                    })
+                    .collect())
+            }
+        }
+    }
+
+    /// Open the named parts (deduplicated) and return them plus a `part_id → index` map — the readers
+    /// round 2 and materialization score/read against.
+    fn open_selected(
+        &self,
+        selected: &[(String, usize)],
+    ) -> Result<(
+        Vec<prism_part::part::PartReader>,
+        std::collections::HashMap<String, usize>,
+    )> {
+        let mut order: Vec<String> = Vec::new();
+        let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for (pid, _) in selected {
+            if !index.contains_key(pid) {
+                index.insert(pid.clone(), order.len());
+                order.push(pid.clone());
+            }
+        }
+        let readers = order
+            .iter()
+            .map(|pid| prism_part::part::PartReader::open(&self.store.part_dir(pid)))
+            .collect::<Result<Vec<_>>>()?;
+        Ok((readers, index))
+    }
+
+    /// **Round 2.** Exact-score exactly the rows the coordinator chose from the global candidate set —
+    /// no more, so the total exact-vector fetches across all shards stay within the one global budget
+    /// ([D-073](../../../docs/DECISIONS.md)). Re-opens the parts and rebuilds the per-space context
+    /// (shared with the candidate phase, `build_space_contexts`), then runs the one shared
+    /// `rerank_scores`.
+    pub(crate) fn search_rerank_selected(
+        &self,
+        q: &Query,
+        selected: &[(String, usize)],
+    ) -> Result<Vec<ShardScored>> {
+        if selected.is_empty() {
+            return Ok(Vec::new());
+        }
+        let (readers, index) = self.open_selected(selected)?;
+        let eligible: Vec<&prism_part::part::PartReader> = readers.iter().collect();
+        let mut c = Counters::default();
+        let (ctxs, _gen_ids) = self.build_space_contexts(&eligible, q, &mut c)?;
+        let candidates: Vec<crate::topk::Candidate> = selected
+            .iter()
+            .map(|(pid, row)| crate::topk::Candidate {
+                dist: 0.0,
+                part: index[pid] as u32,
+                row: *row as u32,
+            })
+            .collect();
+        let scored = self.rerank_scores(q, &eligible, &ctxs, &candidates, &mut c)?;
+        Ok(scored
+            .into_iter()
+            .map(|s| ShardScored {
+                score: s.score,
+                event_id: s.event_id,
+                part_id: eligible[s.part].manifest.part_id.clone(),
+                row: s.row,
+                vector: s.vector,
+            })
+            .collect())
+    }
+
+    /// **Materialize** the final survivors the coordinator selected: their `Event` body and the
+    /// centroid each lives in, in the order asked, so payload is bounded by `k`.
+    pub(crate) fn search_materialize(
+        &self,
+        selected: &[(String, usize)],
+    ) -> Result<Vec<(Event, u32)>> {
+        if selected.is_empty() {
+            return Ok(Vec::new());
+        }
+        let (readers, index) = self.open_selected(selected)?;
+        let mut out = Vec::with_capacity(selected.len());
+        for (pid, row) in selected {
+            let r = &readers[index[pid]];
+            let ev = r.read_events_for_rows(&[*row])?.pop().ok_or_else(|| {
+                PrismError::Corrupt(format!("row {row} of part {pid} is missing"))
+            })?;
+            let centroid = r
+                .manifest
+                .centroid_ranges
+                .iter()
+                .find(|cr| *row >= cr.first_row && *row < cr.first_row + cr.row_count)
+                .map(|cr| cr.centroid)
+                .ok_or_else(|| {
+                    PrismError::Corrupt(format!("row {row} of part {pid} is in no centroid range"))
+                })?;
+            out.push((ev, centroid));
+        }
+        Ok(out)
     }
 
     /// Answer a query that spans two embedding spaces, through a **declared bridge**.
@@ -1221,35 +1403,7 @@ impl Engine {
         }
 
         // --- 3. one query embedding + one ADC table per generation ---
-        //
-        // Different codebook generations within the same embedding space are
-        // fine: each gets its own table, and they merge at exact-score time,
-        // where both agree on what a vector means.
-        let gen_ids: BTreeSet<String> = eligible
-            .iter()
-            .map(|r| r.manifest.generation_id.clone())
-            .collect();
-
-        let mut ctxs: BTreeMap<String, SpaceContext> = BTreeMap::new();
-        for gid in &gen_ids {
-            let g = self.catalog().get_generation(gid)?;
-            let embedder = self.plane.embedder(&g.model_id, &g.model_version, dim)?;
-            let qv = embedder.embed(&q.text)?;
-            let adc = g.pq.adc_table(&qv)?;
-            let scored = g.coarse.rank(&qv);
-            let ranked: Vec<u32> = scored.iter().map(|(id, _)| *id).collect();
-            let ranked_dists: Vec<f32> = scored.iter().map(|(_, d)| *d).collect();
-            c.centroids_scored += ranked.len();
-            ctxs.insert(
-                gid.clone(),
-                SpaceContext {
-                    query_vector: qv,
-                    adc,
-                    ranked,
-                    ranked_dists,
-                },
-            );
-        }
+        let (ctxs, gen_ids) = self.build_space_contexts(&eligible, q, &mut c)?;
 
         // --- 4. scan the selected centroid ranges ---
 
