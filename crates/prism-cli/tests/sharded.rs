@@ -411,6 +411,55 @@ fn a_pinned_snapshot_vector_hides_later_publications() {
     }
 }
 
+/// **Item 2 — C-4 across the wire, made a named proof.** A corpus of identical-body events (so
+/// their exact rerank scores are equal — a deliberate tie) spread across tenants, hence across
+/// shards. The global merge must break those ties on `event_id`, so the cluster's order equals the
+/// single engine's and the tied run is `event_id`-ascending — at 2 and 4 shards, ties split across
+/// them.
+#[test]
+fn c4_distance_ties_split_across_shards_resolve_on_event_id() {
+    // Background so the generation trains on a realistic sample, plus the deliberately-tied events.
+    let build = || {
+        let mut ev = prism_engine::corpus::generate(prism_engine::corpus::Kind::Zipf, 2000, 5);
+        ev.extend(matching_events(40, "tie")); // identical body → identical exact score
+        ev
+    };
+    let single = Engine::init(&tmp("tie-single"), config()).unwrap();
+    single.ingest(build(), TS).unwrap();
+
+    let mut q = cross_tenant_query(None);
+    q.k = 40;
+    q.rerank = 120;
+    q.candidates = 400;
+    let g = hit_fp(&single.search(&q).unwrap());
+
+    for n in [2usize, 4] {
+        let cluster = Cluster::init(&tmp(&format!("tie-{n}")), n, config()).unwrap();
+        cluster.ingest(build(), TS).unwrap();
+        let hits = cluster.search(&q).unwrap();
+
+        assert_eq!(
+            hit_fp(&hits),
+            g,
+            "{n}-shard: a tie split across shards resolved differently from the single engine"
+        );
+        // The tied `tie-*` events (equal score) appear in strict event_id order — C-4, across shards.
+        let tied: Vec<String> = hits
+            .hits
+            .iter()
+            .filter(|h| h.event.event_id.starts_with("tie-"))
+            .map(|h| h.event.event_id.clone())
+            .collect();
+        assert!(tied.len() >= 2, "{n}-shard: expected several tied events");
+        let mut sorted = tied.clone();
+        sorted.sort();
+        assert_eq!(
+            tied, sorted,
+            "{n}-shard: tied events are not in event_id order — C-4 broke across the wire"
+        );
+    }
+}
+
 /// **Item 3, gate (b): pagination against the pinned vector, with a mid-pagination publication.** A
 /// paginated cross-tenant query pins the vector on page 1 and carries it in the cursor, so the pages
 /// **tile the pinned answer with no duplicate and no gap** even as a publication lands between pages —
