@@ -699,6 +699,11 @@ impl Engine {
     /// *global* candidate set with the **same code** a single node runs on a local one — one
     /// implementation, no divergence ([query §20](../../../docs/QUERY-CONTRACT.md)). Single-store
     /// search is the degenerate one-shard case: `search_at` = candidate phase then this.
+    /// The rerank stage of single-store search: bound the candidate set (rerank width, then the
+    /// declared byte budget — storage §6), exact-score it, and finalize. In a cluster the bounding is
+    /// the COORDINATOR's over the *global* candidate set and the scoring/finalizing fan out per shard,
+    /// but it is the **same two methods** ([`rerank_scores`](Self::rerank_scores) /
+    /// [`finalize`](Self::finalize)) — one implementation, no divergence ([D-073](../../../docs/DECISIONS.md)).
     #[allow(clippy::too_many_arguments)]
     fn rerank_phase(
         &self,
@@ -712,15 +717,14 @@ impl Engine {
         mut c: Counters,
     ) -> Result<SearchResult> {
         let dim = self.store.config.dim;
-
-        // --- 5. exact rerank, within the declared fetch budget ---
         let mut candidates = candidates;
         candidates.truncate(q.rerank);
-        // The fetch budget is a **byte** ceiling on the cold tier (storage contract §6): a plan may
-        // declare how many bytes of exact vectors it is willing to pull, and execution is bounded by
-        // it — not an unbounded fetch. Exhausting it reranks only the most-promising candidates that
-        // fit (they are already in PQ-distance order, so this keeps the best) and **flags** the
-        // result as budget-limited rather than silently over-fetching or silently under-answering.
+        // The fetch budget is a **byte** ceiling on the cold tier (storage §6): a plan declares how
+        // many bytes of exact vectors it will pull, and execution is bounded by it. Exhausting it
+        // reranks only the most-promising candidates that fit (already in PQ order) and **flags** the
+        // result — never a silent over-fetch or a silent short answer. In a cluster this exact rule
+        // runs once, at the coordinator, over the global set: the budget holds for the query, not
+        // per-shard × N.
         let bytes_per_vector = dim * 4;
         if let Some(budget) = q.fetch_budget_bytes {
             let max_vectors = budget / bytes_per_vector.max(1);
@@ -731,17 +735,77 @@ impl Engine {
         }
         c.rerank_width = candidates.len();
 
+        let scored = self.rerank_scores(q, eligible, ctxs, &candidates, &mut c)?;
+
+        // Single-node materialization: the survivors' bodies and centroids come from the local
+        // readers. The cluster passes a materializer that routes to the owning shards instead — the
+        // one place the two paths differ, and only in *where* the survivor bodies come from (D-073).
+        let materialize =
+            |needed: &BTreeSet<(usize, usize)>| -> Result<BTreeMap<(usize, usize), (Event, u32)>> {
+                let mut per_part: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+                for (p, r) in needed {
+                    per_part.entry(*p).or_default().push(*r);
+                }
+                let mut out: BTreeMap<(usize, usize), (Event, u32)> = BTreeMap::new();
+                for (pi, rows) in &per_part {
+                    let r = eligible[*pi];
+                    let evs = r.read_events_for_rows(rows)?;
+                    for (row, ev) in rows.iter().zip(evs) {
+                        let centroid = r
+                            .manifest
+                            .centroid_ranges
+                            .iter()
+                            .find(|cr| *row >= cr.first_row && *row < cr.first_row + cr.row_count)
+                            .map(|cr| cr.centroid)
+                            .ok_or_else(|| {
+                                PrismError::Corrupt(format!(
+                                    "row {row} of part {} is in no centroid range",
+                                    r.manifest.part_id
+                                ))
+                            })?;
+                        out.insert((*pi, *row), (ev, centroid));
+                    }
+                }
+                Ok(out)
+            };
+
+        // `physical_bytes_read` is read AFTER materialization, because materializing the survivor
+        // bodies is itself disk the query moved — computing it before would undercount.
+        self.finalize(
+            snap,
+            q,
+            scored,
+            gen_ids,
+            plan_choice,
+            c,
+            materialize,
+            || eligible.iter().map(|r| r.io_bytes()).sum(),
+        )
+    }
+
+    /// **Exact-score a bounded candidate set** — fetch each candidate's exact vector and score it on
+    /// the chosen route, degrading to CPU on a device fault. Shared by the single node and, per shard,
+    /// by a cluster's round two ([D-073](../../../docs/DECISIONS.md)). The candidates are already
+    /// bounded (by the node, or by the coordinator's global budget), so this never re-bounds them.
+    fn rerank_scores(
+        &self,
+        q: &Query,
+        eligible: &[&prism_part::part::PartReader],
+        ctxs: &BTreeMap<String, SpaceContext>,
+        candidates: &[crate::topk::Candidate],
+        c: &mut Counters,
+    ) -> Result<Vec<Scored>> {
+        let dim = self.store.config.dim;
         let mut by_part: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-        for cand in &candidates {
+        for cand in candidates {
             by_part
                 .entry(cand.part as usize)
                 .or_default()
                 .push(cand.row as usize);
         }
 
-        // Fetch every candidate's exact vector and id FIRST, separating I/O from the rerank
-        // compute. This is what makes a device-route degradation a pure recompute: if the GPU
-        // route faults, we re-score the already-fetched vectors on the CPU without touching disk.
+        // Fetch every candidate's exact vector and id FIRST, separating I/O from the rerank compute:
+        // a device-route degradation is then a pure recompute on already-fetched vectors.
         struct Fetched {
             part: usize,
             row: usize,
@@ -753,15 +817,13 @@ impl Engine {
         for (pi, rows) in &by_part {
             let r = eligible[*pi];
             let ctx = ctxs.get(&r.manifest.generation_id).unwrap();
-            // The cold tier goes through the object store + cache (S11): a cache state is a physical
-            // layout and may not change the answer, and a transient remote fault is a bounded retry
-            // or a named condition, never a silently short fetch (storage contract §3/§4).
+            // The cold tier goes through the object store + cache (S11): a cache state may not change
+            // the answer, and a transient remote fault is a bounded retry or a named condition.
             let vectors = self.cold_read_vectors(r, rows)?;
             let ids = r.read_event_ids_for_rows(rows)?;
             c.exact_vectors_fetched += vectors.len();
             c.exact_bytes_fetched += vectors.len() * dim * 4;
-            // One cold-tier object request per part touched (S11 EXPLAIN economics, §6). Coalesced
-            // ranged reads within a part are one logical request against the object.
+            // One cold-tier object request per part touched (S11 EXPLAIN economics, §6).
             c.object_requests += 1;
             for ((row, v), event_id) in rows.iter().zip(vectors).zip(ids) {
                 fetched.push(Fetched {
@@ -774,14 +836,9 @@ impl Engine {
             }
         }
 
-        // --- route the rerank (S7) ---
-        //
-        // The route is invisible to the answer (selection-identity, determinism contract §9), so
-        // the planner chooses on cost alone. With the GPU off this is always CPU; a test may force
-        // a device route to prove the answer survives the route change.
-        // Precedence: an explicit per-query route (which a cursor sets, to pin a paginated query
-        // to one route) wins over the global test override, which wins over the cost model. The
-        // cursor's route MUST win, or a route flip between pages would corrupt pagination.
+        // Route the rerank (S7): the route is invisible to the answer, so the planner chooses on cost;
+        // a per-query force (a cursor pins one, to keep pagination on one route) wins over the global
+        // override, which wins over the cost model.
         let forced = q
             .force_route
             .as_deref()
@@ -793,16 +850,13 @@ impl Engine {
             .or_else(crate::gpu::forced_route_override);
         let mut plan = crate::gpu::plan_route(fetched.len(), forced);
 
-        // Per-tenant device admission: a device route reserves its footprint before running, and a
-        // tenant over its share is DEGRADED to CPU rather than allowed to fail another tenant
-        // (determinism contract §11). The reservation releases on drop.
+        // Per-tenant device admission: a tenant over its device share is DEGRADED to CPU, not failed.
         let _reservation = if plan.route.is_device() {
             let bytes = fetched.len() * dim * 4;
             let tenant = q.tenant.as_deref().unwrap_or("(none)");
             match crate::gpu::admission().try_reserve(tenant, bytes) {
                 Some(res) => Some(res),
                 None => {
-                    // Not enough of this tenant's device share; degrade, do not fail.
                     plan = crate::gpu::RoutePlan {
                         route: crate::gpu::Route::Cpu,
                         reason: "device admission refused this tenant's footprint; degraded".into(),
@@ -814,29 +868,28 @@ impl Engine {
             None
         };
 
-        // Rerank on the chosen route, degrading to CPU on a device fault. A device is an
-        // accelerator, not a dependency: a query answerable on the CPU is always answered.
-        let score_all = |route: crate::gpu::Route| -> std::result::Result<Vec<Scored>, crate::gpu::DeviceFault> {
-            let fault = if route.is_device() {
-                crate::gpu::injected_fault()
-            } else {
-                None
+        let score_all =
+            |route: crate::gpu::Route| -> std::result::Result<Vec<Scored>, crate::gpu::DeviceFault> {
+                let fault = if route.is_device() {
+                    crate::gpu::injected_fault()
+                } else {
+                    None
+                };
+                let mut out = Vec::with_capacity(fetched.len());
+                for f in &fetched {
+                    // Exact cosine on the stored float32 vector. This is the answer; the PQ distance
+                    // was only ever a way to avoid computing this for everything.
+                    let score = crate::gpu::rerank_score(route, &f.query_vector, &f.vector, fault)?;
+                    out.push(Scored {
+                        score,
+                        part: f.part,
+                        row: f.row,
+                        vector: f.vector.clone(),
+                        event_id: f.event_id.clone(),
+                    });
+                }
+                Ok(out)
             };
-            let mut out = Vec::with_capacity(fetched.len());
-            for f in &fetched {
-                // Exact cosine on the stored float32 vector. This is the answer; the PQ distance
-                // was only ever a way to avoid computing this for everything.
-                let score = crate::gpu::rerank_score(route, &f.query_vector, &f.vector, fault)?;
-                out.push(Scored {
-                    score,
-                    part: f.part,
-                    row: f.row,
-                    vector: f.vector.clone(),
-                    event_id: f.event_id.clone(),
-                });
-            }
-            Ok(out)
-        };
 
         let scored: Vec<Scored> = match score_all(plan.route) {
             Ok(s) => {
@@ -844,9 +897,6 @@ impl Engine {
                 s
             }
             Err(fault) => {
-                // Degrade to CPU, logged and observable. Never a failed query. The log makes a
-                // degradation loud -- a GPU that quietly stopped being used is one you are paying
-                // for and not getting -- and `route_degraded` carries it in the counters too.
                 eprintln!(
                     "prism: device route `{}` faulted at {} ({}); degraded to CPU for tenant {:?}",
                     plan.route.name(),
@@ -860,35 +910,46 @@ impl Engine {
             }
         };
         drop(_reservation);
-        let mut scored = scored;
+        Ok(scored)
+    }
 
-        // Descending score, ties broken on `event_id`.
-        //
-        // Not on (part, row). Bodies repeat in real telemetry, so exact score
-        // ties are common, and a tie-break on physical position means the same
-        // query returns a different order after a merge moves rows between
-        // parts. Order must be a function of the data, not of the layout — the
-        // exact oracle breaks ties the same way, so the two paths agree on tied
-        // results and recall stays measurable.
+    /// **Finalize the rerank**: order by exact score (C-4 `event_id` tie-break), apply the similarity
+    /// threshold, take the top-`k`, materialize the survivors (via `materialize` — local readers on a
+    /// single node, the owning shards in a cluster, D-073), filter tombstones, and group. Shared by
+    /// both paths, so a single node and a cluster resolve ties, thresholds, and limits identically.
+    #[allow(clippy::too_many_arguments)]
+    fn finalize(
+        &self,
+        snap: &prism_part::catalog::Snapshot,
+        q: &Query,
+        mut scored: Vec<Scored>,
+        gen_ids: &BTreeSet<String>,
+        plan_choice: &crate::plan::PlanChoice,
+        mut c: Counters,
+        materialize: impl Fn(
+            &BTreeSet<(usize, usize)>,
+        ) -> Result<BTreeMap<(usize, usize), (Event, u32)>>,
+        physical_bytes_read: impl Fn() -> usize,
+    ) -> Result<SearchResult> {
+        let dim = self.store.config.dim;
+
+        // Descending score, ties broken on `event_id` (C-4) — never on (part, row): order must be a
+        // function of the data, not the layout, so a merge that moves rows between parts (or shards)
+        // cannot change it.
         scored.sort_by(|a, b| {
             b.score
                 .total_cmp(&a.score)
                 .then(a.event_id.cmp(&b.event_id))
         });
 
-        // Similarity threshold (docs/QUERY-CONTRACT.md §12): keep only rows whose EXACT rerank
-        // score clears the bar, THEN apply `k`. Threshold first, LIMIT second. Applied to the
-        // exact score, never the approximate PQ distance -- a threshold on an approximate score
-        // would admit rows the exact score rejects. Fewer than `k` clearing the bar is the honest
-        // count, not an error.
+        // Similarity threshold (§12): keep rows whose EXACT score clears the bar, THEN apply `k`.
+        // Fewer than `k` clearing it is the honest count, not an error.
         if let Some(tau) = q.threshold {
             scored.retain(|s| s.score >= tau);
         }
 
-        // --- 6. materialize only what we return ---
-        //
-        // Bodies are the most expensive column and the least useful one to a
-        // scan. Only the rows a caller will actually see pay for theirs.
+        // Materialize only what we return (bodies are the most expensive column): the survivors for a
+        // grouped query are all rerank rows; for a plain query, the top-`k`.
         let take = if q.group_k.is_some() {
             scored.len()
         } else {
@@ -896,55 +957,37 @@ impl Engine {
         };
         let needed: BTreeSet<(usize, usize)> =
             scored.iter().take(take).map(|s| (s.part, s.row)).collect();
+        let materialized = materialize(&needed)?;
+        // What the disk actually moved — read after materialization, since the survivor bodies count.
+        c.physical_bytes_read = physical_bytes_read();
 
-        let mut per_part: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-        for (p, r) in &needed {
-            per_part.entry(*p).or_default().push(*r);
-        }
-        let mut events: BTreeMap<(usize, usize), Event> = BTreeMap::new();
-        for (pi, rows) in &per_part {
-            let evs = eligible[*pi].read_events_for_rows(rows)?;
-            for (row, ev) in rows.iter().zip(evs) {
-                events.insert((*pi, *row), ev);
-            }
-        }
-
-        // Attach the centroid each hit actually lives in, so the physical
-        // clustering is inspectable from a result and not only from the counters.
         let mut hits: Vec<Hit> = scored
             .iter()
             .take(q.k)
             .map(|s| {
-                let r = eligible[s.part];
-                let centroid = r
-                    .manifest
-                    .centroid_ranges
-                    .iter()
-                    .find(|cr| s.row >= cr.first_row && s.row < cr.first_row + cr.row_count)
-                    .map(|cr| cr.centroid)
-                    .ok_or_else(|| {
-                        PrismError::Corrupt(format!(
-                            "row {} of part {} is in no centroid range",
-                            s.row, r.manifest.part_id
-                        ))
-                    })?;
+                let (event, centroid) = materialized.get(&(s.part, s.row)).ok_or_else(|| {
+                    PrismError::Corrupt(format!("survivor {} was not materialized", s.event_id))
+                })?;
                 Ok(Hit {
-                    event: events.get(&(s.part, s.row)).unwrap().clone(),
+                    event: event.clone(),
                     score: s.score,
-                    centroid,
+                    centroid: *centroid,
                 })
             })
             .collect::<Result<Vec<Hit>>>()?;
 
-        // A tombstoned row is logically deleted as of this snapshot — it is filtered from the
-        // answer even while it is still physically present, until a merge reconciles it away
-        // (merge contract §6). Filtering the final hits can return fewer than `k`, which is the
-        // honest count of surviving matches, exactly as a threshold can (§12).
+        // A tombstoned row is logically deleted as of this snapshot — filtered from the answer even
+        // while still physically present, until a merge reconciles it away (merge §6).
         if !snap.tombstones.is_empty() {
             hits.retain(|h| !snap.is_tombstoned(&h.event.event_id));
         }
 
-        // --- 7. semantic grouping of the rerank survivors ---
+        // Semantic grouping of the rerank survivors (§7): clusters the survivor vectors, with the
+        // survivor events for exemplars.
+        let events: BTreeMap<(usize, usize), Event> = materialized
+            .iter()
+            .map(|(k, (e, _))| (*k, e.clone()))
+            .collect();
         let clusters = match q.group_k {
             Some(gk) if gk > 0 && !scored.is_empty() => {
                 Some(group(&scored, &events, gk, dim, self.store.config.seed)?)
@@ -952,19 +995,10 @@ impl Engine {
             _ => None,
         };
 
-        // What the disk actually moved, as opposed to what the plan asked for.
-        c.physical_bytes_read = eligible.iter().map(|r| r.io_bytes()).sum();
-
-        // EXPLAIN (S8, §14): estimates alongside actuals, so cost-model drift is a visible number.
         let explain = if q.explain {
-            // Pass rate among rows the predicate was ACTUALLY evaluated on. For interleaved and
-            // scalar-first that is every scanned row, so it is the true selectivity; semantic-first
-            // evaluates a biased near subset, so its number is only a lower bound -- EXPLAIN says
-            // which plan produced it, so the reader knows.
             let actual_selectivity = if c.predicate_evals > 0 {
                 c.rows_passing_filter as f64 / c.predicate_evals as f64
             } else if c.rows_scanned_pq > 0 {
-                // No general predicate: selectivity is the tenant/time pass rate over scanned rows.
                 c.rows_passing_filter as f64 / c.rows_scanned_pq as f64
             } else {
                 1.0
