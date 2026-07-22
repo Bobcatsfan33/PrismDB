@@ -227,63 +227,115 @@ fn cross_tenant_query(group_k: Option<usize>) -> Query {
     }
 }
 
+fn group_repr(r: &SearchResult) -> Vec<(String, usize)> {
+    r.clusters
+        .as_ref()
+        .unwrap()
+        .iter()
+        .map(|c| (c.exemplar.event_id.clone(), c.count))
+        .collect()
+}
+
 /// **Checkpoint 2 of the thesis exam: the two-round cross-shard merge is a layout.** A cross-tenant
-/// query — one that fans out to every shard — answers **byte-identically** on a single engine (the
-/// ground truth), and on the cluster at 1, 2, and 4 shards. The coordinator reconstructs the global
+/// query fans out to every shard, and answers **byte-identically** on a single engine (the ground
+/// truth) and on the cluster at 1, 2, and 4 shards — the coordinator reconstructs the global
 /// candidate set, reranks within one global budget, and merges with the C-4 `event_id` tie, so the
-/// placement of tenants across shards is invisible to the answer — search and cross-tenant GROUP BY.
+/// placement of tenants across shards is invisible to the answer. The battery covers plain search,
+/// **budget-starved** (trap 2 — the named degradation must be identical at every shard count),
+/// **threshold**, small-rerank, forced **plan** flips, and cross-tenant semantic **GROUP BY**.
 #[test]
 fn cross_tenant_search_and_group_by_are_a_layout_1_2_4_way() {
     let corpus = || prism_engine::corpus::generate(prism_engine::corpus::Kind::Zipf, 3000, 5);
 
     // Ground truth: a single engine over the whole corpus (same generation the cluster trains).
-    let root = tmp("xt-single");
-    let single = Engine::init(&root, config()).unwrap();
+    let single = Engine::init(&tmp("xt-single"), config()).unwrap();
     single.ingest(corpus(), TS).unwrap();
-    let g_search = hit_fp(&single.search(&cross_tenant_query(None)).unwrap());
-    let g_group = single.search(&cross_tenant_query(Some(4))).unwrap();
+    let clusters: Vec<(usize, Cluster)> = [1usize, 2, 4]
+        .iter()
+        .map(|&n| {
+            let c = Cluster::init(&tmp(&format!("xt-{n}")), n, config()).unwrap();
+            c.ingest(corpus(), TS).unwrap();
+            (n, c)
+        })
+        .collect();
+
+    // The search battery — every shape that stresses the merge.
+    let variants: Vec<(&str, Query)> = vec![
+        ("plain", cross_tenant_query(None)),
+        ("budget-starved", {
+            let mut q = cross_tenant_query(None);
+            q.fetch_budget_bytes = Some(8 * 64 * 4); // room for ~8 of many exact vectors
+            q
+        }),
+        ("threshold", {
+            let mut q = cross_tenant_query(None);
+            q.threshold = Some(0.3);
+            q
+        }),
+        ("small-rerank", {
+            let mut q = cross_tenant_query(None);
+            q.rerank = 12;
+            q.k = 8;
+            q
+        }),
+        ("plan-interleaved", {
+            let mut q = cross_tenant_query(None);
+            q.plan = Some("interleaved".into());
+            q
+        }),
+        ("plan-scalar-first", {
+            let mut q = cross_tenant_query(None);
+            q.plan = Some("scalar-first".into());
+            q
+        }),
+        ("plan-semantic-first", {
+            let mut q = cross_tenant_query(None);
+            q.plan = Some("semantic-first".into());
+            q
+        }),
+    ];
+
+    for (tag, q) in &variants {
+        let g = single.search(q).unwrap();
+        assert!(!g.hits.is_empty(), "ground-truth `{tag}` is empty");
+        for (n, c) in &clusters {
+            let cr = c.search(q).unwrap();
+            assert_eq!(
+                hit_fp(&cr),
+                hit_fp(&g),
+                "`{tag}` cross-tenant SEARCH diverged from ground truth at {n} shards"
+            );
+            // Trap 2: the budget degradation is the SAME outcome class at every shard count.
+            assert_eq!(
+                cr.counters.fetch_budget_exhausted, g.counters.fetch_budget_exhausted,
+                "`{tag}` budget-exhaustion flag diverged at {n} shards"
+            );
+        }
+    }
+    // At least one variant must actually exercise the degradation, or trap 2 proves nothing.
+    let starved = single
+        .search(
+            &variants
+                .iter()
+                .find(|(t, _)| *t == "budget-starved")
+                .unwrap()
+                .1,
+        )
+        .unwrap();
     assert!(
-        !g_search.is_empty(),
-        "the ground-truth cross-tenant search is empty"
+        starved.counters.fetch_budget_exhausted,
+        "the budget-starved variant did not actually exhaust the budget"
     );
 
-    let cluster_answers = |n: usize, tag: &str| -> (Vec<(String, u32)>, SearchResult) {
-        let c = Cluster::init(&tmp(tag), n, config()).unwrap();
-        c.ingest(corpus(), TS).unwrap();
-        (
-            hit_fp(&c.search(&cross_tenant_query(None)).unwrap()),
-            c.search(&cross_tenant_query(Some(4))).unwrap(),
-        )
-    };
-
-    for n in [1usize, 2, 4] {
-        let (s, grp) = cluster_answers(n, &format!("xt-{n}"));
+    // Cross-tenant semantic GROUP BY: exemplars + per-cluster counts identical at every shard count.
+    let g_group = group_repr(&single.search(&cross_tenant_query(Some(4))).unwrap());
+    for (n, c) in &clusters {
+        let cg = group_repr(&c.search(&cross_tenant_query(Some(4))).unwrap());
         assert_eq!(
-            s, g_search,
-            "{n}-shard cross-tenant SEARCH diverged from the single-engine ground truth"
-        );
-        // Cross-tenant semantic GROUP BY: the exemplars + per-cluster shape must match too.
-        let a: Vec<_> = grp
-            .clusters
-            .as_ref()
-            .unwrap()
-            .iter()
-            .map(|c| (c.exemplar.event_id.clone(), c.count))
-            .collect();
-        let b: Vec<_> = g_group
-            .clusters
-            .as_ref()
-            .unwrap()
-            .iter()
-            .map(|c| (c.exemplar.event_id.clone(), c.count))
-            .collect();
-        assert_eq!(
-            a, b,
-            "{n}-shard cross-tenant GROUP BY diverged from the ground truth"
+            cg, g_group,
+            "cross-tenant GROUP BY diverged from ground truth at {n} shards"
         );
     }
-
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// The routed shard for a tenant is independent of shard count for the buckets that map to it — the
