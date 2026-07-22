@@ -1,0 +1,11 @@
+{
+  "epsilon": 0.000001,
+  "measured_p999": 0.00000060,
+  "measured_max": 0.00000083,
+  "quantile": 0.999,
+  "config": { "dim": 64, "pq_m": 8, "corpus": "Zipf 3000 5", "generation": "bootstrap seed=9" },
+  "corpus_conditional": true,
+  "generation_conditional": true,
+  "_rule": "The overfetch margin for threshold-query candidate bounding (D-074). A similarity threshold tau translates to a squared-L2 bound l2^2 <= 2(1-tau) on unit vectors; the candidate phase, holding only the PQ approximation of l2^2, keeps rows with PQ_dist <= 2(1-tau) + epsilon, and rerank applies the exact tau. epsilon is a MEASURED high quantile (p999) of the PQ quantization error |adc - true l2^2| -- the quantile IS the recall contract for threshold queries (C-3): a qualifying row is missed only if its PQ error exceeds epsilon, i.e. at most 1-in-1000. It is a property of the CODEBOOK, so a new generation re-derives it (C-6).",
+  "_honest_wall": "Measured on the hash-embedder golden corpus, where PQ reconstruction is near-exact (few distinct motif vectors) so the error is ~1e-6 and epsilon is set to 1e-6 (bounds the measured max 8.3e-7 with headroom). A REAL-embedding corpus (768d, continuous vectors) has materially larger PQ error and re-derives a larger epsilon -- the same filed obligation as the measured-at-768d worksheet (issue #3). The threshold-bounding MECHANISM ships and is gated on this corpus; its recall BENEFIT is a real-corpus number, honestly filed."
+}
