@@ -1,5 +1,6 @@
 {
   "epsilon": 0.000001,
+  "epsilon_micros": 1,
   "measured_p999": 0.00000060,
   "measured_max": 0.00000083,
   "quantile": 0.999,

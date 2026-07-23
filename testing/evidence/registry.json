@@ -418,6 +418,25 @@
       "value": 16777216,
       "kind": "policy",
       "rationale": "docs/STORAGE-CONTRACT.md#2 \u2014 object size at/above which an upload uses multipart instead of a single PUT, AND the size of each part. BACKEND-CONDITIONAL: a single PUT is fine to the backend's limit, but a large object wants multipart so a mid-upload crash leaves resumable server-side parts that GC's list-and-abort sweep reclaims, rather than re-sending whole. 16 MiB (> S3's 5 MiB minimum part size) is a common part size; a cold-tier rerank.vec crosses it at scale. Multipart initiate/part/complete/abort + the GC sweep are implemented (S11 boundary d); this constant is both the threshold and the part size."
+    },
+    {
+      "name": "THRESHOLD_OVERFETCH_MARGIN_EPSILON_MICROS",
+      "value": 1,
+      "kind": "tuned",
+      "evidence": "testing/evidence/pq-margin.json",
+      "evidence_key": "epsilon_micros",
+      "rule": "A similarity threshold \u03c4 on the exact cosine score is an exact squared-L2 bound l2\u00b2 \u2264 2(1\u2212\u03c4) (unit vectors), but the candidate phase only has the PQ approximation of l2\u00b2, which is exact \u00b1 quantization error. \u03b5 is a MEASURED high quantile (p999) of |adc \u2212 true l2\u00b2| over representative (query,row) pairs on the golden corpus; the candidate bound is relaxed to PQ \u2264 2(1\u2212\u03c4)+\u03b5 so every row clearing \u03c4 survives the approximate phase and rerank prunes the overfetch against exact \u03c4. The quantile IS the recall contract. Stored in micro-units: on this near-exact hash corpus the measured p999 (6e-7) and the receipted \u03b5 (1e-6) both round to 1\u00b5.",
+      "corpus_version": "v1",
+      "corpus_conditional": true,
+      "corpus_conditional_reason": "the hash-embedder corpus reconstructs vectors near-exactly, so its PQ error \u2014 and thus \u03b5 \u2014 is unusually small. A real 768d embedding space re-derives a materially larger \u03b5 (issue #3); the margin-injection test exercises the mechanism at production-shaped \u03b5 that this corpus's geometry does not reach.",
+      "generation_conditional": true,
+      "generation_conditional_reason": "\u03b5 is a function of the codebook's quantization geometry (C-6). A new generation re-derives it \u2014 the pq_margin test is the C-6 guard that a codebook change updates testing/evidence/pq-margin.json."
+    },
+    {
+      "name": "THRESHOLD_STATE_BUDGET",
+      "value": 100000,
+      "kind": "policy",
+      "rationale": "docs/QUERY-CONTRACT.md#22 \u2014 the most candidates a threshold query's relaxed bound may keep, per shard, before the query is REFUSED BY NAME (S9 named-limit) rather than reranked without bound. A threshold query is bounded by the threshold, not a top-k width, so a broad filter with a low \u03c4 could otherwise qualify an unbounded set and rerank every one. This is a safety ceiling on unbounded exact-scoring work, not an empirical optimum: 100k candidates per shard is generous for any real threshold query and small enough that the refusal fires before the work does. Narrow the filter or raise \u03c4."
     }
   ]
 }

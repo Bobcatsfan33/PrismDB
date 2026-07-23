@@ -109,6 +109,24 @@ pub const DEFAULT_CANDIDATES: usize = 50;
 /// fetch costs 32 rows of scanning. The candidate heap costs memory, not I/O.
 pub const DEFAULT_RERANK: usize = 50;
 
+/// The **overfetch margin** for threshold-query candidate bounding ([D-074](../../../docs/DECISIONS.md)).
+///
+/// A `similarity > τ` query bounds the candidate phase *by the threshold*, not a width: on unit
+/// vectors `cos ≥ τ` ⇔ `l2² ≤ 2(1−τ)`, and the candidate phase, holding only the PQ approximation of
+/// `l2²`, keeps rows with `PQ_dist ≤ 2(1−τ) + ε`. Rerank then applies the exact `τ`, so a false
+/// positive costs an overfetch and a false negative is bounded by `ε`. `ε` is a **measured** p999 of
+/// the PQ quantization error (`testing/evidence/pq-margin.json`, `tests/pq_margin.rs`) — the quantile
+/// IS the recall contract. It is **generation-conditional** (a property of the codebook). `1e-6` on
+/// the hash golden corpus, where PQ reconstruction is near-exact; a real-embedding corpus re-derives
+/// a larger one ([#3](https://github.com/Bobcatsfan33/PrismDB/issues/3)).
+pub const THRESHOLD_OVERFETCH_MARGIN_EPSILON: f32 = 1e-6;
+
+/// The **state budget** for a threshold query: the most candidates its relaxed bound may keep before
+/// the query is **refused by name** rather than reranking without bound ([D-074](../../../docs/DECISIONS.md),
+/// the [S9](../../../docs/DECISIONS.md) named-limit pattern). A low threshold over a broad filter can
+/// make the qualifying set unbounded; that is a query to refuse, not to answer slowly or short.
+pub const THRESHOLD_STATE_BUDGET: usize = 100_000;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Query {
     pub text: String,
@@ -302,6 +320,12 @@ pub struct Counters {
     /// silent over-fetch or under-answer (storage contract §6).
     #[serde(default)]
     pub fetch_budget_exhausted: bool,
+    /// For a threshold query only: how many candidates the relaxed bound kept that landed **within ε
+    /// of the exact bar** — the overfetch the margin bought ([D-074](../../../docs/DECISIONS.md)).
+    /// Rerank prunes them against the exact `τ`, so they never reach the answer; the count is the
+    /// **observable** that keeps margin adequacy a monitored number rather than a hope.
+    #[serde(default)]
+    pub threshold_overfetch: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -322,6 +322,25 @@ pub fn constants() -> Vec<Constant> {
             value: crate::storage::MULTIPART_THRESHOLD_BYTES as i64,
             kind: Kind::Policy,
         },
+        // S12, D-074. The threshold-query overfetch margin ε: a measured high quantile (p999) of the
+        // PQ quantization error, which relaxes the candidate bound from `2(1−τ)` to `2(1−τ)+ε` so
+        // every row clearing τ survives the *approximate* candidate phase. Tuned — the quantile IS
+        // the recall contract for a threshold query. Stored in micro-units; on this near-exact hash
+        // corpus the p999 rounds to 1µ (corpus- and generation-conditional, issue #3).
+        Constant {
+            name: "THRESHOLD_OVERFETCH_MARGIN_EPSILON_MICROS",
+            value: (prism_types::query::THRESHOLD_OVERFETCH_MARGIN_EPSILON as f64 * 1e6).round()
+                as i64,
+            kind: Kind::Tuned,
+        },
+        // S12, D-074. The per-shard state budget for a threshold query: the most candidates the
+        // relaxed bound may keep before the query is **refused by name** (S9 named-limit) rather than
+        // reranked without bound. Policy — a safety ceiling on unbounded work, not an empirical optimum.
+        Constant {
+            name: "THRESHOLD_STATE_BUDGET",
+            value: prism_types::query::THRESHOLD_STATE_BUDGET as i64,
+            kind: Kind::Policy,
+        },
     ]
 }
 

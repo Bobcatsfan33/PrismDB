@@ -180,6 +180,8 @@ A semantic query may carry a **similarity threshold** (return only rows scoring 
 
 A threshold that admits fewer than `k` rows returns fewer than `k`; that is not an error, it is the honest count of rows that met the bar. A threshold that admits more than `k` returns exactly `k`, the nearest. The threshold is applied to the **exact rerank score**, never the PQ distance — the approximate distance decides who is reranked, and a threshold on an approximate score would admit rows the exact score rejects. `LIMIT` without a threshold is the S0 behaviour, unchanged.
 
+For "the top-k of the rows that clear the threshold" to be *true*, the candidate phase of a threshold query must not drop a qualifying row before rerank ever sees it — so a threshold query is bounded by the **threshold**, not by a top-`candidates` width. How that bound is derived, kept honest, and refused when unbounded is [§22](#22-a-threshold-query-is-bounded-by-the-threshold-not-a-width-d-074).
+
 ## 13. Model-version / generation selection, and the error that teaches
 
 A store mid-migration holds parts in more than one generation, and possibly more than one embedding **space** (§ invariant 9). SQL selection semantics:
@@ -270,3 +272,19 @@ A distributed query can meet an unreachable shard, and the one thing it must nev
 - **Default: fail, with the shard named.** A query that cannot read a shard it needs fails with the **named** shard and condition (`shard <id> unreachable: <cause>`), never a silently short result set. This is the default because a monitoring query that silently drops a shard is worse than one that errors — the error is actionable, the short answer is a lie.
 - **Opt-in partial results carry an explicit missing-shards report.** A query may opt in to best-effort completion; when it does, the response carries a **`missing_shards`** report (the shard ids omitted and why), so a partial answer is *labelled* a partial answer and the caller decides what it is worth. A partial result without that report is a contract violation, and a gate asserts the report is present whenever a shard was dropped.
 - **Hedged reads and retries are bounded and deduplicated.** A slow shard may be hedged to a replica (or retried); the hedge count and the fan-out are **[C-1](DECISIONS.md) constants**, not unbounded. A retried or hedged fragment is **idempotent** — it reads a *pinned* seq (§19), so the same fragment computed twice is byte-identical, and the coordinator deduplicates by fragment identity rather than racing two answers. A gate asserts a hedged fragment and its original are identical and counted once, so hedging changes latency and never the answer.
+
+## 22. A threshold query is bounded by the threshold, not a width ([D-074](DECISIONS.md))
+
+A ranked query (`ORDER BY similarity LIMIT k`) is bounded by a top-`candidates` width: the candidate phase keeps the nearest `candidates` rows, rerank exact-scores them, and the width is [tuned](../testing/evidence/registry.json) so the true top-`k` is inside it. A **threshold** query (`similarity > τ`) has no such width — its answer is *every* row that clears the bar — so bounding it by a width would silently drop qualifying rows the moment more than `candidates` of them exist. It is bounded by the threshold instead.
+
+**The bound.** On unit vectors, `cos ≥ τ` is exactly `l2² ≤ 2(1−τ)`. The candidate phase holds only the PQ **approximation** of `l2²`, which is the exact distance ± quantization error, so it keeps every row whose PQ distance clears a **relaxed** bound:
+
+> keep candidate ⇔ `PQ_dist ≤ 2(1−τ) + ε`,  then rerank applies the exact `τ`.
+
+`ε` is not guessed. It is a **measured** high quantile (p999) of the PQ error `|adc − true l2²|` on the golden corpus ([`pq-margin.json`](../testing/evidence/pq-margin.json), [C-1](DECISIONS.md)-registered, corpus- and generation-conditional per [C-3](DECISIONS.md)/[C-6](DECISIONS.md)) — so a qualifying row is missed only when its own quantization error exceeds `ε`, i.e. at most 1-in-1000. **The quantile *is* the recall contract.** A new codebook re-derives it (the `pq_margin` test is that guard).
+
+**The overfetch is observable.** The relaxed bound admits some rows that will not clear the exact `τ` (their PQ distance sits in `(2(1−τ), 2(1−τ)+ε]`); rerank prunes them. The count of these is reported as a counter (`threshold_overfetch`), so margin adequacy is a **monitored number**, not a hope — and a margin-injection test seam forces a production-shaped `ε` to exercise the overfetch, prune-back, and refusal paths that this corpus's near-exact geometry does not naturally reach.
+
+**Unbounded is refused, not answered short.** A broad filter with a low `τ` can qualify an unbounded set. The relaxed-bound collection is capped at a per-shard **state budget** ([`THRESHOLD_STATE_BUDGET`](../testing/evidence/registry.json), a policy ceiling); a threshold query that exceeds it is **refused by name** (the [S9](../docs/DECISIONS.md) named-limit pattern) — *"narrow the filter or raise the threshold"* — never reranked without bound and never returned short.
+
+**It is the same rule in a cluster.** Each shard bounds its own candidates by `2(1−τ)+ε` up to its state budget; the coordinator merges them and, for a threshold query, does **not** truncate to `q.rerank` (that width truncation is a ranked-query bound). The threshold answer is therefore identical at 1, 2, and 4 shards — sharding is a layout ([§20](#20-sharding-is-a-layout--the-answer-is-a-function-of-the-data-not-its-placement-c-4-family-final-member)), and the exam battery proves it byte-identical.

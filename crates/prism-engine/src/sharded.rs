@@ -411,7 +411,13 @@ impl Cluster {
 
         // Bound ONCE, globally: rerank width, then the declared byte budget — for the query, not per
         // shard × N. Exhaustion is the same named degradation single-store reports (storage §6).
-        global.truncate(q.rerank);
+        // A **threshold** query is bounded by the threshold, not a width: each shard already bounded
+        // its candidates to `2(1−τ) + ε` up to the per-shard state budget (D-074), so the coordinator
+        // must NOT truncate to `q.rerank` here — that would drop qualifying rows exactly as it would
+        // single-store. The byte budget below still holds for the query either way.
+        if q.threshold.is_none() {
+            global.truncate(q.rerank);
+        }
         let mut fetch_budget_exhausted = false;
         if let Some(budget) = q.fetch_budget_bytes {
             let max_vectors = budget / (dim * 4).max(1);
