@@ -123,3 +123,84 @@ fn a_reader_killed_mid_pagination_expires_per_shard_and_gc_proceeds() {
         );
     }
 }
+
+/// **The clock-skew property the chaos suite will stress, proved at the cluster level now** (D-075).
+/// GC reasons about a **monotonic** lease clock, never the wall clock, so a node whose wall clock
+/// skews ±30d neither expires a live reader's lease early nor keeps a crashed reader's forever. This
+/// drives the lease clock by hand (as a chaos run's cross-process skew would) and contrasts it with
+/// what a naive wall-clock horizon *would* do at the skewed reading — the bug the discipline avoids.
+#[test]
+fn leases_hold_when_the_wall_clock_skews_but_the_lease_clock_is_monotonic() {
+    use prism_engine::clock::set_lease_now_override;
+
+    const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+    let thirty_days = 30 * DAY_MS;
+
+    for n in [2usize, 4] {
+        let cluster = Cluster::init(&tmp(&format!("skew-{n}")), n, config()).unwrap();
+        // Snapshots are stamped `created_at_ms = TS` by the wall clock at ingest.
+        cluster
+            .ingest(
+                prism_engine::corpus::generate(prism_engine::corpus::Kind::Zipf, 3000, 5),
+                TS,
+            )
+            .unwrap();
+        let (_page1, cursor) = cluster.search_page(&page_query(), None).unwrap();
+        let cursor = cursor.expect("need a second page to hold a lease across");
+        for i in 0..4 {
+            cluster
+                .ingest(
+                    prism_engine::corpus::generate(
+                        prism_engine::corpus::Kind::Uniform,
+                        60,
+                        200 + i,
+                    ),
+                    TS + 1 + i as i64,
+                )
+                .unwrap();
+        }
+
+        // The bug the discipline avoids, made visible with a dry run (it reclaims nothing for real):
+        // a node whose WALL clock reads +30d would, under a naive wall-clock horizon, see the pinned
+        // snapshot as ancient and reclaim it — cutting a live reader's lease short.
+        let naive_fwd = cluster.gc_at(1, TS + thirty_days, true).unwrap();
+        assert!(
+            naive_fwd.iter().any(|r| !r.removed_snapshots.is_empty()),
+            "{n}-shard sanity: a +30d wall-clock reading is exactly the skew the lease clock must \
+             defend against (a naive horizon would reclaim the pinned snapshot)"
+        );
+        // ...and a node whose wall clock reads −30d would, naively, see it as newer than now and keep
+        // it forever.
+        let naive_bwd = cluster.gc_at(1, TS - thirty_days, true).unwrap();
+        assert!(
+            naive_bwd.iter().all(|r| r.removed_snapshots.is_empty()),
+            "{n}-shard sanity: a −30d wall-clock reading would keep everything forever"
+        );
+
+        // The lease clock is MONOTONIC: only a little real time has actually elapsed, whatever the
+        // wall clock reads. GC uses it, so nothing expires early — the reader keeps its lease.
+        set_lease_now_override(Some(TS + 5_000));
+        cluster.gc(1, false).unwrap();
+        assert!(
+            cluster.search_page(&page_query(), Some(&cursor)).is_ok(),
+            "{n}-shard: a wall-clock skew expired a live reader's lease — the lease clock was not \
+             monotonic"
+        );
+
+        // And nothing lives forever: advance the monotonic lease clock past the horizon and GC
+        // reclaims, the stale cursor then getting the named expired error — the monotonic clock still
+        // reaches the horizon no matter which way the wall clock drifted.
+        set_lease_now_override(Some(TS + GC_HORIZON_MS + 10));
+        let reports = cluster.gc(1, false).unwrap();
+        assert!(
+            reports.iter().any(|r| !r.removed_snapshots.is_empty()),
+            "{n}-shard: past the monotonic horizon GC reclaimed nothing — a lease that lives forever"
+        );
+        let err = cluster
+            .search_page(&page_query(), Some(&cursor))
+            .expect_err("{n}-shard: past the monotonic horizon the cursor must be named-expired");
+        assert!(err.to_string().contains("expired"), "{n}-shard: {err}");
+
+        set_lease_now_override(None);
+    }
+}
