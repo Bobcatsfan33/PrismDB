@@ -18,6 +18,7 @@ use crate::cluster::{ClusterRequest, SemanticClusterResult};
 use crate::engine::Engine;
 use crate::search::Scored;
 use crate::storage::object::{LocalObjectStore, ObjectStore};
+use prism_part::catalog::GcReport;
 use prism_part::generation::Generation;
 use prism_part::partition::{Bucket, PartitionScheme};
 use prism_part::store::StoreConfig;
@@ -147,6 +148,34 @@ impl Cluster {
     /// ingest has installed it.
     pub fn installed_generation(&self) -> Result<Option<String>> {
         Ok(self.shards[0].snapshot()?.active_generation)
+    }
+
+    /// Reclaim superseded snapshots and their parts on **every shard**, at the monotonic lease-clock
+    /// instant ([`crate::clock`], D-075). A **distributed reader lease is the conjunction of per-shard
+    /// leases**: a cross-shard cursor pins one snapshot per shard ([query §19](../../../docs/QUERY-CONTRACT.md)),
+    /// and each pinned snapshot is protected on its own shard for [`prism_part::catalog::LEASE_TTL_MS`]
+    /// plus its derived grace — so a reader within its lease finds every shard's parts, and a crashed
+    /// reader's snapshots age out per shard and are reclaimed, its stale cursor then getting the named
+    /// expired-snapshot error. Because the clock is monotonic, a wall-clock jump on this host reclaims
+    /// nothing early and keeps nothing forever.
+    pub fn gc(&self, retain_snapshots: usize, dry_run: bool) -> Result<Vec<GcReport>> {
+        self.gc_at(retain_snapshots, crate::clock::lease_now_ms(), dry_run)
+    }
+
+    /// GC every shard at an explicit lease-clock `now_ms` — the injection door a lease or chaos test
+    /// drives (advance monotonic time by hand while skewing the wall clock underneath). The same
+    /// instant fans to every shard: on a single host the shards share one lease clock, and each
+    /// shard's reclaim is still entirely local to its own catalog.
+    pub fn gc_at(
+        &self,
+        retain_snapshots: usize,
+        now_ms: i64,
+        dry_run: bool,
+    ) -> Result<Vec<GcReport>> {
+        self.shards
+            .iter()
+            .map(|s| s.catalog().gc_at(retain_snapshots, now_ms, dry_run))
+            .collect()
     }
 
     /// Publish a trained codebook to the cluster's generation store, content-addressed and
@@ -381,10 +410,11 @@ impl Cluster {
             .flat_map(|s| s.tombstones.iter().cloned())
             .collect();
 
-        // The pinned vector is only answerable while the parts it names still exist. Without a
-        // distributed reader lease (its own S12 increment), GC past the reader-lease horizon can
-        // reclaim a superseded snapshot's parts; a query resumed against such a vector is **expired**,
-        // a named condition ([query §2/§19](../../../docs/QUERY-CONTRACT.md)) — never a short answer.
+        // The pinned vector is only answerable while the parts it names still exist. The distributed
+        // reader lease ([`gc`](Self::gc), D-075) protects a pinned snapshot on every shard for the
+        // lease-plus-grace horizon, so a reader within its lease always finds these parts; a reader
+        // past it (or crashed) has them reclaimed by GC, and the resumed query is **expired**, a named
+        // condition ([query §2/§19](../../../docs/QUERY-CONTRACT.md)) — never a short answer.
         for (si, snap) in snaps.iter().enumerate() {
             for pid in snap.part_ids() {
                 if !self.shards[si].store.part_dir(&pid).exists() {

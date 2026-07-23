@@ -270,6 +270,14 @@ pub fn constants() -> Vec<Constant> {
             value: prism_part::catalog::LEASE_TTL_MS,
             kind: Kind::Policy,
         },
+        // S12, D-075. The cross-node wall-clock disagreement the lease tolerates. Policy — a bound on
+        // an assumption, not a measurement — and derived-adjacent: a `const` assertion pins it below
+        // the GC grace so the grace always absorbs it (the code half of the C-1 binding).
+        Constant {
+            name: "MAX_CLOCK_SKEW_MS",
+            value: prism_part::catalog::MAX_CLOCK_SKEW_MS,
+            kind: Kind::Policy,
+        },
         // --- S10: the merge scheduler ---
         Constant {
             name: "MERGE_TIER_FANOUT",

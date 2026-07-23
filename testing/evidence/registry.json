@@ -360,6 +360,12 @@
       "rationale": "docs/MERGE-CONTRACT.md#5 \u2014 the maximum time a reader may hold a snapshot pinned across a paginated query (invariant 4/6). A query paginating longer than this has its lease expire and its next page returns the explicit expired-snapshot error rather than a stale answer. One hour is generous for an interactive paginating reader and short enough that a crashed reader does not pin storage for long. This is the ONE lifecycle-timing constant; GC grace and the reclaim horizon are derived const fns of it (catalog::GC_GRACE_MS/GC_HORIZON_MS), never registered separately, so grace<lease can never arise and orphan a live reader."
     },
     {
+      "name": "MAX_CLOCK_SKEW_MS",
+      "value": 300000,
+      "kind": "policy",
+      "rationale": "docs/DECISIONS.md#d-075 \u2014 the maximum cross-node wall-clock disagreement a distributed reader lease tolerates (S12). Within a node the lease clock is MONOTONIC (prism_engine::clock), so a wall-clock jump cannot move a reclaim decision at all \u2014 the primary defence, needing no constant. The one unavoidable wall-clock use is a persisted created_at_ms, stamped by the wall clock of whichever node wrote the snapshot and compared by GC to its own monotonic now; this bounds the disagreement assumed between those two clocks. Five minutes is generous relative to the sub-second skew an NTP-corrected fleet runs, and a compile-time const assertion pins it strictly below GC_GRACE_MS (one hour) so the derived grace absorbs any disagreement within the bound \u2014 a reader within its lease is never orphaned by a clock it does not control, and nothing lives past horizon+skew. Derived-adjacent: the assertion is the code half of the C-1 binding, so grace<skew can never arise."
+    },
+    {
       "name": "MERGE_TIER_FANOUT",
       "value": 4,
       "kind": "policy",

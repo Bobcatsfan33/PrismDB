@@ -44,6 +44,25 @@ pub const GC_GRACE_MS: i64 = LEASE_TTL_MS;
 /// A snapshot may be reclaimed only once it is older than this — lease plus its derived grace.
 pub const GC_HORIZON_MS: i64 = LEASE_TTL_MS + GC_GRACE_MS;
 
+/// The maximum cross-node wall-clock disagreement the lease is willing to tolerate (S12).
+///
+/// **Policy** ([C-3](../../../docs/DECISIONS.md), the S10 cross-node-time discipline). Within one
+/// node the lease clock is **monotonic** (`prism_engine::clock`), so a wall-clock jump cannot move a
+/// reclaim decision — that is the primary defence and it needs no constant. The one place wall-clock
+/// is *unavoidable* is a persisted `created_at_ms`: a snapshot is stamped by the wall clock of the
+/// node that wrote it, and GC compares that stamp to its own (monotonic) now. This bounds the
+/// disagreement we assume between those two clocks. It is **generous** — five minutes dwarfs the
+/// sub-second skew an NTP-corrected fleet actually runs — and it is deliberately far below
+/// [`GC_GRACE_MS`], so the derived grace *absorbs* any disagreement within the bound: a reader within
+/// its lease on the owning node is never orphaned by another node's clock, and nothing lives past the
+/// horizon plus this bound. The `const` assertion below is the in-code half of the C-1 binding.
+pub const MAX_CLOCK_SKEW_MS: i64 = 5 * 60 * 1000;
+
+// Invariant 6 under cross-node skew: the grace must swallow the assumed disagreement whole, or a
+// reader within its lease could be orphaned by a clock it does not control. Derived, not tuned —
+// checked at compile time so the two can never drift into `grace < skew`.
+const _: () = assert!(MAX_CLOCK_SKEW_MS < GC_GRACE_MS);
+
 /// A part as the catalog knows it.
 ///
 /// **Untagged**, so a snapshot written before S4 -- whose `parts` were bare strings -- still
