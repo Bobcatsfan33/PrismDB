@@ -151,8 +151,39 @@ fn path_of(a: &Args) -> Result<PathBuf> {
     Ok(PathBuf::from(a.req("path")?))
 }
 
+/// The cold-tier object store from the environment, or `None` for the local default. When
+/// `PRISM_S3_ENDPOINT` is set the store's cold tier — its cold parts, catalog **mirror**, and write-
+/// ownership epochs — lives on S3/MinIO, so a `prism` process is a real shard over shared object
+/// storage (the substrate the durability-chaos gates run on). A cache state is a physical layout and
+/// may not change an answer ([storage §3](../../../docs/STORAGE-CONTRACT.md)), so this only relocates
+/// bytes, never results. `PRISM_S3_BUCKET` names the bucket — one per shard, since catalog keys are
+/// not store-scoped.
+fn cold_from_env() -> Option<Arc<prism_engine::storage::CachedObjectStore>> {
+    let endpoint = std::env::var("PRISM_S3_ENDPOINT").ok()?;
+    let cfg = prism_engine::storage::s3::S3Config {
+        endpoint,
+        region: std::env::var("PRISM_S3_REGION").unwrap_or_else(|_| "us-east-1".into()),
+        bucket: std::env::var("PRISM_S3_BUCKET").unwrap_or_else(|_| "prism".into()),
+        credentials: prism_engine::storage::sigv4::Credentials {
+            access_key: std::env::var("AWS_ACCESS_KEY_ID").unwrap_or_else(|_| "minioadmin".into()),
+            secret_key: std::env::var("AWS_SECRET_ACCESS_KEY")
+                .unwrap_or_else(|_| "minioadmin".into()),
+        },
+        fixed_amz_date: None,
+    };
+    let backend = prism_engine::storage::s3::S3ObjectStore::new(cfg);
+    Some(Arc::new(prism_engine::storage::CachedObjectStore::new(
+        Arc::new(backend),
+        prism_engine::storage::CACHE_QUOTA_BYTES,
+    )))
+}
+
 fn open(a: &Args) -> Result<Engine> {
-    Engine::open(&path_of(a)?)
+    let engine = Engine::open(&path_of(a)?)?;
+    Ok(match cold_from_env() {
+        Some(cold) => engine.with_cold(cold),
+        None => engine,
+    })
 }
 
 fn cmd_init(a: &Args) -> Result<()> {
@@ -354,8 +385,9 @@ fn cmd_ingest_otlp(a: &Args) -> Result<()> {
 fn cmd_recover(a: &Args) -> Result<()> {
     use prism_engine::Ingestor;
 
-    let root = path_of(a)?;
-    let mut ing = Ingestor::open(Engine::open(&root)?)?;
+    // `open` wires the cold tier from the environment (MinIO when `PRISM_S3_ENDPOINT` is set), so
+    // recovery replays the WAL and heals the catalog against the *same* mirror the writer published to.
+    let mut ing = Ingestor::open(open(a)?)?;
     let reports = ing.recover(now_ms())?;
 
     let events: usize = reports.iter().map(|r| r.published).sum();
