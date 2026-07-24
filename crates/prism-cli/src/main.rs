@@ -232,6 +232,9 @@ fn cmd_ingest(a: &Args) -> Result<()> {
         tsv::parse(&text)?
     };
 
+    // Acquire write ownership before publishing (D-076): the commit path then fences this writer by
+    // name if a restart acquired a higher epoch mid-publication — no torn catalog, no duplicate parts.
+    engine.acquire_ownership()?;
     let report = engine.ingest(events, now_ms())?;
     emit(&report)
 }

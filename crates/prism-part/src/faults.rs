@@ -100,6 +100,32 @@ pub fn guard_space(point: &str) -> Result<()> {
     Ok(())
 }
 
+/// **Cooperative pause point** — the zombie seam ([D-076](../../../docs/DECISIONS.md)). If
+/// `PRISM_FAULT_PAUSE=<point>` matches, write a marker file `<PRISM_FAULT_PAUSE_DIR>/paused` and
+/// block until `<PRISM_FAULT_PAUSE_DIR>/resume` appears — so a test can freeze a writer
+/// mid-publication (as `kill -STOP` would), let a restart acquire a higher ownership epoch, then
+/// resume the zombie and watch its publish get fenced by name. Reads the env every call (like
+/// [`maybe_kill`]), so it is armed per-process and never fires without the env set.
+#[inline]
+pub fn maybe_pause(point: &str) {
+    let Ok(want) = std::env::var("PRISM_FAULT_PAUSE") else {
+        return;
+    };
+    if want != point {
+        return;
+    }
+    let Ok(dir) = std::env::var("PRISM_FAULT_PAUSE_DIR") else {
+        return;
+    };
+    let dir = std::path::Path::new(&dir);
+    let _ = std::fs::write(dir.join("paused"), point.as_bytes());
+    eprintln!("prism: paused at `{point}`, waiting for resume");
+    let resume = dir.join("resume");
+    while !resume.exists() {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
 /// Abort if the process was asked to die here.
 #[inline]
 pub fn maybe_kill(point: &str) {

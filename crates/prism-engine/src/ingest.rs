@@ -314,6 +314,15 @@ impl Engine {
             self.publish_part_cold(id)?;
         }
 
+        // **Fence the write path (D-076).** A writer that acquired ownership must still hold it at
+        // commit: if a restart acquired a higher epoch while this writer was mid-publication, refuse
+        // by name here — before any durable commit — so the superseded writer publishes nothing (no
+        // torn catalog, no duplicate parts). The pause point freezes a writer exactly here, after its
+        // parts are written but before the commit, so the zombie gate can drive a real takeover.
+        // A no-op for the single-writer path (an engine that never acquired ownership).
+        prism_part::faults::maybe_pause("publish.before_commit_fence");
+        self.assert_write_owner()?;
+
         // **Catalog mirror convergence (D-069).** Before committing the new snapshot, bring the
         // mirror up to the parent — healing any earlier crash between a `CURRENT` rename and its
         // mirror write. Safe because the mirror never leads; idempotent when already caught up.

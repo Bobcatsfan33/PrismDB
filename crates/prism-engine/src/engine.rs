@@ -4,7 +4,11 @@ use prism_part::part::PartReader;
 use prism_part::store::{Store, StoreConfig};
 use prism_types::error::Result;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+
+/// Distinguishes ownership acquisitions of two engines opened in the same process/millisecond.
+static WRITER_NONCE: AtomicU64 = AtomicU64::new(0);
 
 pub struct Engine {
     pub store: Store,
@@ -15,6 +19,12 @@ pub struct Engine {
     /// `S3ObjectStore`). A cache state is a physical layout, and a physical layout may not change an
     /// answer ([storage contract §3](../../../docs/STORAGE-CONTRACT.md)).
     pub cold: Arc<crate::storage::CachedObjectStore>,
+    /// The write-ownership epoch this engine holds ([D-076](../../../docs/DECISIONS.md)), or `0` if it
+    /// has not acquired ownership — a reader, or a writer before its first owned publish. Interior-
+    /// mutable so `&self` write methods can acquire lazily and the commit path can fence on it.
+    owner_epoch: AtomicU64,
+    /// A process-unique id tagging this engine's ownership acquisitions.
+    writer_id: String,
 }
 
 impl Engine {
@@ -28,6 +38,14 @@ impl Engine {
         ))
     }
 
+    fn writer_id() -> String {
+        format!(
+            "{}-{}",
+            std::process::id(),
+            WRITER_NONCE.fetch_add(1, Ordering::Relaxed)
+        )
+    }
+
     pub fn init(root: &Path, config: StoreConfig) -> Result<Engine> {
         let store = Store::init(root, config)?;
         let cold = Self::default_cold(&store);
@@ -35,6 +53,8 @@ impl Engine {
             store,
             plane: Arc::new(HashModelPlane::new()),
             cold,
+            owner_epoch: AtomicU64::new(0),
+            writer_id: Self::writer_id(),
         })
     }
 
@@ -45,7 +65,35 @@ impl Engine {
             store,
             plane: Arc::new(HashModelPlane::new()),
             cold,
+            owner_epoch: AtomicU64::new(0),
+            writer_id: Self::writer_id(),
         })
+    }
+
+    /// **Acquire write ownership** for this engine ([D-076](../../../docs/DECISIONS.md)) — the next
+    /// monotonic epoch in the object store. Idempotent within a process: once acquired it returns the
+    /// held epoch. A writer calls this before it publishes, so the commit path can fence a stale
+    /// writer a restart has overtaken. Returns the epoch now held.
+    pub fn acquire_ownership(&self) -> Result<u64> {
+        let held = self.owner_epoch.load(Ordering::SeqCst);
+        if held != 0 {
+            return Ok(held);
+        }
+        let e = crate::storage::ownership::acquire(self.cold.backend().as_ref(), &self.writer_id)?;
+        self.owner_epoch.store(e, Ordering::SeqCst);
+        Ok(e)
+    }
+
+    /// **Fence the write path** ([D-076](../../../docs/DECISIONS.md)): if this engine acquired
+    /// ownership and a higher epoch has since taken the shard, refuse by name. A **no-op** for an
+    /// engine that never acquired ownership (epoch `0`) — so the single-writer path is unchanged — and
+    /// for the current owner. Called immediately before a catalog commit.
+    pub fn assert_write_owner(&self) -> Result<()> {
+        let held = self.owner_epoch.load(Ordering::SeqCst);
+        if held == 0 {
+            return Ok(());
+        }
+        crate::storage::ownership::assert_owner(self.cold.backend().as_ref(), held)
     }
 
     pub fn with_plane(mut self, plane: Arc<dyn ModelPlane>) -> Self {

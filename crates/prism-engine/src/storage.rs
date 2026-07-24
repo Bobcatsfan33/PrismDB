@@ -66,6 +66,7 @@ pub const MULTIPART_THRESHOLD_BYTES: usize = 16 * 1024 * 1024;
 pub mod cold;
 pub mod mirror;
 pub mod object;
+pub mod ownership;
 pub mod s3;
 pub mod sigv4;
 pub use object::{
