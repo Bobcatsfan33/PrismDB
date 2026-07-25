@@ -208,6 +208,16 @@ pub struct Query {
     /// unbounded. A plan declares it; execution is bounded by it.
     #[serde(default)]
     pub fetch_budget_bytes: Option<usize>,
+
+    /// **Opt in to a best-effort partial answer** when a shard is unreachable ([query §21](../../../docs/QUERY-CONTRACT.md)).
+    /// `false` (the default, and the only safe default) means a distributed query that cannot reach a
+    /// shard it needs **fails, with the shard named** — never a silently short result. `true` asks the
+    /// coordinator to answer from the shards it *can* reach and label what it dropped in
+    /// [`SearchResult::missing_shards`]. This is per-query and never a global or config default: a
+    /// silently partial answer to a security or novelty question is the worst failure this product can
+    /// produce, so receiving a partial answer is impossible without having asked for one right here.
+    #[serde(default)]
+    pub best_effort: bool,
 }
 
 fn default_true() -> bool {
@@ -235,6 +245,7 @@ impl Default for Query {
             threshold: None,
             explain: false,
             fetch_budget_bytes: None,
+            best_effort: false,
         }
     }
 }
@@ -320,6 +331,12 @@ pub struct Counters {
     /// silent over-fetch or under-answer (storage contract §6).
     #[serde(default)]
     pub fetch_budget_exhausted: bool,
+    /// How many shards a **best-effort** distributed query dropped as unreachable ([query §21](../../../docs/QUERY-CONTRACT.md)).
+    /// The count mirrors [`SearchResult::missing_shards`] into the observable counters, so a degraded
+    /// answer is a monitored number, not just a field a caller might skip reading. `0` on a complete
+    /// answer (and a fail-named query never returns — it errors).
+    #[serde(default)]
+    pub shards_missing: usize,
     /// For a threshold query only: how many candidates the relaxed bound kept that landed **within ε
     /// of the exact bar** — the overfetch the margin bought ([D-074](../../../docs/DECISIONS.md)).
     /// Rerank prunes them against the exact `τ`, so they never reach the answer; the count is the
@@ -372,7 +389,21 @@ pub struct SearchResult {
     /// is one nobody can debug, so the reason is carried, not just the choice.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub explain: Option<Explain>,
+    /// The shards a **best-effort** distributed query could not reach, each with the reason
+    /// ([query §21](../../../docs/QUERY-CONTRACT.md)). Empty on a complete answer. A non-empty report
+    /// is only ever produced for a query that set [`Query::best_effort`] — a fail-named query errors
+    /// instead — so a partial answer is always *labelled* a partial answer, impossible to mistake for
+    /// a complete one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing_shards: Vec<MissingShard>,
     pub snapshot_id: String,
+}
+
+/// A shard a best-effort query dropped, and why ([query §21](../../../docs/QUERY-CONTRACT.md)).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct MissingShard {
+    pub shard: usize,
+    pub reason: String,
 }
 
 /// What the optimizer estimated, and what actually happened (S8). Every control carries both, so

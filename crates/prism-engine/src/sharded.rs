@@ -23,10 +23,56 @@ use prism_part::generation::Generation;
 use prism_part::partition::{Bucket, PartitionScheme};
 use prism_part::store::StoreConfig;
 use prism_types::error::{PrismError, Result};
-use prism_types::{Counters, Event, Query, SearchResult};
+use prism_types::{Counters, Event, MissingShard, Query, SearchResult};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
+/// **Test-only** ([query §21](../../../docs/QUERY-CONTRACT.md)): shard indices the coordinator treats
+/// as unreachable, so the partial-failure path is exercised at the **coordinator boundary** without a
+/// real network partition. What this proves is coordinator *semantics* — fail-named by default,
+/// labelled-partial on opt-in — not transport-level partition behaviour, which stays a named wall.
+static INJECTED_UNREACHABLE: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+
+/// Mark shard indices unreachable at the coordinator boundary (test seam). Empty clears it. Never a
+/// production path.
+pub fn inject_unreachable_shards(shards: &[usize]) {
+    *INJECTED_UNREACHABLE.lock().expect("unreachable lock") = shards.to_vec();
+}
+
+fn shard_is_unreachable(si: usize) -> bool {
+    INJECTED_UNREACHABLE
+        .lock()
+        .expect("unreachable lock")
+        .contains(&si)
+}
+
+/// Resolve a shard that could not be reached ([query §21](../../../docs/QUERY-CONTRACT.md)): on a
+/// **best-effort** query, record it in `missing` and carry on with the shards we can reach; otherwise
+/// **fail, with the shard named** — never a silently short result. The default is fail-named because a
+/// silently partial answer to a security or novelty question is the worst failure this product makes.
+fn resolve_unreachable(
+    si: usize,
+    reason: &str,
+    best_effort: bool,
+    missing: &mut Vec<MissingShard>,
+) -> Result<()> {
+    if best_effort {
+        if !missing.iter().any(|m| m.shard == si) {
+            missing.push(MissingShard {
+                shard: si,
+                reason: reason.to_string(),
+            });
+        }
+        Ok(())
+    } else {
+        Err(PrismError::NotFound(format!(
+            "shard {si} unreachable: {reason}. This query touches it and did not opt in to a partial \
+             answer, so it fails rather than return a silently short result (query §21). Pass \
+             best_effort to accept a labelled partial answer."
+        )))
+    }
+}
 
 /// A cluster of shards. Each shard is a whole [`Engine`] over its own store; the cluster routes by
 /// tenant bucket and never lets a tenant bucket straddle two shards. The **generation store** holds
@@ -428,12 +474,30 @@ impl Cluster {
             }
         }
 
+        // The shards a best-effort query could not reach (query §21). A non-best-effort query never
+        // reaches the end of this list — `resolve_unreachable` fails it, by name, at the first miss.
+        let mut missing: Vec<MissingShard> = Vec::new();
+
         // --- round 1: candidates from every shard, merged to the global set ---
         // (dist, event_id, shard, part_id, row)
         let mut global: Vec<(f32, String, usize, String, usize)> = Vec::new();
         for (si, shard) in self.shards.iter().enumerate() {
-            for cand in shard.search_candidates(&snaps[si], q)? {
-                global.push((cand.dist, cand.event_id, si, cand.part_id, cand.row));
+            if shard_is_unreachable(si) {
+                resolve_unreachable(
+                    si,
+                    "coordinator-boundary fault (injected)",
+                    q.best_effort,
+                    &mut missing,
+                )?;
+                continue;
+            }
+            match shard.search_candidates(&snaps[si], q) {
+                Ok(cands) => {
+                    for cand in cands {
+                        global.push((cand.dist, cand.event_id, si, cand.part_id, cand.row));
+                    }
+                }
+                Err(e) => resolve_unreachable(si, &e.to_string(), q.best_effort, &mut missing)?,
             }
         }
         // Merge by PQ distance, ties on event_id (C-4 across the wire).
@@ -468,7 +532,25 @@ impl Cluster {
         let mut exact_bytes_fetched = 0usize;
         let mut object_requests = 0usize;
         for (si, sel) in &by_shard {
-            for s in self.shards[*si].search_rerank_selected(q, sel)? {
+            if shard_is_unreachable(*si) {
+                resolve_unreachable(
+                    *si,
+                    "coordinator-boundary fault (injected)",
+                    q.best_effort,
+                    &mut missing,
+                )?;
+                continue;
+            }
+            let scoreds = match self.shards[*si].search_rerank_selected(q, sel) {
+                Ok(s) => s,
+                Err(e) => {
+                    // A shard reachable in round 1 but not round 2: its candidates simply go unscored
+                    // and drop from the answer — recorded missing (or, fail-named, the query errors).
+                    resolve_unreachable(*si, &e.to_string(), q.best_effort, &mut missing)?;
+                    continue;
+                }
+            };
+            for s in scoreds {
                 let gidx = handle.len();
                 handle.push((*si, s.part_id.clone(), s.row));
                 exact_bytes_fetched += s.vector.len() * 4;
@@ -481,6 +563,21 @@ impl Cluster {
                 });
             }
             object_requests += 1;
+        }
+
+        // **Partial results and semantic aggregates do not mix** ([query §21](../../../docs/QUERY-CONTRACT.md)).
+        // A best-effort GROUP BY over an incomplete shard set is not comparable to a complete run —
+        // cluster mass and exemplars shift with the data present — so returning it flagged invites an
+        // analyst to read a partial distribution as a whole one. It is **refused by name** instead.
+        if !missing.is_empty() && q.group_k.is_some() {
+            let dropped: Vec<usize> = missing.iter().map(|m| m.shard).collect();
+            return Err(PrismError::Invalid(format!(
+                "a best-effort semantic GROUP BY dropped shard(s) {dropped:?}: a cluster distribution \
+                 over an incomplete shard set is not comparable to a complete run (cluster mass and \
+                 exemplars shift with the data present), so it is refused rather than returned as if \
+                 whole (query §21). Re-run without best_effort to fail by name, or narrow to a \
+                 reachable tenant."
+            )));
         }
 
         // --- finalize: the SHARED implementation, with a materializer that routes to the shards ---
@@ -524,7 +621,7 @@ impl Cluster {
             ..Default::default()
         };
 
-        self.shards[0].finalize(
+        let mut result = self.shards[0].finalize(
             &tombstones,
             &snapshot_id,
             q,
@@ -534,7 +631,15 @@ impl Cluster {
             c,
             materialize,
             || 0,
-        )
+        )?;
+        // Label the partial answer (query §21): the dropped shards and their count, mirrored into the
+        // counters so a degraded answer is a monitored number. Only ever non-empty for a best-effort
+        // query — a fail-named one errored above — so a partial answer is impossible to mistake for a
+        // whole one.
+        missing.sort_by_key(|m| m.shard);
+        result.counters.shards_missing = missing.len();
+        result.missing_shards = missing;
+        Ok(result)
     }
 
     /// A tenant-scoped semantic `GROUP BY`, routed to the owner shard. Cross-tenant clustering needs

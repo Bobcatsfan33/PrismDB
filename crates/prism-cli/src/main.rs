@@ -285,6 +285,9 @@ fn cmd_search(a: &Args) -> Result<()> {
         "space",
         "exact",
         "no-adaptive",
+        "explain",
+        "fetch-budget-bytes",
+        "best-effort",
     ])?;
     let engine = open(a)?;
     let q = Query {
@@ -309,6 +312,9 @@ fn cmd_search(a: &Args) -> Result<()> {
         explain: a.has("explain"),
         // The cold-tier fetch budget in bytes (S11). None = unbounded.
         fetch_budget_bytes: a.parse_some("fetch-budget-bytes")?,
+        // Opt in to a labelled partial answer when a shard is unreachable (query §21). Off by default:
+        // a distributed query that cannot reach a shard fails, with the shard named.
+        best_effort: a.has("best-effort"),
     };
 
     if a.has("exact") {

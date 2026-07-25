@@ -126,6 +126,8 @@ impl Engine {
             threshold: None,
             explain: false,
             fetch_budget_bytes: None,
+            // SQL has no partial-answer surface yet — a `prism` SQL query is fail-named (query §21).
+            best_effort: false,
         })
     }
 
