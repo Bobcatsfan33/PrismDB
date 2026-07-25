@@ -146,6 +146,33 @@ impl Shard {
         self.cli(&["recover", "--path", self.root_s()], None)
     }
 
+    /// Ingest a JSONL file through the **S0 loader** (`ingest`), optionally with a disk-full fault
+    /// injected at a space-guard point (`PRISM_FAULT_ENOSPC`) — a **returned** error, not a crash, so
+    /// it exercises the graceful S10 degrade-and-recover path.
+    fn ingest_enospc(&self, file: &str, enospc: Option<&str>) -> Output {
+        let mut cmd = Command::new(prism());
+        cmd.args([
+            "ingest",
+            "--path",
+            self.root_s(),
+            "--file",
+            file,
+            "--format",
+            "jsonl",
+        ])
+        .env("PRISM_S3_ENDPOINT", &self.cfg.endpoint)
+        .env("PRISM_S3_REGION", &self.cfg.region)
+        .env("PRISM_S3_BUCKET", &self.cfg.bucket)
+        .env("AWS_ACCESS_KEY_ID", &self.cfg.credentials.access_key)
+        .env("AWS_SECRET_ACCESS_KEY", &self.cfg.credentials.secret_key)
+        .env_remove("PRISM_FAULT")
+        .env_remove("PRISM_FAULT_ENOSPC");
+        if let Some(p) = enospc {
+            cmd.env("PRISM_FAULT_ENOSPC", p);
+        }
+        cmd.output().expect("failed to run prism")
+    }
+
     /// Simulate local disk loss: drop the local catalog (CURRENT + snapshot files). The parts, the
     /// WAL, and the MinIO mirror survive — the S11 disaster-drill starting point.
     fn delete_local_catalog(&self) {
@@ -426,4 +453,142 @@ fn scenario_1_disaster_recovery_from_the_mirror_is_exactly_once() {
             "{point}: mirror-recovered answer is neither the old nor the new state"
         );
     }
+}
+
+/// The disk-full guard points (S10): the writes a full disk can interrupt without corrupting the store.
+const SPACE_GUARDS: &[&str] = &["part.columns", "catalog.snapshot", "catalog.current"];
+
+#[test]
+fn scenario_2_per_node_enospc_is_named_isolated_and_recovers_unaided() {
+    let Some(base) = base_cfg() else {
+        eprintln!("skipping MinIO chaos: PRISM_S3_ENDPOINT is not set");
+        return;
+    };
+
+    let fixtures = tmp("enospc-fix");
+    let seed = write_corpus(&fixtures, "seed.jsonl", 200, 1, "seed", false);
+    let batch = write_corpus(&fixtures, "batch.jsonl", 100, 2, "batch", false);
+
+    // A neighbour on its own bucket, queried across every disk-full event on the victim.
+    let bystander = Shard::new(&base, "byst");
+    assert!(
+        bystander.ingest_enospc(&seed, None).status.success(),
+        "bystander seed failed"
+    );
+    let byst_rows = bystander.rows();
+
+    for point in SPACE_GUARDS {
+        let victim = Shard::new(&base, "victim");
+        assert!(
+            victim.ingest_enospc(&seed, None).status.success(),
+            "{point}: seed failed"
+        );
+        assert_eq!(victim.rows(), 200, "{point}: seed row count");
+
+        // Disk full mid-operation: the ingest degrades **by name**, never a crash, never a hybrid.
+        let out = victim.ingest_enospc(&batch, Some(point));
+        assert!(
+            !out.status.success(),
+            "{point}: a disk-full ingest must fail, not silently succeed"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            assert_ne!(
+                out.status.signal(),
+                Some(6),
+                "{point}: ENOSPC is a named refusal, not an abort"
+            );
+        }
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            err.contains("out of disk space"),
+            "{point}: the degradation must be named: {err}"
+        );
+
+        // Old-or-new: the store is unchanged (old), and `verify` passes — no torn write.
+        victim.verify();
+        assert_eq!(victim.rows(), 200, "{point}: ENOSPC left a hybrid store");
+
+        // CONTAINMENT: the neighbour on its own disk/bucket is untouched.
+        assert_eq!(
+            bystander.rows(),
+            byst_rows,
+            "{point}: a disk-full event on one shard disturbed a neighbour — not isolated"
+        );
+
+        // Recovery is unaided: with space back (no fault), a retry completes.
+        assert!(
+            victim.ingest_enospc(&batch, None).status.success(),
+            "{point}: the store did not accept writes once space returned"
+        );
+        assert_eq!(
+            victim.rows(),
+            300,
+            "{point}: the retry after ENOSPC did not land the batch"
+        );
+    }
+}
+
+#[test]
+fn scenario_3_a_shard_restarts_from_the_mirror_while_the_cluster_serves() {
+    let Some(base) = base_cfg() else {
+        eprintln!("skipping MinIO chaos: PRISM_S3_ENDPOINT is not set");
+        return;
+    };
+
+    let fixtures = tmp("restart-fix");
+    let seed_v = write_corpus(&fixtures, "seedv.jsonl", 200, 1, "victim", true);
+    let seed_b1 = write_corpus(&fixtures, "seedb1.jsonl", 150, 3, "b1", true);
+    let seed_b2 = write_corpus(&fixtures, "seedb2.jsonl", 150, 4, "b2", true);
+
+    let victim = Shard::new(&base, "rv");
+    let b1 = Shard::new(&base, "rb1");
+    let b2 = Shard::new(&base, "rb2");
+    assert!(victim.ingest_source("s", &seed_v, None).status.success());
+    assert!(b1.ingest_source("s", &seed_b1, None).status.success());
+    assert!(b2.ingest_source("s", &seed_b2, None).status.success());
+
+    let ref_v = victim.search_fp();
+    let ref_b1 = b1.search_fp();
+    let ref_b2 = b2.search_fp();
+    assert!(
+        !ref_v.is_empty() && !ref_b1.is_empty(),
+        "each shard must answer its own tenants"
+    );
+
+    // The victim node restarts with a lost local catalog — the S11 disaster start, now per-shard and
+    // live. As it goes down, the other shards keep serving, unchanged.
+    victim.delete_local_catalog();
+    assert_eq!(
+        b1.search_fp(),
+        ref_b1,
+        "b1 was disturbed as the victim went down"
+    );
+    assert_eq!(
+        b2.search_fp(),
+        ref_b2,
+        "b2 was disturbed as the victim went down"
+    );
+
+    // The victim recovers from the MinIO mirror + WAL while the cluster serves.
+    victim.recover_from_mirror();
+
+    // The restarted shard is back byte-identical; the bystanders never moved (containment).
+    victim.verify();
+    assert_eq!(
+        victim.search_fp(),
+        ref_v,
+        "the restarted shard did not recover byte-identical"
+    );
+    assert_eq!(
+        b1.search_fp(),
+        ref_b1,
+        "b1 was disturbed by the victim's restart"
+    );
+    assert_eq!(
+        b2.search_fp(),
+        ref_b2,
+        "b2 was disturbed by the victim's restart"
+    );
 }
