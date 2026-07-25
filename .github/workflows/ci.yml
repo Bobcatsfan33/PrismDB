@@ -380,6 +380,17 @@ jobs:
           AWS_ACCESS_KEY_ID: minioadmin
           AWS_SECRET_ACCESS_KEY: minioadmin
 
+      # **Durability chaos on real `prism` processes over MinIO (S12 inc3, D-076/D-077).** Each shard
+      # is a real child process whose cold tier + catalog mirror + write-ownership epochs live in its
+      # own bucket; a writer is crashed at every publication boundary, restarts, re-acquires ownership,
+      # and recovers exactly-once (byte-identical old-or-new), while a bystander shard stays green
+      # (containment). Single-threaded — single-node MinIO. The test creates its own per-shard buckets.
+      - run: cargo test --release -p prism-cli --test chaos_minio -- --nocapture --test-threads=1
+        env:
+          PRISM_S3_ENDPOINT: 127.0.0.1:9000
+          AWS_ACCESS_KEY_ID: minioadmin
+          AWS_SECRET_ACCESS_KEY: minioadmin
+
   layout:
     name: charter C-4 — the answer is a function of the data, not the layout
     runs-on: ubuntu-latest
