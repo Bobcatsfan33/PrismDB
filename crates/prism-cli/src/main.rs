@@ -327,7 +327,10 @@ fn cmd_ingest_source(a: &Args) -> Result<()> {
     use prism_engine::Ingestor;
 
     let root = path_of(a)?;
-    let mut ing = Ingestor::open(Engine::open(&root)?)?;
+    let mut ing = Ingestor::open(open(a)?)?;
+    // Acquire write ownership before publishing (D-076): the commit path fences this writer if a
+    // restart takes a higher epoch, and a restart's `recover` re-acquires above it.
+    ing.engine.acquire_ownership()?;
 
     let file = PathBuf::from(a.req("file")?);
     let name = a.req("source")?;
@@ -388,6 +391,9 @@ fn cmd_recover(a: &Args) -> Result<()> {
     // `open` wires the cold tier from the environment (MinIO when `PRISM_S3_ENDPOINT` is set), so
     // recovery replays the WAL and heals the catalog against the *same* mirror the writer published to.
     let mut ing = Ingestor::open(open(a)?)?;
+    // A restart re-acquires write ownership at a **higher** epoch (D-076), fencing any lingering writer
+    // the crash left behind before this process republishes.
+    ing.engine.acquire_ownership()?;
     let reports = ing.recover(now_ms())?;
 
     let events: usize = reports.iter().map(|r| r.published).sum();

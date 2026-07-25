@@ -68,7 +68,30 @@ pub fn part_ref(m: &PartManifest, key: &PartitionKey) -> Result<PartRef> {
 pub use crate::sample::TRAIN_SAMPLE_MAX;
 
 impl Engine {
+    /// Ingest a batch (S0 loader path): no WAL record, so the applied-progress marker is inherited
+    /// unchanged from the parent snapshot.
     pub fn ingest(&self, events: Vec<Event>, now_ms: i64) -> Result<IngestReport> {
+        self.ingest_inner(events, now_ms, None)
+    }
+
+    /// Ingest a batch **as the publication of a WAL record** ([D-077](../../../docs/DECISIONS.md)):
+    /// the resulting snapshot records `record_id` as its `applied_wal_record`, so publication and
+    /// applied-progress-marking are one atomic commit and recovery can never double-publish it.
+    pub fn ingest_wal(
+        &self,
+        events: Vec<Event>,
+        now_ms: i64,
+        record_id: u64,
+    ) -> Result<IngestReport> {
+        self.ingest_inner(events, now_ms, Some(record_id))
+    }
+
+    fn ingest_inner(
+        &self,
+        events: Vec<Event>,
+        now_ms: i64,
+        applied_wal_record: Option<u64>,
+    ) -> Result<IngestReport> {
         let snap = self.snapshot()?;
         let dim = self.store.config.dim;
 
@@ -112,6 +135,7 @@ impl Engine {
                     dead,
                     true,
                     now_ms,
+                    applied_wal_record,
                 );
             }
         };
@@ -122,7 +146,16 @@ impl Engine {
         let (kept, failed) = embed_all(&*embedder, admitted);
         dead.extend(failed);
 
-        self.write_and_commit(&snap, &generation, kept.0, kept.1, dead, trained, now_ms)
+        self.write_and_commit(
+            &snap,
+            &generation,
+            kept.0,
+            kept.1,
+            dead,
+            trained,
+            now_ms,
+            applied_wal_record,
+        )
     }
 
     /// Train a bootstrap generation from a batch — the shared trainer the single-store bootstrap and
@@ -209,6 +242,7 @@ impl Engine {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn write_and_commit(
         &self,
         snap: &prism_part::catalog::Snapshot,
@@ -218,6 +252,7 @@ impl Engine {
         dead: Vec<DeadLetter>,
         trained: bool,
         now_ms: i64,
+        applied_wal_record: Option<u64>,
     ) -> Result<IngestReport> {
         // Dead letters are durable *before* the commit. An operator must never
         // be able to see the rows that made it in without being able to see the
@@ -328,11 +363,20 @@ impl Engine {
         // mirror write. Safe because the mirror never leads; idempotent when already caught up.
         self.mirror_snapshot(snap)?;
 
-        let new_snap = self.catalog().commit(
+        // The WAL applied-progress marker rides *inside* this atomic commit (D-077): a WAL publish
+        // sets it to the record being published, an S0 write inherits the parent's. So the batch
+        // becoming visible and the log recording it as applied are the same rename — a crash between
+        // them is impossible, and recovery replays only records above the committed marker.
+        let mut meta = prism_part::catalog::SnapshotMeta::of(snap);
+        if applied_wal_record.is_some() {
+            meta.applied_wal_record = applied_wal_record;
+        }
+        let new_snap = self.catalog().commit_meta(
             snap,
             parts,
             seq,
             Some(generation.generation_id.clone()),
+            meta,
             now_ms,
         )?;
 

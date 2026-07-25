@@ -61,10 +61,13 @@ pub struct Wal {
     applied_path: PathBuf,
 }
 
+/// The record-id **allocator** — a monotonic counter that survives compaction (deriving the next id
+/// from the log would reuse ids after the log is compacted below them). This is **not** a record of
+/// what is applied; applied progress lives *inside the snapshot* now ([D-077](../../../docs/DECISIONS.md)),
+/// so there is one source of truth, not two. An older store's `applied.json` also carried an `ids`
+/// list; serde ignores it on read, and it is never written again.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
-struct Applied {
-    /// Records already published. Everything else in the log is outstanding.
-    ids: Vec<u64>,
+struct Allocator {
     next_id: u64,
 }
 
@@ -77,9 +80,9 @@ impl Wal {
         })
     }
 
-    fn applied(&self) -> Result<Applied> {
+    fn allocator(&self) -> Result<Allocator> {
         if !self.applied_path.exists() {
-            return Ok(Applied::default());
+            return Ok(Allocator::default());
         }
         Ok(serde_json::from_slice(&std::fs::read(&self.applied_path)?)?)
     }
@@ -96,8 +99,8 @@ impl Wal {
         source_offset: Option<u64>,
         now_ms: i64,
     ) -> Result<u64> {
-        let mut applied = self.applied()?;
-        let record_id = applied.next_id;
+        let mut alloc = self.allocator()?;
+        let record_id = alloc.next_id;
 
         let rec = WalRecord {
             record_id,
@@ -121,8 +124,8 @@ impl Wal {
         prism_part::faults::maybe_kill("wal.after_append_before_fsync");
         f.sync_all()?; // <-- the ack point. Everything before this is a promise we cannot keep.
 
-        applied.next_id += 1;
-        io::write_atomic(&self.applied_path, &serde_json::to_vec(&applied)?)?;
+        alloc.next_id += 1;
+        io::write_atomic(&self.applied_path, &serde_json::to_vec(&alloc)?)?;
 
         Ok(record_id)
     }
@@ -172,40 +175,30 @@ impl Wal {
         Ok(out)
     }
 
-    /// Records that were acknowledged but never published. **This is what recovery
-    /// replays**, and it is the whole reason the ack can precede the commit.
-    pub fn outstanding(&self) -> Result<Vec<WalRecord>> {
-        let applied = self.applied()?;
+    /// Records not yet reflected in the committed snapshot — those with id **greater than the
+    /// snapshot's `applied_wal_record` floor**. **This is what recovery replays** ([D-077](../../../docs/DECISIONS.md)):
+    /// because the floor is set atomically with publication, a record at or below it is already
+    /// visible and must not be replayed, and a record above it is genuinely unpublished. This is the
+    /// whole reason the ack can precede the commit without ever double-publishing.
+    pub fn outstanding_after(&self, floor: Option<u64>) -> Result<Vec<WalRecord>> {
         Ok(self
             .read_all()?
             .into_iter()
-            .filter(|r| !applied.ids.contains(&r.record_id))
+            .filter(|r| floor.map_or(true, |f| r.record_id > f))
             .collect())
     }
 
-    /// Mark a record published. Called **after** the catalog commit, never before.
-    pub fn mark_applied(&self, record_id: u64) -> Result<()> {
-        let mut applied = self.applied()?;
-        if !applied.ids.contains(&record_id) {
-            applied.ids.push(record_id);
-        }
-        applied.next_id = applied.next_id.max(record_id + 1);
-        io::write_atomic(&self.applied_path, &serde_json::to_vec(&applied)?)?;
-        Ok(())
-    }
-
-    /// Drop applied records from the log.
+    /// Drop records the snapshot has already applied (id ≤ `floor`) from the log.
     ///
-    /// Compaction, not deletion-in-place: the log is rewritten to a temp file and
-    /// renamed, because a WAL that can be corrupted by its own truncation is worse
-    /// than no WAL.
-    pub fn compact(&self) -> Result<usize> {
-        let applied = self.applied()?;
+    /// Compaction, not deletion-in-place: the log is rewritten to a temp file and renamed, because a
+    /// WAL that can be corrupted by its own truncation is worse than no WAL. The allocator's `next_id`
+    /// is left untouched, so a compacted-empty log never reuses an id.
+    pub fn compact_through(&self, floor: Option<u64>) -> Result<usize> {
+        let Some(floor) = floor else {
+            return Ok(0); // nothing applied yet; nothing to drop.
+        };
         let all = self.read_all()?;
-        let keep: Vec<&WalRecord> = all
-            .iter()
-            .filter(|r| !applied.ids.contains(&r.record_id))
-            .collect();
+        let keep: Vec<&WalRecord> = all.iter().filter(|r| r.record_id > floor).collect();
         let dropped = all.len() - keep.len();
         if dropped == 0 {
             return Ok(0);
@@ -219,15 +212,7 @@ impl Wal {
             buf.extend_from_slice(&json);
         }
         io::write_atomic(&self.path, &buf)?;
-
-        let mut a = applied;
-        a.ids.retain(|id| keep.iter().any(|r| r.record_id == *id));
-        io::write_atomic(&self.applied_path, &serde_json::to_vec(&a)?)?;
         Ok(dropped)
-    }
-
-    pub fn is_empty(&self) -> Result<bool> {
-        Ok(self.outstanding()?.is_empty())
     }
 }
 

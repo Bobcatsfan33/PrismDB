@@ -98,18 +98,49 @@ impl Ingestor {
     /// re-running quotas against them could reject an event we have already
     /// promised to keep, which would turn a crash into a data-loss event.
     pub fn recover(&mut self, now_ms: i64) -> Result<Vec<IngestReport2>> {
-        let outstanding = self.wal.outstanding()?;
+        // The applied floor is the committed snapshot's marker ([D-077](../../../docs/DECISIONS.md)) —
+        // the single source of truth for what is published, set atomically with the publication. A
+        // record above it is genuinely unpublished and is replayed; a record at or below it is already
+        // visible and must NOT be replayed (that was the double-publish bug), but the crash may have
+        // landed between its commit and its client-facing idempotency record or its source-offset
+        // commit, so it is reconciled instead.
+        let floor = self.engine.snapshot()?.applied_wal_record;
         let mut reports = Vec::new();
 
-        for rec in outstanding {
-            let mut r = self.publish_wal_record(&rec, now_ms)?;
-            r.recovered = true;
-            reports.push(r);
+        for rec in self.wal.read_all()? {
+            let applied = matches!(floor, Some(f) if rec.record_id <= f);
+            if applied {
+                self.reconcile_applied(&rec)?;
+            } else {
+                let mut r = self.publish_wal_record(&rec, now_ms)?;
+                r.recovered = true;
+                reports.push(r);
+            }
         }
-        if !reports.is_empty() {
-            self.wal.compact()?;
-        }
+
+        // Compact everything now at or below the (possibly advanced) marker; `next_id` is untouched.
+        let floor = self.engine.snapshot()?.applied_wal_record;
+        self.wal.compact_through(floor)?;
         Ok(reports)
+    }
+
+    /// Reconcile the client-facing state of a WAL record the snapshot has **already applied** but a
+    /// crash may have left half-finished after the atomic commit ([D-077](../../../docs/DECISIONS.md)):
+    /// record its idempotency keys (so a resubmission after recovery is recognised as a duplicate
+    /// through the front door, not published a second time) and advance its source offset (so the
+    /// source is not re-polled for events that are already visible). Both are idempotent.
+    fn reconcile_applied(&self, rec: &WalRecord) -> Result<()> {
+        let mut idem = self.idempotency()?;
+        for e in &rec.events {
+            let hash = e.content_hash();
+            let (t, k) = e.dedup_key();
+            idem.record(t, k, &hash, e.event_time);
+        }
+        idem.save(&self.idem_path)?;
+        if let (Some(name), Some(off)) = (&rec.source, rec.source_offset) {
+            crate::source::commit_offset(&self.engine.store.root.join("sources"), name, off)?;
+        }
+        Ok(())
     }
 
     /// Take a batch from the wire (or from a source) all the way to visible.
@@ -222,9 +253,11 @@ impl Ingestor {
         // made it in — a rejected event never widens it.
         prism_part::io::write_atomic(&self.dict_path, &serde_json::to_vec(&dict)?)?;
 
-        // Housekeeping, well away from the critical path.
+        // Housekeeping, well away from the critical path. Compact everything the committed snapshot's
+        // marker now covers ([D-077](../../../docs/DECISIONS.md)).
         idem.prune(now_ms);
-        self.wal.compact()?;
+        let floor = self.engine.snapshot()?.applied_wal_record;
+        self.wal.compact_through(floor)?;
 
         Ok(report)
     }
@@ -244,22 +277,27 @@ impl Ingestor {
 
         // --- embed + write the part + commit the catalog ---
         //
-        // `Engine::ingest` owns the generation bootstrap, the embedding, the
-        // dead-lettering of unembeddable rows, the part write and the atomic commit.
-        // The kill point between embedding and the part write lives inside it.
-        let inner = self.engine.ingest(rec.events.clone(), now_ms)?;
+        // `Engine::ingest_wal` owns the generation bootstrap, the embedding, the dead-lettering of
+        // unembeddable rows, the part write, and the atomic commit — and the commit stamps this
+        // record's id as the snapshot's `applied_wal_record` marker ([D-077](../../../docs/DECISIONS.md)),
+        // so publication and applied-progress-marking are one rename. The kill point between embedding
+        // and the part write lives inside it.
+        let inner = self
+            .engine
+            .ingest_wal(rec.events.clone(), now_ms, rec.record_id)?;
 
         report.published = inner.admitted;
         report.dead_lettered += inner.dead_lettered;
         report.part_id = inner.part_id;
         report.snapshot_id = inner.snapshot_id;
 
-        // --- the catalog is committed; the events are VISIBLE. ---
+        // --- the catalog is committed; the events are VISIBLE, and the log already records them as
+        // applied (the marker rode the commit). ---
         //
-        // Only now may an idempotency record advance (invariant 7). Recording a key
-        // *before* publication would mean that a crash here leaves the retry
-        // suppressed as a "replay" of an event that exists nowhere — silently,
-        // permanently lost, by the very index that was supposed to protect it.
+        // Only now may an idempotency record advance (invariant 7). Recording a key *before*
+        // publication would mean that a crash here leaves the retry suppressed as a "replay" of an
+        // event that exists nowhere — silently, permanently lost, by the very index that was supposed
+        // to protect it. A crash *after* the commit but before this is reconciled on recovery.
         let mut idem = self.idempotency()?;
         for e in &rec.events {
             let hash = e.content_hash();
@@ -267,8 +305,6 @@ impl Ingestor {
             idem.record(t, k, &hash, e.event_time);
         }
         idem.save(&self.idem_path)?;
-
-        self.wal.mark_applied(rec.record_id)?;
 
         // --- and only now, the source offset. ---
         prism_part::faults::maybe_kill("ingest.after_publish_before_offset_commit");

@@ -83,6 +83,12 @@ A crash **after** the catalog commit but **before** the offset advance leaves th
 
 **Between embedding and the part write.** The event has been acked (it is in the WAL), it has consumed GPU time, and it exists nowhere durable except the WAL. The test `an_event_acked_then_crashed_before_the_part_write_reappears_exactly_once` drives precisely this, at the `part.after_write_before_fsync` kill point, and asserts the event is queryable afterwards, **once**, **with its embedding** — not stored blind, not lost, not doubled.
 
+### 3c. Applied progress is part of the atomic commit ([D-077](DECISIONS.md))
+
+There is a second crash that matters, **after** the part write: between the catalog commit that makes a batch visible and the recording of that batch as applied. If applied-progress lived in a file separate from the catalog, a crash there would leave the batch published but the WAL record still "outstanding", and recovery would republish it — a duplicate through the replay path. So the applied-progress marker lives **inside the atomically-committed snapshot** (`Snapshot.applied_wal_record`, the highest WAL record id the snapshot reflects, monotonic). Publication and applied-progress-marking are the **same rename**; there is no window between them.
+
+This **does not move the ack or weaken [D-068](DECISIONS.md)** — it restores invariant 3 (old-or-new, never a hybrid), one level up. The ack is still the WAL fsync; recovery still replays every acked-but-unpublished record (now defined as *id greater than the snapshot's marker*); the idempotency index is still written only at/after publication. Because a crash can still land after that atomic commit but before the client-facing idempotency record or the source-offset commit, **recovery reconciles** every record it skips as already-applied — recording its idempotency keys and advancing its offset, both idempotent — so a resubmission after recovery is a recognised duplicate, not a front-door double. The marker rides the mirrored snapshot, so disaster recovery from the mirror is exactly-once by the same construction.
+
 ---
 
 ## 4. `event_time` vs `observed_time`

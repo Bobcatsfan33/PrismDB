@@ -611,7 +611,9 @@ fn an_event_acked_then_crashed_before_the_part_write_reappears_exactly_once() {
 
     // ...but the events WERE acked, so they are in the admission log, waiting.
     let ing = Ingestor::open(Engine::open(&dir).unwrap()).unwrap();
-    let outstanding = ing.wal.outstanding().unwrap();
+    // Nothing committed, so the snapshot's applied marker is `None` and every acked record is
+    // outstanding (D-077).
+    let outstanding = ing.wal.outstanding_after(None).unwrap();
     assert_eq!(outstanding.len(), 1, "the acked batch is not in the WAL");
     assert_eq!(outstanding[0].events.len(), 12);
 

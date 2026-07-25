@@ -140,6 +140,15 @@ pub struct Snapshot {
     /// A merge that rewrites a tombstoned row's part drops the row and clears the tombstone.
     #[serde(default)]
     pub tombstones: Vec<String>,
+    /// The highest WAL record id **reflected in this snapshot** — the durable admission log's applied
+    /// progress, carried *inside* the atomically-committed snapshot rather than in a second file
+    /// ([D-077](../../../docs/DECISIONS.md)). Because publication and progress-marking are now one
+    /// atomic commit, a crash between the two is impossible by construction: recovery replays exactly
+    /// the records with id greater than this, so a batch published-but-not-yet-marked can never be
+    /// double-published. `None` on a store that has never ingested through the WAL (e.g. the S0 loader
+    /// only, or a pre-D-077 snapshot); monotonic thereafter (single writer per shard).
+    #[serde(default)]
+    pub applied_wal_record: Option<u64>,
     pub created_at_ms: i64,
 }
 
@@ -264,6 +273,7 @@ impl Snapshot {
             bridges: Vec::new(),
             baselines: Vec::new(),
             tombstones: Vec::new(),
+            applied_wal_record: None,
             created_at_ms: 0,
         }
     }
@@ -307,6 +317,10 @@ pub struct SnapshotMeta {
     pub bridges: Vec<Bridge>,
     pub baselines: Vec<BaselineRef>,
     pub tombstones: Vec<String>,
+    /// The WAL applied-progress marker this commit carries ([D-077](../../../docs/DECISIONS.md)).
+    /// `of(parent)` inherits it (an S0 commit does not move it); a WAL publish overrides it to the
+    /// record it is publishing, so publication and progress-marking are one atomic commit.
+    pub applied_wal_record: Option<u64>,
 }
 
 impl SnapshotMeta {
@@ -316,6 +330,7 @@ impl SnapshotMeta {
             bridges: snap.bridges.clone(),
             baselines: snap.baselines.clone(),
             tombstones: snap.tombstones.clone(),
+            applied_wal_record: snap.applied_wal_record,
         }
     }
 }
@@ -439,6 +454,7 @@ impl<'a> Catalog<'a> {
             bridges: meta.bridges,
             baselines: meta.baselines,
             tombstones: meta.tombstones,
+            applied_wal_record: meta.applied_wal_record,
             created_at_ms: now_ms,
         };
 
