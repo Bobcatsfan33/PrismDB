@@ -349,6 +349,30 @@ pub fn constants() -> Vec<Constant> {
             value: prism_types::query::THRESHOLD_STATE_BUDGET as i64,
             kind: Kind::Policy,
         },
+        // S12, D-079. Hedging policy. Fan-out and the in-flight blast-radius cap are load-bearing (they
+        // bound the coordinator's re-execution); the delay and dedup window describe the async
+        // transport's timing and are inert in the synchronous coordinator (honest-wall). All policy —
+        // decisions about behaviour, not empirical optima.
+        Constant {
+            name: "HEDGE_DELAY_MS",
+            value: crate::hedge::HEDGE_DELAY_MS,
+            kind: Kind::Policy,
+        },
+        Constant {
+            name: "HEDGE_FANOUT",
+            value: crate::hedge::HEDGE_FANOUT as i64,
+            kind: Kind::Policy,
+        },
+        Constant {
+            name: "HEDGE_DEDUP_WINDOW_MS",
+            value: crate::hedge::HEDGE_DEDUP_WINDOW_MS,
+            kind: Kind::Policy,
+        },
+        Constant {
+            name: "MAX_INFLIGHT_FRAGMENTS",
+            value: crate::hedge::MAX_INFLIGHT_FRAGMENTS as i64,
+            kind: Kind::Policy,
+        },
     ]
 }
 

@@ -74,6 +74,81 @@ fn resolve_unreachable(
     }
 }
 
+/// **Test-only** ([D-079](../../../docs/DECISIONS.md)): shard indices to hedge — re-issue their
+/// fragment — so the idempotence/dedup/blast-radius semantics are exercised. The synchronous
+/// coordinator has no latency to trigger a hedge on its own; this stands in for the async transport's
+/// `HEDGE_DELAY_MS` timer. Never a production path.
+static INJECTED_HEDGE: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+/// Test-only override of the in-flight blast-radius cap (`0` = use [`crate::hedge::MAX_INFLIGHT_FRAGMENTS`]).
+static INJECTED_MAX_INFLIGHT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Mark shard indices as slow so the coordinator hedges their fragments (test seam). Empty clears.
+pub fn inject_hedge_shards(shards: &[usize]) {
+    *INJECTED_HEDGE.lock().expect("hedge lock") = shards.to_vec();
+}
+
+/// Override the in-flight blast-radius cap (test seam). `None` restores [`crate::hedge::MAX_INFLIGHT_FRAGMENTS`].
+pub fn inject_max_inflight(cap: Option<usize>) {
+    INJECTED_MAX_INFLIGHT.store(cap.unwrap_or(0), std::sync::atomic::Ordering::SeqCst);
+}
+
+fn shard_is_hedged(si: usize) -> bool {
+    INJECTED_HEDGE.lock().expect("hedge lock").contains(&si)
+}
+
+fn effective_max_inflight() -> usize {
+    let o = INJECTED_MAX_INFLIGHT.load(std::sync::atomic::Ordering::SeqCst);
+    if o == 0 {
+        crate::hedge::MAX_INFLIGHT_FRAGMENTS
+    } else {
+        o
+    }
+}
+
+/// **Hedge a fragment** if its shard is marked slow and the blast-radius budget allows ([D-079](../../../docs/DECISIONS.md)).
+/// `original` is the fragment the coordinator already has; this re-issues it up to [`crate::hedge::HEDGE_FANOUT`]
+/// times, bounded so the total in flight never passes [`effective_max_inflight`] — a slow cluster must
+/// not hedge itself into collapse. Because the re-issue runs against the **same pinned snapshot**, it is
+/// **byte-identical**; a divergence is a named invariant violation (a fragment must be deterministic for
+/// a hedge to be free). Dedup keeps the original. Accounts the original and each hedge in `inflight`, and
+/// each hedge in `hedges`. A hedge that itself errors is dropped — the original stands.
+fn maybe_hedge<T, F>(
+    si: usize,
+    original: &T,
+    inflight: &mut usize,
+    hedges: &mut usize,
+    reissue: F,
+) -> Result<()>
+where
+    T: PartialEq,
+    F: Fn() -> Result<T>,
+{
+    *inflight += 1; // the original fragment
+    if !shard_is_hedged(si) {
+        return Ok(());
+    }
+    for _ in 0..crate::hedge::HEDGE_FANOUT {
+        if *inflight >= effective_max_inflight() {
+            break;
+        }
+        *inflight += 1;
+        let dup = match reissue() {
+            Ok(d) => d,
+            Err(_) => continue, // the hedge failed; the original stands, uncounted.
+        };
+        if &dup != original {
+            return Err(PrismError::Invariant(format!(
+                "a hedged fragment for shard {si} diverged from its original against the pinned \
+                 snapshot vector — a fragment must be deterministic for a hedge to be free of \
+                 correctness risk ([D-079](docs/DECISIONS.md))"
+            )));
+        }
+        *hedges += 1;
+    }
+    Ok(())
+}
+
 /// A cluster of shards. Each shard is a whole [`Engine`] over its own store; the cluster routes by
 /// tenant bucket and never lets a tenant bucket straddle two shards. The **generation store** holds
 /// the one cluster-global codebook, content-addressed, that every shard installs and serves
@@ -477,6 +552,9 @@ impl Cluster {
         // The shards a best-effort query could not reach (query §21). A non-best-effort query never
         // reaches the end of this list — `resolve_unreachable` fails it, by name, at the first miss.
         let mut missing: Vec<MissingShard> = Vec::new();
+        // Hedging bookkeeping (D-079): total fragments in flight (the blast radius) and hedges issued.
+        let mut inflight = 0usize;
+        let mut hedges = 0usize;
 
         // --- round 1: candidates from every shard, merged to the global set ---
         // (dist, event_id, shard, part_id, row)
@@ -493,6 +571,11 @@ impl Cluster {
             }
             match shard.search_candidates(&snaps[si], q) {
                 Ok(cands) => {
+                    // Hedge the fragment if the shard is slow — free, because a re-issue against the
+                    // pinned snapshot is byte-identical (D-079).
+                    maybe_hedge(si, &cands, &mut inflight, &mut hedges, || {
+                        shard.search_candidates(&snaps[si], q)
+                    })?;
                     for cand in cands {
                         global.push((cand.dist, cand.event_id, si, cand.part_id, cand.row));
                     }
@@ -550,6 +633,11 @@ impl Cluster {
                     continue;
                 }
             };
+            // Hedge round 2 too — the exact-score fragment is likewise byte-identical against the
+            // pinned snapshot (D-079).
+            maybe_hedge(*si, &scoreds, &mut inflight, &mut hedges, || {
+                self.shards[*si].search_rerank_selected(q, sel)
+            })?;
             for s in scoreds {
                 let gidx = handle.len();
                 handle.push((*si, s.part_id.clone(), s.row));
@@ -618,6 +706,7 @@ impl Cluster {
             fetch_budget_exhausted,
             exact_bytes_fetched,
             object_requests,
+            hedges_issued: hedges,
             ..Default::default()
         };
 

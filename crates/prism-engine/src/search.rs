@@ -167,6 +167,7 @@ pub(crate) struct Scored {
 
 /// A round-1 candidate a shard hands the coordinator: its PQ distance, its `event_id` (the tie the
 /// global merge breaks on, C-4), and the `(part_id, row)` handle the coordinator returns in round 2.
+#[derive(Clone, PartialEq)]
 pub(crate) struct ShardCandidate {
     pub(crate) dist: f32,
     pub(crate) event_id: String,
@@ -176,6 +177,7 @@ pub(crate) struct ShardCandidate {
 
 /// A round-2 exact score from a shard: the exact rerank score, the `event_id`, the `(part_id, row)`
 /// handle, and the exact vector (which the coordinator needs only for a semantic `GROUP BY`).
+#[derive(Clone, PartialEq)]
 pub(crate) struct ShardScored {
     pub(crate) score: f32,
     pub(crate) event_id: String,
@@ -596,6 +598,7 @@ impl Engine {
                 generations: Vec::new(),
                 bridge: None,
                 explain: None,
+                missing_shards: Vec::new(),
                 snapshot_id: snap.snapshot_id.clone(),
             }));
         }
@@ -1227,6 +1230,7 @@ impl Engine {
             generations: gen_ids.iter().cloned().collect(),
             bridge: None,
             explain,
+            missing_shards: Vec::new(),
             snapshot_id: snapshot_id.to_string(),
         })
     }
@@ -1474,6 +1478,7 @@ impl Engine {
                 bridge.policy, bridge.from_space, bridge.to_space, bridge.validation
             )),
             explain: None,
+            missing_shards: Vec::new(),
             snapshot_id: snap.snapshot_id.clone(),
         })
     }

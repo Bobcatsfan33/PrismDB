@@ -13,6 +13,7 @@ pub mod evidence;
 pub mod flight;
 pub mod generations;
 pub mod gpu;
+pub mod hedge;
 pub mod idempotency;
 pub mod ingest;
 pub mod ingestor;

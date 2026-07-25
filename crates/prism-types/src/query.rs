@@ -337,6 +337,12 @@ pub struct Counters {
     /// answer (and a fail-named query never returns — it errors).
     #[serde(default)]
     pub shards_missing: usize,
+    /// How many fragments a distributed query **hedged** — re-issued to cut tail latency ([query §21](../../../docs/QUERY-CONTRACT.md),
+    /// [D-079](../../../docs/DECISIONS.md)). A hedge changes latency, never the answer (the pinned
+    /// snapshot makes a re-issued fragment byte-identical), so this is an observable, not a correctness
+    /// flag. `0` on a query that hedged nothing.
+    #[serde(default)]
+    pub hedges_issued: usize,
     /// For a threshold query only: how many candidates the relaxed bound kept that landed **within ε
     /// of the exact bar** — the overfetch the margin bought ([D-074](../../../docs/DECISIONS.md)).
     /// Rerank prunes them against the exact `τ`, so they never reach the answer; the count is the
