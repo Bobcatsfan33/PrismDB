@@ -1,0 +1,60 @@
+{"topic": "tool_call", "text": "calling tool calendar to act on the retrieved context"}
+{"topic": "tool_call", "text": "dispatching grep with 47 arguments to complete the request"}
+{"topic": "tool_call", "text": "dispatching calendar with 47 arguments to complete the request"}
+{"topic": "tool_call", "text": "dispatching jira with 8 arguments to complete the request"}
+{"topic": "tool_call", "text": "the s3_get tool returned successfully after 4096 ms for the session state"}
+{"topic": "tool_call", "text": "calling tool write_file to act on the candidate passages"}
+{"topic": "tool_error", "text": "the slack tool call write conflict on key 72167 while processing the candidate passages, retrying with backoff"}
+{"topic": "tool_error", "text": "the python tool call quota exhausted (128 of 1000) while processing the audit log, retrying with backoff"}
+{"topic": "tool_error", "text": "the git tool call permission denied for resource 96329 while processing the input payload, retrying with backoff"}
+{"topic": "tool_error", "text": "the write_file tool call write conflict on key 58474 while processing the retrieved context, retrying with backoff"}
+{"topic": "tool_error", "text": "the calendar tool call context length exceeded by 240 tokens while processing the session state, retrying with backoff"}
+{"topic": "tool_error", "text": "the vector_lookup tool call invalid argument 70103 while processing the input payload, retrying with backoff"}
+{"topic": "codegen", "text": "write a TypeScript function that parses the retrieved context and returns a validated struct"}
+{"topic": "codegen", "text": "the Java build failed with a type error on the candidate passages at line 15000"}
+{"topic": "codegen", "text": "add Ruby unit tests covering the edge cases in the session state"}
+{"topic": "codegen", "text": "the TypeScript build failed with a type error on the session state at line 512"}
+{"topic": "codegen", "text": "refactor the Python module to remove duplicated error handling in the embedding request"}
+{"topic": "codegen", "text": "the Rust build failed with a type error on the retrieved context at line 128"}
+{"topic": "retrieval", "text": "the retry queue exceeded the model context window by 512 tokens and was truncated"}
+{"topic": "retrieval", "text": "the semantic search over the session state returned 1024 results above the similarity threshold"}
+{"topic": "retrieval", "text": "the retrieved context exceeded the model context window by 47 tokens and was truncated"}
+{"topic": "retrieval", "text": "reranking 24 candidate passages by cross-encoder score for the batch of records"}
+{"topic": "retrieval", "text": "the retry queue exceeded the model context window by 15000 tokens and was truncated"}
+{"topic": "retrieval", "text": "reranking 2048 candidate passages by cross-encoder score for the input payload"}
+{"topic": "planning", "text": "waiting on step 240 to complete before proceeding with the audit log"}
+{"topic": "planning", "text": "the agent revised its plan for the plan graph after the execute call failed"}
+{"topic": "planning", "text": "the agent revised its plan for the embedding request after the kubectl call failed"}
+{"topic": "planning", "text": "waiting on step 512 to complete before proceeding with the streaming response"}
+{"topic": "planning", "text": "the planner selected send_email to gather more information about the tool result"}
+{"topic": "planning", "text": "waiting on step 12 to complete before proceeding with the embedding request"}
+{"topic": "summarize", "text": "summarize the quarterly earnings report into 2048 bullet points"}
+{"topic": "summarize", "text": "draft a reply to the master services agreement referencing the streaming response"}
+{"topic": "summarize", "text": "extract the action items from the incident postmortem for 1748"}
+{"topic": "summarize", "text": "draft a reply to the engineering standup transcript referencing the candidate passages"}
+{"topic": "summarize", "text": "extract the action items from the quarterly earnings report"}
+{"topic": "summarize", "text": "draft a reply to the API changelog for release 98597 referencing the input payload"}
+{"topic": "auth", "text": "the request for the embedding request was rejected because the bearer token for principal 98487 had expired"}
+{"topic": "auth", "text": "the request for the input payload was rejected because the bearer token for principal 32623 had expired"}
+{"topic": "auth", "text": "multi-factor challenge issued to principal 34804 for the retrieved context"}
+{"topic": "auth", "text": "multi-factor challenge issued to principal 37094 for the embedding request"}
+{"topic": "auth", "text": "rotating the service credential 29840 after a suspected leak"}
+{"topic": "auth", "text": "rotating the service credential 67389 after a suspected leak"}
+{"topic": "llm_span", "text": "llm completion span: 8192 prompt tokens, 8192 completion tokens on the session state"}
+{"topic": "llm_span", "text": "model latency 128 ms at temperature 0.7 for the batch of records"}
+{"topic": "llm_span", "text": "llm completion span: 15000 prompt tokens, 15000 completion tokens on the retry queue"}
+{"topic": "llm_span", "text": "llm completion span: 240 prompt tokens, 240 completion tokens on the embedding request"}
+{"topic": "llm_span", "text": "llm completion span: 12 prompt tokens, 12 completion tokens on the embedding request"}
+{"topic": "llm_span", "text": "streaming 8 tokens for the retrieved context, first token at 1000 ms"}
+{"topic": "sql", "text": "the query plan for the retry queue chose a full table scan over the index"}
+{"topic": "sql", "text": "the query plan for the session state chose a full table scan over the index"}
+{"topic": "sql", "text": "SELECT count(*) FROM events WHERE tenant_id = 't73727' AND event_time > 4096"}
+{"topic": "sql", "text": "SELECT count(*) FROM events WHERE tenant_id = 't91598' AND event_time > 12"}
+{"topic": "sql", "text": "a slow query on the candidate passages held a lock for 8192 ms, past the timeout"}
+{"topic": "sql", "text": "the query plan for the tool result chose a full table scan over the index"}
+{"topic": "safety", "text": "the output for the streaming response was regenerated after a policy violation"}
+{"topic": "safety", "text": "an injection attempt was detected in the user's request at offset 15000"}
+{"topic": "safety", "text": "redacting personally identifiable information from the retrieved context before embedding"}
+{"topic": "safety", "text": "the embedding request was flagged by the content filter and blocked"}
+{"topic": "safety", "text": "an injection attempt was detected in the embedding request at offset 4096"}
+{"topic": "safety", "text": "the output for the embedding request was regenerated after a policy violation"}

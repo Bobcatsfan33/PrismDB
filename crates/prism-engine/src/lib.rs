@@ -23,6 +23,7 @@ pub mod novelty;
 pub mod oracle;
 pub mod otlp;
 pub mod plan;
+pub mod realcorpus;
 pub mod rowsource;
 pub mod sample;
 pub mod scheduler;

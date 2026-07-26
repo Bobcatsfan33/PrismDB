@@ -1,0 +1,31 @@
+{
+  "corpus_version": "real-v1",
+  "model": "sentence-transformers/all-mpnet-base-v2",
+  "dim": 768,
+  "normalized": true,
+  "rows": 3000,
+  "tenants": 64,
+  "topics": [
+    "tool_call",
+    "tool_error",
+    "codegen",
+    "retrieval",
+    "planning",
+    "summarize",
+    "auth",
+    "llm_span",
+    "sql",
+    "safety"
+  ],
+  "distinct_bodies": 2529,
+  "queries": 60,
+  "seed": 20260725,
+  "generated_by": "scripts/gen-real-corpus.py",
+  "note": "Embeddings generated ONCE and committed as data; nothing at test time runs a model or the network (S13 dir 1/5). C-2 frozen; a new corpus is a new version directory.",
+  "sha256": {
+    "bodies.txt": "1eb355c4ed938df6f206a5978d3cee6c98bb9708a50ff13712d20d486acad898",
+    "embeddings.f32": "c8957285d14892f2b56985413de4600c9c284db74ee2f687b926852ceec11325",
+    "events.jsonl": "8836157a1261087c74cb41405cabc2f120a1c0cad699a9f867b33b1557e1d1be",
+    "queries.jsonl": "b5f58e988d8d6abcbba06966ad420f7b4fcc742473d80e1d0973e059b0377c41"
+  }
+}
