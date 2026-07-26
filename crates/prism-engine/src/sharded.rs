@@ -558,23 +558,45 @@ impl Cluster {
 
         // --- round 1: candidates from every shard, merged to the global set ---
         // (dist, event_id, shard, part_id, row)
+        //
+        // **Fan out round 1 to every shard concurrently** — each shard's scan is independent, the
+        // shared-nothing parallelism D-071 is judged on (the scaling verdict). `std::thread::scope`
+        // borrows `self.shards`, `snaps`, and `q` without cloning; the per-shard results are processed
+        // in shard order afterwards, so the merge is byte-identical to a sequential fan-out (the sort
+        // erases arrival order regardless). A 1-shard cluster spawns one thread — negligible overhead.
+        let round1: Vec<(usize, Result<Vec<crate::search::ShardCandidate>>)> =
+            std::thread::scope(|scope| {
+                let handles: Vec<_> = self
+                    .shards
+                    .iter()
+                    .enumerate()
+                    .map(|(si, shard)| {
+                        scope.spawn(move || {
+                            let r = if shard_is_unreachable(si) {
+                                Err(PrismError::NotFound(
+                                    "coordinator-boundary fault (injected)".into(),
+                                ))
+                            } else {
+                                shard.search_candidates(&snaps[si], q)
+                            };
+                            (si, r)
+                        })
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|h| h.join().expect("a shard round-1 thread panicked"))
+                    .collect()
+            });
+
         let mut global: Vec<(f32, String, usize, String, usize)> = Vec::new();
-        for (si, shard) in self.shards.iter().enumerate() {
-            if shard_is_unreachable(si) {
-                resolve_unreachable(
-                    si,
-                    "coordinator-boundary fault (injected)",
-                    q.best_effort,
-                    &mut missing,
-                )?;
-                continue;
-            }
-            match shard.search_candidates(&snaps[si], q) {
+        for (si, r) in round1 {
+            match r {
                 Ok(cands) => {
                     // Hedge the fragment if the shard is slow — free, because a re-issue against the
                     // pinned snapshot is byte-identical (D-079).
                     maybe_hedge(si, &cands, &mut inflight, &mut hedges, || {
-                        shard.search_candidates(&snaps[si], q)
+                        self.shards[si].search_candidates(&snaps[si], q)
                     })?;
                     for cand in cands {
                         global.push((cand.dist, cand.event_id, si, cand.part_id, cand.row));
@@ -614,33 +636,51 @@ impl Cluster {
         let mut handle: Vec<(usize, String, usize)> = Vec::new();
         let mut exact_bytes_fetched = 0usize;
         let mut object_requests = 0usize;
-        for (si, sel) in &by_shard {
-            if shard_is_unreachable(*si) {
-                resolve_unreachable(
-                    *si,
-                    "coordinator-boundary fault (injected)",
-                    q.best_effort,
-                    &mut missing,
-                )?;
-                continue;
-            }
-            let scoreds = match self.shards[*si].search_rerank_selected(q, sel) {
+
+        // Fan out round 2 concurrently too — each owning shard exact-scores its own subset in parallel.
+        let by_shard_vec: Vec<(usize, Vec<(String, usize)>)> = by_shard.into_iter().collect();
+        let shards = &self.shards;
+        let round2: Vec<Result<Vec<crate::search::ShardScored>>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = by_shard_vec
+                .iter()
+                .map(|(si, sel)| {
+                    let si = *si;
+                    scope.spawn(move || {
+                        if shard_is_unreachable(si) {
+                            Err(PrismError::NotFound(
+                                "coordinator-boundary fault (injected)".into(),
+                            ))
+                        } else {
+                            shards[si].search_rerank_selected(q, sel)
+                        }
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("a shard round-2 thread panicked"))
+                .collect()
+        });
+
+        for ((si, sel), r) in by_shard_vec.iter().zip(round2) {
+            let si = *si;
+            let scoreds = match r {
                 Ok(s) => s,
                 Err(e) => {
                     // A shard reachable in round 1 but not round 2: its candidates simply go unscored
                     // and drop from the answer — recorded missing (or, fail-named, the query errors).
-                    resolve_unreachable(*si, &e.to_string(), q.best_effort, &mut missing)?;
+                    resolve_unreachable(si, &e.to_string(), q.best_effort, &mut missing)?;
                     continue;
                 }
             };
             // Hedge round 2 too — the exact-score fragment is likewise byte-identical against the
             // pinned snapshot (D-079).
-            maybe_hedge(*si, &scoreds, &mut inflight, &mut hedges, || {
-                self.shards[*si].search_rerank_selected(q, sel)
+            maybe_hedge(si, &scoreds, &mut inflight, &mut hedges, || {
+                self.shards[si].search_rerank_selected(q, sel)
             })?;
             for s in scoreds {
                 let gidx = handle.len();
-                handle.push((*si, s.part_id.clone(), s.row));
+                handle.push((si, s.part_id.clone(), s.row));
                 exact_bytes_fetched += s.vector.len() * 4;
                 scored.push(Scored {
                     score: s.score,

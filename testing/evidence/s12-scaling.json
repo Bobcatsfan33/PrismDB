@@ -1,0 +1,60 @@
+{
+  "_spec": "testing/evidence/s12-verdict-spec.md (targets declared before measurement)",
+  "commit_rtt": {
+    "achieved_rate_per_s": 1400.2872955441396,
+    "backend": "local-MinIO (127.0.0.1, digest-pinned 09-07)",
+    "commits": 200,
+    "measured": true,
+    "p50_ms": 0.609208,
+    "p99_ms": 1.68725,
+    "pass": true,
+    "target_p50_ms": 25.0,
+    "target_p99_ms": 100.0,
+    "target_rate_per_s": 20.0
+  },
+  "corpus_rows": 200000,
+  "host_config": "IN-PROCESS cluster on ONE host: the coordinator fans out to shards concurrently (thread per shard), but the host's CPU cores and memory bandwidth are FIXED regardless of shard count — sharding's resource scaling comes from adding NODES, which this config does not have.",
+  "iters": 5,
+  "scaling": {
+    "curve_1_2_4_ms": {
+      "group_by": [
+        1978.2522500000002,
+        1921.2417080000002,
+        1882.703625
+      ],
+      "scan_heavy": [
+        564.529292,
+        509.08304100000004,
+        480.46729100000005
+      ],
+      "scan_light": [
+        189.401625,
+        138.749542,
+        118.543708
+      ]
+    },
+    "group_by": {
+      "pass": false,
+      "speedup_1_to_4": 1.0507507521264798,
+      "target_speedup": 3.5
+    },
+    "note": "The parallelisable scan DOES divide per shard and the coordinator fans out concurrently (byte-identical, gated) — but the ≥3.5x target is NOT met (measured ≤1.6x). Two reasons, both config-structural not defects: (1) a single host adds no CPU/memory as shards grow, so there is nothing to scale into; (2) the sequential coordinator terms (the pre-round-1 part-existence check, the global candidate merge, finalize) GROW with shard count and, with fixed per-query overhead, dominate by Amdahl at realistic query sizes. Multi-node scaling — independent CPU/memory/bandwidth per shard — is D-071's real claim and needs the coordinator↔shard transport (a NAMED WALL); this in-process number is a lower bound on it, and a lower bound of ≤1.6x cannot confirm ≥3.5x.",
+    "pass": false,
+    "scan": {
+      "pass": false,
+      "speedup_1_to_4": 1.17495884230754,
+      "target_speedup": 3.5
+    },
+    "scan_light": {
+      "note": "round-1-scan-dominated; monotonic improvement 1→2→4 proves the concurrent fan-out parallelises the scan, but end-to-end is Amdahl-limited",
+      "speedup_1_to_4": 1.5977366339848253
+    }
+  },
+  "verdict": {
+    "commit_rtt_target_met": true,
+    "d071_authority": "VIABLE — the CAS-per-commit catalog authority round-trips in p99 ~1.4ms at ~1500 commits/s (local-MinIO), far inside the viability ceiling. The Raft alternative's trigger (commit-RTT/lease unviable) is NOT hit; Raft is not activated.",
+    "d071_scaling": "NOT CONFIRMED in the shipped single-host config (≤1.6x vs ≥3.5x target) and NOT FALSIFIED (the work divides; multi-node adds the resources this config lacks) — it is DEFERRED to the multi-node transport increment, a named wall.",
+    "s12": "stays 🟡: authority confirmed viable, scaling unconfirmed-in-config with the numbers written down. Targets were fixed before measurement and not moved.",
+    "scaling_target_met": false
+  }
+}
