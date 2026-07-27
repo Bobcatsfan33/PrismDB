@@ -108,5 +108,10 @@
       "manifest_bytes_per_row": 8.0825
     }
   ],
-  "note": "Measured, not modelled: a real store is built at each candidate size and the real golden query set is run against it. Re-derive with `prism evidence block-size` whenever the corpus, the index geometry, or the column layout changes. The value is a DEFAULT, not a law — every part records its own block size, so a store built at one size stays readable whatever this default later becomes."
+  "note": "Measured, not modelled: a real store is built at each candidate size and the real golden query set is run against it. Re-derive with `prism evidence block-size` whenever the corpus, the index geometry, or the column layout changes. The value is a DEFAULT, not a law \u2014 every part records its own block size, so a store built at one size stays readable whatever this default later becomes.",
+  "config_superseded": {
+    "superseded_by": "D-081 + S13 dir-2 re-derivation",
+    "re_baseline": "testing/evidence/RE-BASELINE.md",
+    "note": "Measured at DEFAULT_NPROBE=6 (via oracle::build default query) on the hash corpus. Absolute bytes_read/query_p50_ms describe a pre-D-081 operating point; re-baseline per testing/evidence/RE-BASELINE.md. Chosen block size (bytes-moved trade-off) is robust to nprobe; not deleted (paired-series discipline)."
+  }
 }
