@@ -1,86 +1,255 @@
 {
-  "corpus_version": "v1",
-  "generation_id": "d93625d4300c0a30",
-  "starved_base": 2,
-  "shipping_base": 6,
+  "shipped_series": "real-v1",
+  "geometry_sensitivity": "sensitive",
+  "_what": "ADAPTIVE_MARGIN (C-1, S6/issue #1): how nearly-equal a centroid beyond the base nprobe must be to also get probed \u2014 the widening that recovers cluster-boundary queries whose neighbours straddle centroids. MONOTONE in v1: adaptive only adds probes, never subtracts, so recall can only improve and every nprobe/width floor stays valid.",
+  "generation_id": "6155e352fd25b26e",
   "p1_floor": 0.8,
-  "flat_starved_p1_recall": 0.5,
+  "chosen_margin": 0.02,
+  "chosen_margin_x1000": 20,
+  "selection_basis": "benefit",
+  "starved_base": 13,
+  "shipping_base": 14,
   "sweep": [
     {
       "margin": 0.0,
-      "starved_p1_recall": 0.5,
+      "starved_p1_recall": 0.7,
       "starved_zero_recall_queries": 0,
-      "starved_mean_probes": 7.538461538461538,
-      "shipping_p1_recall": 1.0,
-      "shipping_mean_probes": 22.615384615384617
+      "starved_mean_probes": 195.0,
+      "shipping_p1_recall": 0.9,
+      "shipping_mean_probes": 210.0
     },
     {
       "margin": 0.02,
-      "starved_p1_recall": 0.5,
+      "starved_p1_recall": 0.9,
       "starved_zero_recall_queries": 0,
-      "starved_mean_probes": 8.173076923076923,
-      "shipping_p1_recall": 1.0,
-      "shipping_mean_probes": 25.153846153846153
+      "starved_mean_probes": 224.0,
+      "shipping_p1_recall": 0.9,
+      "shipping_mean_probes": 234.0
     },
     {
       "margin": 0.05,
-      "starved_p1_recall": 0.6,
+      "starved_p1_recall": 0.9,
       "starved_zero_recall_queries": 0,
-      "starved_mean_probes": 9.317307692307692,
-      "shipping_p1_recall": 1.0,
-      "shipping_mean_probes": 29.16346153846154
+      "starved_mean_probes": 238.4,
+      "shipping_p1_recall": 0.9,
+      "shipping_mean_probes": 239.7
     },
     {
       "margin": 0.1,
-      "starved_p1_recall": 0.6,
+      "starved_p1_recall": 0.9,
       "starved_zero_recall_queries": 0,
-      "starved_mean_probes": 11.038461538461538,
-      "shipping_p1_recall": 1.0,
-      "shipping_mean_probes": 36.50961538461539
+      "starved_mean_probes": 240.0,
+      "shipping_p1_recall": 0.9,
+      "shipping_mean_probes": 240.0
     },
     {
       "margin": 0.15,
-      "starved_p1_recall": 0.7,
+      "starved_p1_recall": 0.9,
       "starved_zero_recall_queries": 0,
-      "starved_mean_probes": 13.89423076923077,
-      "shipping_p1_recall": 1.0,
-      "shipping_mean_probes": 45.64423076923077
+      "starved_mean_probes": 240.0,
+      "shipping_p1_recall": 0.9,
+      "shipping_mean_probes": 240.0
     },
     {
       "margin": 0.2,
-      "starved_p1_recall": 0.7,
+      "starved_p1_recall": 0.9,
       "starved_zero_recall_queries": 0,
-      "starved_mean_probes": 17.0,
-      "shipping_p1_recall": 1.0,
-      "shipping_mean_probes": 51.68269230769231
+      "starved_mean_probes": 240.0,
+      "shipping_p1_recall": 0.9,
+      "shipping_mean_probes": 240.0
     },
     {
       "margin": 0.3,
-      "starved_p1_recall": 0.7,
+      "starved_p1_recall": 0.9,
       "starved_zero_recall_queries": 0,
-      "starved_mean_probes": 23.41346153846154,
-      "shipping_p1_recall": 1.0,
-      "shipping_mean_probes": 58.61538461538461
+      "starved_mean_probes": 240.0,
+      "shipping_p1_recall": 0.9,
+      "shipping_mean_probes": 240.0
     },
     {
       "margin": 0.5,
-      "starved_p1_recall": 1.0,
+      "starved_p1_recall": 0.9,
       "starved_zero_recall_queries": 0,
-      "starved_mean_probes": 38.14423076923077,
-      "shipping_p1_recall": 1.0,
-      "shipping_mean_probes": 60.19230769230769
+      "starved_mean_probes": 240.0,
+      "shipping_p1_recall": 0.9,
+      "shipping_mean_probes": 240.0
     }
   ],
-  "chosen_margin": 0.05,
-  "chosen_margin_x1000": 50,
-  "shipping_flat_probes": 22.615384615384617,
-  "shipping_probe_budget": 1.5,
-  "rule": "the SMALLEST margin at which adaptive probing, applied to a base deliberately STARVED below the tail floor, recovers that floor with no query returning nothing. The starved base is the only place this corpus can show the mechanism working: at the shipping base the floor is already met, so there is nothing to recover, and the real payoff (fewer probes on easy queries) is deferred to a real-embedding corpus (issue #3). The sweep also PROVES monotonicity -- it refuses any margin that lowers shipping recall -- so every existing nprobe/width receipt stays valid as a floor.",
-  "note": "S6, issue #1. v1 is monotone-only: adaptive probing adds probes for boundary queries and never subtracts, so recall can only improve. Corpus- AND generation-conditional: the cluster geometry that decides which queries sit on a boundary is exactly what the hash embedder cannot represent faithfully.",
+  "series": {
+    "real-v1": {
+      "shipped": true,
+      "selection_basis": "benefit",
+      "generation_id": "6155e352fd25b26e",
+      "corpus": "real-v1 (768d, nlist=64) + boundary_queries.jsonl",
+      "starved_base": 13,
+      "shipping_base": 14,
+      "flat_starved_p1_recall": 0.7,
+      "chosen_margin": 0.02,
+      "chosen_margin_x1000": 20,
+      "shipping_flat_probes": 210.0,
+      "shipping_probe_budget": 1.5,
+      "sweep": [
+        {
+          "margin": 0.0,
+          "starved_p1_recall": 0.7,
+          "starved_zero_recall_queries": 0,
+          "starved_mean_probes": 195.0,
+          "shipping_p1_recall": 0.9,
+          "shipping_mean_probes": 210.0
+        },
+        {
+          "margin": 0.02,
+          "starved_p1_recall": 0.9,
+          "starved_zero_recall_queries": 0,
+          "starved_mean_probes": 224.0,
+          "shipping_p1_recall": 0.9,
+          "shipping_mean_probes": 234.0
+        },
+        {
+          "margin": 0.05,
+          "starved_p1_recall": 0.9,
+          "starved_zero_recall_queries": 0,
+          "starved_mean_probes": 238.4,
+          "shipping_p1_recall": 0.9,
+          "shipping_mean_probes": 239.7
+        },
+        {
+          "margin": 0.1,
+          "starved_p1_recall": 0.9,
+          "starved_zero_recall_queries": 0,
+          "starved_mean_probes": 240.0,
+          "shipping_p1_recall": 0.9,
+          "shipping_mean_probes": 240.0
+        },
+        {
+          "margin": 0.15,
+          "starved_p1_recall": 0.9,
+          "starved_zero_recall_queries": 0,
+          "starved_mean_probes": 240.0,
+          "shipping_p1_recall": 0.9,
+          "shipping_mean_probes": 240.0
+        },
+        {
+          "margin": 0.2,
+          "starved_p1_recall": 0.9,
+          "starved_zero_recall_queries": 0,
+          "starved_mean_probes": 240.0,
+          "shipping_p1_recall": 0.9,
+          "shipping_mean_probes": 240.0
+        },
+        {
+          "margin": 0.3,
+          "starved_p1_recall": 0.9,
+          "starved_zero_recall_queries": 0,
+          "starved_mean_probes": 240.0,
+          "shipping_p1_recall": 0.9,
+          "shipping_mean_probes": 240.0
+        },
+        {
+          "margin": 0.5,
+          "starved_p1_recall": 0.9,
+          "starved_zero_recall_queries": 0,
+          "starved_mean_probes": 240.0,
+          "shipping_p1_recall": 0.9,
+          "shipping_mean_probes": 240.0
+        }
+      ],
+      "note": "SHIPPED. On real geometry the mechanism's benefit is finally MEASURABLE: the starved base (13, flat p1 0.700) recovers to p1 0.900 at margin 0.02 \u2014 so the choice is by BENEFIT (smallest margin recovering the starved tail to the 0.8 floor), not the hash corpus's cost-ceiling fallback."
+    },
+    "hash-v1": {
+      "starved_base": 2,
+      "shipping_base": 6,
+      "flat_starved_p1_recall": 0.5,
+      "chosen_margin": 0.05,
+      "chosen_margin_x1000": 50,
+      "sweep": [
+        {
+          "margin": 0.0,
+          "starved_p1_recall": 0.5,
+          "starved_zero_recall_queries": 0,
+          "starved_mean_probes": 7.538461538461538,
+          "shipping_p1_recall": 1.0,
+          "shipping_mean_probes": 22.615384615384617
+        },
+        {
+          "margin": 0.02,
+          "starved_p1_recall": 0.5,
+          "starved_zero_recall_queries": 0,
+          "starved_mean_probes": 8.173076923076923,
+          "shipping_p1_recall": 1.0,
+          "shipping_mean_probes": 25.153846153846153
+        },
+        {
+          "margin": 0.05,
+          "starved_p1_recall": 0.6,
+          "starved_zero_recall_queries": 0,
+          "starved_mean_probes": 9.317307692307692,
+          "shipping_p1_recall": 1.0,
+          "shipping_mean_probes": 29.16346153846154
+        },
+        {
+          "margin": 0.1,
+          "starved_p1_recall": 0.6,
+          "starved_zero_recall_queries": 0,
+          "starved_mean_probes": 11.038461538461538,
+          "shipping_p1_recall": 1.0,
+          "shipping_mean_probes": 36.50961538461539
+        },
+        {
+          "margin": 0.15,
+          "starved_p1_recall": 0.7,
+          "starved_zero_recall_queries": 0,
+          "starved_mean_probes": 13.89423076923077,
+          "shipping_p1_recall": 1.0,
+          "shipping_mean_probes": 45.64423076923077
+        },
+        {
+          "margin": 0.2,
+          "starved_p1_recall": 0.7,
+          "starved_zero_recall_queries": 0,
+          "starved_mean_probes": 17.0,
+          "shipping_p1_recall": 1.0,
+          "shipping_mean_probes": 51.68269230769231
+        },
+        {
+          "margin": 0.3,
+          "starved_p1_recall": 0.7,
+          "starved_zero_recall_queries": 0,
+          "starved_mean_probes": 23.41346153846154,
+          "shipping_p1_recall": 1.0,
+          "shipping_mean_probes": 58.61538461538461
+        },
+        {
+          "margin": 0.5,
+          "starved_p1_recall": 1.0,
+          "starved_zero_recall_queries": 0,
+          "starved_mean_probes": 38.14423076923077,
+          "shipping_p1_recall": 1.0,
+          "shipping_mean_probes": 60.19230769230769
+        }
+      ],
+      "shipped": false,
+      "retained": true,
+      "selection_basis": "cost-ceiling",
+      "note": "Retained paired series. On the hash corpus NO cost-bounded margin reaches the p1 floor at the starved base (the degenerate motifs never split enough), so selection falls back to COST: the largest cost-bounded margin that helps at all = 0.05. Locked by evidence.rs::adaptive_selection_tests."
+    }
+  },
+  "delta": {
+    "old_hash_v1": 0.05,
+    "new_real_v1": 0.5,
+    "old_selection": "cost-ceiling",
+    "new_selection": "benefit",
+    "mechanism": "The hash corpus could never recover its starved tail to the floor within the cost budget, so ADAPTIVE_MARGIN was picked by a cost ceiling (largest cost-bounded margin that helped at all = 0.05) \u2014 the real benefit-driven derivation was explicitly deferred to a real-embedding corpus (issue #3). real-v1 delivers it: the starved base (13) recovers from p1 0.700 to 0.900 at margin 0.02, so the SMALLEST margin recovering the tail to the 0.8 floor is 0.02. The selection rule is now benefit-first with a cost-ceiling fallback (evidence.rs::select_adaptive_margin), which yields 0.02 on real-v1 and leaves the retained hash value at 0.05."
+  },
+  "interaction_finding": "At the real-v1 shipping base (DEFAULT_NPROBE=14) adaptive has almost no room to widen before ADAPTIVE_MAX_NPROBE=16 (2 probes of headroom), so the cost ceiling cannot discriminate margins at the shipping base and the benefit signal comes entirely from the starved base. As DEFAULT_NPROBE rose to 14, ADAPTIVE_MAX_NPROBE=16 is now tight; a future revision should re-derive the max relative to the base (filed as a note on issue #1).",
   "policy_bounds": [
     {
       "bound": "adaptive probing at the shipping base must stay within 1.5x                  the flat probe count",
       "why_measurement_cannot_see_it": "On this corpus the p1 recall floor at the shipping base is ALREADY met flat, so                  every margin yields identical shipping recall and measurement cannot pick the                  margin by benefit. It can only see COST, which a larger margin always raises. So                  a worst-case cost ceiling selects the value, and the real benefit-driven                  derivation waits for a real-embedding corpus where boundary queries actually miss                  (issue #3)."
     }
-  ]
+  ],
+  "corpus_conditional": true,
+  "generation_conditional": true,
+  "rule": "benefit-first, cost-ceiling fallback (evidence.rs::select_adaptive_margin). Where the corpus recovers its starved tail to the floor within the cost budget, the SMALLEST such margin (real-v1: 0.02); else the largest cost-bounded margin that helps at all (hash: 0.05).",
+  "note": "S6, issue #1; benefit-first selection realised S13 dir 2. geometry-SENSITIVE: re-derive per corpus/generation (C-3/C-6)."
 }

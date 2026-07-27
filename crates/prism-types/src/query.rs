@@ -10,45 +10,52 @@ use serde::{Deserialize, Serialize};
 
 /// The default probe count.
 ///
-/// **Derived, not chosen.** It is the smallest `nprobe` whose *p1* recall@10
-/// clears 0.8 on the golden corpus at the reference configuration, and the
-/// receipt is `testing/evidence/nprobe.json`. A test asserts this
-/// constant still equals the `chosen_nprobe` in that file, so the default cannot
-/// drift away from the evidence that produced it.
+/// **Derived, not chosen** (charter C-1), and **geometry-SENSITIVE** — re-derived per real-embedding
+/// corpus and generation, forever. It is the smallest `nprobe` whose *p1* recall@10 clears 0.8 on the
+/// golden corpus at the reference configuration; the receipt is `testing/evidence/nprobe.json`. A test
+/// asserts this constant still equals the shipped `chosen_nprobe`, so the default cannot drift from its
+/// evidence.
 ///
-/// It is picked on the **tail**, not the mean. S0 defaulted to a round number and
-/// reported a mean recall of ~0.90 at `nprobe=1` — while the *minimum* was 0.000,
-/// because cluster-boundary queries have their true neighbours split across two
-/// centroids and a single probe reaches only one of them. A default tuned on a
-/// mean is a default that works until it matters.
+/// It is picked on the **tail**, not the mean, because cluster-boundary queries have their true
+/// neighbours split across two centroids and a single probe reaches only one — a mean cannot see the
+/// query class that fails completely. A default tuned on a mean is one that works until it matters.
 ///
-/// The sweep that produced it is unambiguous. At `nprobe=1`, *topic* queries —
-/// aimed at the middle of a cluster — score a flawless mean recall of 1.000,
-/// while *cluster-boundary* queries fail outright on 5 of 56. The mean across
-/// everything is still 0.904, which is how a system with total failures in it
-/// gets described as "90% accurate". `nprobe=4` is the first probe count at
-/// which no query returns nothing, and it costs a 14.9% scan fraction.
+/// **S13 dir 2 — re-derived on real-v1 (all-mpnet 768d, nlist=64): the number is 14, up from the hash
+/// corpus's 6.** This is the uncomfortable direction, and it is the honest one. The hash embedder's
+/// handful of near-identical motifs could not produce *real* boundaries, so `nprobe=6` was measured
+/// against geometry that flattered it — at `nprobe=6` on the real corpus, p1 recall@10 is only **0.400**
+/// and 4 boundary queries return nothing at `nprobe=1` (mean 0.730, min 0.000 for the boundary class).
+/// The first probe count whose p1 clears 0.8 on real geometry is **14**, and holding that tail costs a
+/// **25.5% scan fraction — 2.3× the 10.9% that nprobe=6 bought** on the same corpus. That scan cost is
+/// the latency the recall contract is actually paid for; it is the number S16's benchmarks stand on.
 ///
-/// This number is not universal. A different `nlist`, a different embedding
-/// model, or a different corpus will have a different answer — re-derive it with
-/// `prism golden sweep`. Adaptive per-query probing is issue #1, targeted at S6.
-pub const DEFAULT_NPROBE: usize = 6;
+/// This number is not universal: a different `nlist`, embedder, or corpus re-derives it
+/// (`tests/rederive_nprobe.rs`, `prism golden sweep`). The hash-corpus sweep is retained as the paired
+/// series in the receipt.
+pub const DEFAULT_NPROBE: usize = 14;
 
 /// Adaptive-probing margin (S6, [issue #1](https://github.com/Bobcatsfan33/PrismDB/issues/1)).
 ///
-/// **Tuned** (charter C-1), receipt `testing/evidence/adaptive.json`. When a query sits near a
-/// cluster boundary — nearly equidistant to several centroids — its true neighbours are split
-/// across those centroids, and probing only the base `nprobe` reaches some of them and misses the
-/// rest ([`DEFAULT_NPROBE`]'s whole reason for existing). This margin says *how nearly equal*
-/// counts as "on the boundary": a centroid beyond the base is also probed when its distance is
-/// within `(1 + ADAPTIVE_MARGIN)` of the base's last probed centroid.
+/// **Tuned** (charter C-1), **geometry-SENSITIVE**, receipt `testing/evidence/adaptive.json`. When a
+/// query sits near a cluster boundary — nearly equidistant to several centroids — its true neighbours
+/// are split, and probing only the base `nprobe` misses half ([`DEFAULT_NPROBE`]'s whole reason for
+/// existing). This margin says *how nearly equal* counts as "on the boundary": a centroid beyond the
+/// base is also probed when its distance is within `(1 + ADAPTIVE_MARGIN)` of the base's last probed
+/// centroid.
 ///
-/// **v1 is MONOTONE ONLY.** Adaptive probing may add probes above the base; it may never subtract.
-/// So recall can only improve, and every existing `nprobe`/width receipt remains valid as a
-/// *floor*. The cost-reduction direction — *fewer* probes on easy queries — is deferred until the
-/// real-embedding corpus exists ([issue #3](https://github.com/Bobcatsfan33/PrismDB/issues/3)),
-/// because it tunes against cluster geometry the hash-embedder corpus cannot represent.
-pub const ADAPTIVE_MARGIN: f32 = 0.05;
+/// **v1 is MONOTONE ONLY.** Adaptive probing may add probes above the base; it may never subtract, so
+/// recall can only improve and every `nprobe`/width receipt stays valid as a *floor*.
+///
+/// **S13 dir 2 — re-derived on real-v1, and the number fell from 0.05 to 0.02.** The hash corpus could
+/// never recover its starved tail to the floor within the cost budget, so the margin was picked by a
+/// cost ceiling (largest that helped at all); the real benefit-driven derivation was deferred to a
+/// real-embedding corpus. real-v1 delivers it: a base *starved* one probe below the shipping default
+/// (13) recovers from p1 recall 0.700 to 0.900 at margin **0.02**, so the smallest margin that recovers
+/// the tail to the 0.8 floor is 0.02 — the benefit-first choice (`evidence::select_adaptive_margin`),
+/// with the cost-ceiling rule retained as the fallback that keeps the hash series at 0.05. Note the
+/// tightening interaction: at the shipping base (14) there are only 2 probes to [`ADAPTIVE_MAX_NPROBE`],
+/// so the benefit signal comes entirely from the starved base.
+pub const ADAPTIVE_MARGIN: f32 = 0.02;
 
 /// The hard ceiling on adaptive probing. **Policy** (C-1): a query may never probe more than this
 /// many centroids however tight its margins, so a pathological query cannot turn an approximate

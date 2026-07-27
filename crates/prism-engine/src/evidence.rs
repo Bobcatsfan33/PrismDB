@@ -670,6 +670,11 @@ pub struct AdaptiveEvidence {
     pub chosen_margin: f64,
     /// The chosen margin times 1000, as an integer, because the constant ledger holds integers.
     pub chosen_margin_x1000: i64,
+    /// How the margin was selected: `"benefit"` (smallest margin recovering the starved tail to the
+    /// floor — real-embedding corpora) or `"cost-ceiling"` (largest cost-bounded margin that helps —
+    /// corpora that cannot reach the floor within budget, e.g. the hash corpus).
+    #[serde(default)]
+    pub selection_basis: String,
     pub shipping_flat_probes: f64,
     pub shipping_probe_budget: f64,
     pub rule: String,
@@ -681,6 +686,36 @@ pub struct AdaptiveEvidence {
 pub struct PolicyBound {
     pub bound: String,
     pub why_measurement_cannot_see_it: String,
+}
+
+/// Select the adaptive margin from a completed sweep: **benefit-first, cost-ceiling fallback.**
+///
+/// Pure so it is unit-testable against committed sweeps without re-running the heavy 768d measurement.
+/// * **benefit** — the smallest cost-bounded margin whose starved base recovers its p1 to the floor
+///   (the derivation a real-embedding corpus enables; real-v1 → 0.02);
+/// * **cost-ceiling** — where no cost-bounded margin reaches the floor (the hash corpus), the largest
+///   cost-bounded margin that at least lifts the starved base above its flat baseline (hash → 0.05).
+pub(crate) fn select_adaptive_margin<'a>(
+    sweep: &'a [AdaptiveRow],
+    flat_starved_p1: f32,
+    ceiling: f64,
+    p1_floor: f32,
+) -> Option<(&'a AdaptiveRow, &'static str)> {
+    let within = |r: &&AdaptiveRow| r.shipping_mean_probes <= ceiling;
+    if let Some(r) = sweep
+        .iter()
+        .filter(within)
+        .filter(|r| r.starved_p1_recall >= p1_floor)
+        .min_by(|a, b| a.margin.total_cmp(&b.margin))
+    {
+        return Some((r, "benefit"));
+    }
+    sweep
+        .iter()
+        .filter(within)
+        .filter(|r| r.starved_p1_recall > flat_starved_p1)
+        .max_by(|a, b| a.margin.total_cmp(&b.margin))
+        .map(|r| (r, "cost-ceiling"))
 }
 
 /// Sweep the adaptive margin against the frozen golden corpus.
@@ -776,24 +811,25 @@ pub fn sweep_adaptive(
         .map(|r| r.shipping_mean_probes)
         .unwrap_or(0.0);
 
-    // **The policy bound that actually selects the value (charter C-3).** On this corpus the
-    // recall floor at the shipping base is ALREADY met flat, so measurement cannot pick the margin
-    // by benefit -- every margin's shipping recall is identical. What measurement CAN see is cost:
-    // a larger margin probes more centroids on every query for a gain this corpus cannot show. So
-    // the bound is a worst-case cost ceiling -- adaptive must not more than 1.5x the flat probe
-    // count at the shipping base -- and among margins meeting it, we take the largest that also
-    // demonstrably HELPS the starved base (proving the mechanism fires on real boundary queries).
-    // The real derivation, by benefit, waits for a real-embedding corpus (issue #3).
+    // **Selection: benefit-first, cost-ceiling fallback (charter C-3).**
+    //
+    // The margin exists to recover the tail on cluster-boundary queries. Where the corpus can SHOW
+    // that recovery — a starved base whose p1 the margin lifts back to the floor — the honest choice
+    // is by BENEFIT: the SMALLEST margin that recovers the starved base's p1 to the floor, among
+    // cost-bounded margins. Smallest, because past the recovery point a larger margin only probes
+    // wider for no further tail gain. This is the derivation the hash corpus could not offer and a
+    // real-embedding corpus finally does (S13 dir 2; issue #3): on real-v1 the starved base recovers
+    // at margin 0.02.
+    //
+    // Where the corpus CANNOT reach the floor within budget — the hash embedder's degenerate motifs
+    // never do — fall back to COST: the largest cost-bounded margin that at least HELPS the starved
+    // base (starved_p1 above its flat baseline), proving the mechanism fires without overpaying. The
+    // cost ceiling is a worst-case bound: adaptive must not exceed 1.5x the flat probe count at the
+    // shipping base.
     const SHIPPING_PROBE_BUDGET: f64 = 1.5;
     let ceiling = shipping_flat_probes * SHIPPING_PROBE_BUDGET;
-
-    let chosen = sweep
-        .iter()
-        .filter(|r| r.shipping_mean_probes <= ceiling)
-        .filter(|r| r.starved_p1_recall > flat_starved_p1)
-        .max_by(|a, b| a.margin.total_cmp(&b.margin))
-        .cloned()
-        .ok_or_else(|| {
+    let (chosen, selection_basis) =
+        select_adaptive_margin(&sweep, flat_starved_p1, ceiling, p1_floor).ok_or_else(|| {
             PrismError::Invariant(
                 "no margin both stayed within the shipping cost budget and helped the starved \
                  base. Either the budget is too tight or the mechanism does not fire on this \
@@ -801,6 +837,7 @@ pub fn sweep_adaptive(
                     .into(),
             )
         })?;
+    let chosen = chosen.clone();
 
     let generation_id = engine
         .snapshot()?
@@ -816,6 +853,7 @@ pub fn sweep_adaptive(
         flat_starved_p1_recall: flat_starved_p1,
         chosen_margin: chosen.margin,
         chosen_margin_x1000: (chosen.margin * 1000.0).round() as i64,
+        selection_basis: selection_basis.to_string(),
         shipping_flat_probes,
         shipping_probe_budget: SHIPPING_PROBE_BUDGET,
         policy_bounds: vec![PolicyBound {
@@ -827,16 +865,17 @@ pub fn sweep_adaptive(
                     .into(),
         }],
         sweep,
-        rule: "the SMALLEST margin at which adaptive probing, applied to a base deliberately \
-               STARVED below the tail floor, recovers that floor with no query returning nothing. \
-               The starved base is the only place this corpus can show the mechanism working: at \
-               the shipping base the floor is already met, so there is nothing to recover, and the \
-               real payoff (fewer probes on easy queries) is deferred to a real-embedding corpus \
-               (issue #3). The sweep also PROVES monotonicity -- it refuses any margin that lowers \
-               shipping recall -- so every existing nprobe/width receipt stays valid as a floor."
+        rule: "BENEFIT-FIRST, cost-ceiling fallback. Where the corpus can show recovery, the SMALLEST \
+               cost-bounded margin whose starved base recovers its p1 to the floor (real-v1: 0.02); \
+               where it cannot reach the floor within budget (the hash corpus), the LARGEST \
+               cost-bounded margin that at least helps the starved base above its flat baseline \
+               (0.05). The starved base is where the mechanism is visible; the sweep also PROVES \
+               monotonicity -- it refuses any margin that lowers shipping recall -- so every nprobe/\
+               width receipt stays valid as a floor. `selection_basis` records which branch fired."
             .into(),
-        note: "S6, issue #1. v1 is monotone-only: adaptive probing adds probes for boundary \
-               queries and never subtracts, so recall can only improve. Corpus- AND \
+        note: "S6, issue #1; benefit-first selection added S13 dir 2 (issue #3 realised — the real \
+               corpus finally makes the payoff measurable). v1 is monotone-only: adaptive adds probes \
+               for boundary queries and never subtracts, so recall can only improve. Corpus- AND \
                generation-conditional: the cluster geometry that decides which queries sit on a \
                boundary is exactly what the hash embedder cannot represent faithfully."
             .into(),
@@ -1098,4 +1137,63 @@ pub fn measure_cost_model(now_ns: impl Fn() -> u128) -> Result<CostModelEvidence
                absurd coefficient; the plan choice needs the magnitude, not three digits."
             .into(),
     })
+}
+
+#[cfg(test)]
+mod adaptive_selection_tests {
+    use super::{select_adaptive_margin, AdaptiveRow};
+
+    fn row(margin: f64, starved_p1: f32, shipping_probes: f64) -> AdaptiveRow {
+        AdaptiveRow {
+            margin,
+            starved_p1_recall: starved_p1,
+            starved_zero_recall_queries: 0,
+            starved_mean_probes: 0.0,
+            shipping_p1_recall: 0.9,
+            shipping_mean_probes: shipping_probes,
+        }
+    }
+
+    /// real-v1 (committed in adaptive.json's real-v1 series): the cost ceiling never bites (base 14 is
+    /// near ADAPTIVE_MAX_NPROBE, so probes barely vary), so the choice is by BENEFIT — the smallest
+    /// margin whose starved base recovers to the 0.8 floor, which is 0.02.
+    #[test]
+    fn real_v1_selects_by_benefit_at_0_02() {
+        let sweep = [
+            row(0.0, 0.7, 210.0),
+            row(0.02, 0.9, 234.0),
+            row(0.05, 0.9, 239.7),
+            row(0.10, 0.9, 240.0),
+            row(0.15, 0.9, 240.0),
+            row(0.20, 0.9, 240.0),
+            row(0.30, 0.9, 240.0),
+            row(0.50, 0.9, 240.0),
+        ];
+        let ceiling = 210.0 * 1.5;
+        let (chosen, basis) = select_adaptive_margin(&sweep, 0.7, ceiling, 0.8).unwrap();
+        assert_eq!(basis, "benefit");
+        assert_eq!(chosen.margin, 0.02);
+    }
+
+    /// hash-v1 (retained series): no cost-bounded margin reaches the 0.8 floor at the starved base, so
+    /// the choice FALLS BACK to cost — the largest cost-bounded margin that helps at all, which is 0.05
+    /// (0.1 exceeds the 1.5x=33.9 probe ceiling). This proves the rule change did NOT move the retained
+    /// hash constant.
+    #[test]
+    fn hash_v1_falls_back_to_cost_ceiling_at_0_05() {
+        let sweep = [
+            row(0.0, 0.5, 22.615),
+            row(0.02, 0.5, 25.153),
+            row(0.05, 0.6, 29.163),
+            row(0.10, 0.6, 36.509),
+            row(0.15, 0.7, 45.644),
+            row(0.20, 0.7, 51.682),
+            row(0.30, 0.7, 58.615),
+            row(0.50, 1.0, 60.192),
+        ];
+        let ceiling = 22.615 * 1.5;
+        let (chosen, basis) = select_adaptive_margin(&sweep, 0.5, ceiling, 0.8).unwrap();
+        assert_eq!(basis, "cost-ceiling");
+        assert_eq!(chosen.margin, 0.05);
+    }
 }

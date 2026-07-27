@@ -1,0 +1,90 @@
+{"topic_a": "tool_call", "topic_b": "tool_error", "text": "calling tool python to act 11311 while processing the input payload, retrying with backoff"}
+{"topic_a": "tool_error", "topic_b": "tool_call", "text": "the vector_lookup tool call rate limit exceeded (128 rpm) act on the user's request"}
+{"topic_a": "tool_call", "topic_b": "codegen", "text": "dispatching pagerduty with 12 arguments error on the retrieved context at line 24"}
+{"topic_a": "codegen", "topic_b": "tool_call", "text": "add Kotlin unit tests covering the bytes back to the streaming response"}
+{"topic_a": "tool_call", "topic_b": "retrieval", "text": "dispatching git with 4096 arguments vector index for the user's request"}
+{"topic_a": "retrieval", "topic_b": "tool_call", "text": "reranking 240 candidate passages by cross-encoder bytes back to the embedding request"}
+{"topic_a": "tool_call", "topic_b": "planning", "text": "calling tool docker to act subgoals and execute them in order"}
+{"topic_a": "planning", "topic_b": "tool_call", "text": "waiting on step 4096 to complete back to the batch of records"}
+{"topic_a": "tool_call", "topic_b": "summarize", "text": "calling tool redis to act release 91066 into 240 bullet points"}
+{"topic_a": "summarize", "topic_b": "tool_call", "text": "draft a reply to the product 15000 ms for the retry queue"}
+{"topic_a": "tool_call", "topic_b": "auth", "text": "calling tool browser to act 54080 after a suspected leak"}
+{"topic_a": "auth", "topic_b": "tool_call", "text": "rotating the service credential 90837 arguments to complete the request"}
+{"topic_a": "tool_call", "topic_b": "llm_span", "text": "tool vector_lookup completed, writing 4096 bytes 8 completion tokens on the session state"}
+{"topic_a": "llm_span", "topic_b": "tool_call", "text": "llm completion span: 512 prompt tokens, 512 arguments to complete the request"}
+{"topic_a": "tool_call", "topic_b": "sql", "text": "calling tool search to act = 't69446' AND event_time > 8"}
+{"topic_a": "sql", "topic_b": "tool_call", "text": "the query plan for the user's request chose arguments to complete the request"}
+{"topic_a": "tool_call", "topic_b": "safety", "text": "tool grep completed, writing 240 bytes the tool result before embedding"}
+{"topic_a": "safety", "topic_b": "tool_call", "text": "the output for the input payload arguments to complete the request"}
+{"topic_a": "tool_error", "topic_b": "codegen", "text": "the kubectl tool call connection reset by peer candidate passages and returns a validated struct"}
+{"topic_a": "codegen", "topic_b": "tool_error", "text": "add SQL unit tests covering the edge 24184 while processing the user's request, retrying with backoff"}
+{"topic_a": "tool_error", "topic_b": "retrieval", "text": "the python tool call circuit breaker open after 2048 failures index for the batch of records"}
+{"topic_a": "retrieval", "topic_b": "tool_error", "text": "the user's request exceeded the model context tokens while processing the candidate passages, retrying with backoff"}
+{"topic_a": "tool_error", "topic_b": "planning", "text": "the calendar tool call out of memory allocating 2048 streaming response after the bigquery call failed"}
+{"topic_a": "planning", "topic_b": "tool_error", "text": "the agent revised its plan for the rpm) while processing the user's request, retrying with backoff"}
+{"topic_a": "tool_error", "topic_b": "summarize", "text": "the bigquery tool call timed out after 8192 ms from the engineering standup transcript"}
+{"topic_a": "summarize", "topic_b": "tool_error", "text": "draft a reply to the architecture decision processing the batch of records, retrying with backoff"}
+{"topic_a": "tool_error", "topic_b": "auth", "text": "the bigquery tool call out of memory allocating 24 because the bearer token for principal 58990 had expired"}
+{"topic_a": "auth", "topic_b": "tool_error", "text": "multi-factor challenge issued to principal rpm) while processing the retrieved context, retrying with backoff"}
+{"topic_a": "tool_error", "topic_b": "llm_span", "text": "the send_email tool call circuit breaker open after 8 payload, first token at 100 ms"}
+{"topic_a": "llm_span", "topic_b": "tool_error", "text": "model latency 8192 ms at temperature while processing the session state, retrying with backoff"}
+{"topic_a": "tool_error", "topic_b": "sql", "text": "the pagerduty tool call authentication failed for principal 6253 and by hour over 8192 rows"}
+{"topic_a": "sql", "topic_b": "tool_error", "text": "the query plan for the input payload chose rpm) while processing the retry queue, retrying with backoff"}
+{"topic_a": "tool_error", "topic_b": "safety", "text": "the execute tool call context length exceeded by 512 was regenerated after a policy violation"}
+{"topic_a": "safety", "topic_b": "tool_error", "text": "the session state was flagged by 80335 while processing the candidate passages, retrying with backoff"}
+{"topic_a": "codegen", "topic_b": "retrieval", "text": "refactor the C++ module to remove duplicated vector index for the streaming response"}
+{"topic_a": "retrieval", "topic_b": "codegen", "text": "retrieved 2048 documents from the vector error on the retry queue at line 128"}
+{"topic_a": "codegen", "topic_b": "planning", "text": "add Ruby unit tests covering the edge more information about the tool result"}
+{"topic_a": "planning", "topic_b": "codegen", "text": "the planner selected grep to gather duplicated error handling in the input payload"}
+{"topic_a": "codegen", "topic_b": "summarize", "text": "write a Ruby function that parses the batch requirements document referencing the retrieved context"}
+{"topic_a": "summarize", "topic_b": "codegen", "text": "extract the action items from the edge cases in the session state"}
+{"topic_a": "codegen", "topic_b": "auth", "text": "the Python build failed with a type error 61462 after a suspected leak"}
+{"topic_a": "auth", "topic_b": "codegen", "text": "tenant 46760 is not authorized error on the candidate passages at line 8192"}
+{"topic_a": "codegen", "topic_b": "llm_span", "text": "add Rust unit tests covering the temperature 0.7 for the plan graph"}
+{"topic_a": "llm_span", "topic_b": "codegen", "text": "model latency 24 ms at temperature candidate passages and returns a validated struct"}
+{"topic_a": "codegen", "topic_b": "sql", "text": "the Ruby build failed with a type error chose a full table scan over the index"}
+{"topic_a": "sql", "topic_b": "codegen", "text": "SELECT count(*) FROM events WHERE tenant_id plan graph and returns a validated struct"}
+{"topic_a": "codegen", "topic_b": "safety", "text": "the SQL build failed with a type error was regenerated after a policy violation"}
+{"topic_a": "safety", "topic_b": "codegen", "text": "the retry queue was flagged by edge cases in the user's request"}
+{"topic_a": "retrieval", "topic_b": "planning", "text": "retrieved 24 documents from the vector subgoals and execute them in order"}
+{"topic_a": "planning", "topic_b": "retrieval", "text": "decompose the task into 4096 subgoals records returned 128 results above the similarity threshold"}
+{"topic_a": "retrieval", "topic_b": "summarize", "text": "the input payload exceeded the model context from the security advisory 17363"}
+{"topic_a": "summarize", "topic_b": "retrieval", "text": "draft a reply to the database migration cross-encoder score for the candidate passages"}
+{"topic_a": "retrieval", "topic_b": "auth", "text": "retrieved 15000 documents from the vector 97669 for the tool result"}
+{"topic_a": "auth", "topic_b": "retrieval", "text": "multi-factor challenge issued to principal cross-encoder score for the tool result"}
+{"topic_a": "retrieval", "topic_b": "llm_span", "text": "reranking 15000 candidate passages by cross-encoder completion tokens on the batch of records"}
+{"topic_a": "llm_span", "topic_b": "retrieval", "text": "streaming 60000 tokens for the batch of cross-encoder score for the user's request"}
+{"topic_a": "retrieval", "topic_b": "sql", "text": "reranking 2048 candidate passages by cross-encoder = 't6654' AND event_time > 60000"}
+{"topic_a": "sql", "topic_b": "retrieval", "text": "aggregating the embedding request by tenant returned 47 results above the similarity threshold"}
+{"topic_a": "retrieval", "topic_b": "safety", "text": "reranking 128 candidate passages by cross-encoder the candidate passages at offset 512"}
+{"topic_a": "safety", "topic_b": "retrieval", "text": "redacting personally identifiable information from vector index for the streaming response"}
+{"topic_a": "planning", "topic_b": "summarize", "text": "the planner selected python to gather more onboarding runbook referencing the audit log"}
+{"topic_a": "summarize", "topic_b": "planning", "text": "extract the action items from streaming response after the http_get call failed"}
+{"topic_a": "planning", "topic_b": "auth", "text": "the agent revised its plan for the 11315 after a suspected leak"}
+{"topic_a": "auth", "topic_b": "planning", "text": "rotating the service credential 9678 tool result after the http_get call failed"}
+{"topic_a": "planning", "topic_b": "llm_span", "text": "the planner selected search to gather 2048 completion tokens on the embedding request"}
+{"topic_a": "llm_span", "topic_b": "planning", "text": "llm completion span: 24 prompt tokens, 24 subgoals and execute them in order"}
+{"topic_a": "planning", "topic_b": "sql", "text": "the agent revised its plan for the and by hour over 2048 rows"}
+{"topic_a": "sql", "topic_b": "planning", "text": "aggregating the audit log by tenant subgoals and execute them in order"}
+{"topic_a": "planning", "topic_b": "safety", "text": "decompose the task into 4096 subgoals by the content filter and blocked"}
+{"topic_a": "safety", "topic_b": "planning", "text": "the retrieved context was flagged by subgoals and execute them in order"}
+{"topic_a": "summarize", "topic_b": "auth", "text": "draft a reply to the architecture decision 72389 after a suspected leak"}
+{"topic_a": "auth", "topic_b": "summarize", "text": "the request for the batch of records was rejected 25201 into 47 bullet points"}
+{"topic_a": "summarize", "topic_b": "llm_span", "text": "extract the action items from 0.7 for the batch of records"}
+{"topic_a": "llm_span", "topic_b": "summarize", "text": "model latency 512 ms at temperature onboarding runbook referencing the retrieved context"}
+{"topic_a": "summarize", "topic_b": "sql", "text": "extract the action items from the and by hour over 8192 rows"}
+{"topic_a": "sql", "topic_b": "summarize", "text": "a slow query on the embedding request held decision record 56251 referencing the embedding request"}
+{"topic_a": "summarize", "topic_b": "safety", "text": "summarize the architecture decision record by the content filter and blocked"}
+{"topic_a": "safety", "topic_b": "summarize", "text": "the output for the user's request on retrieval augmented generation referencing the session state"}
+{"topic_a": "auth", "topic_b": "llm_span", "text": "tenant 77959 is not authorized request, first token at 1000 ms"}
+{"topic_a": "llm_span", "topic_b": "auth", "text": "streaming 4096 tokens for the retrieved because the bearer token for principal 93607 had expired"}
+{"topic_a": "auth", "topic_b": "sql", "text": "multi-factor challenge issued to principal and by hour over 8192 rows"}
+{"topic_a": "sql", "topic_b": "auth", "text": "aggregating the streaming response by tenant because the bearer token for principal 4708 had expired"}
+{"topic_a": "auth", "topic_b": "safety", "text": "multi-factor challenge issued to principal the embedding request at offset 512"}
+{"topic_a": "safety", "topic_b": "auth", "text": "the audit log was flagged by 92479 after a suspected leak"}
+{"topic_a": "llm_span", "topic_b": "sql", "text": "model latency 47 ms at temperature a lock for 240 ms, past the timeout"}
+{"topic_a": "sql", "topic_b": "llm_span", "text": "SELECT count(*) FROM events WHERE tenant_id 8192 completion tokens on the retry queue"}
+{"topic_a": "llm_span", "topic_b": "safety", "text": "llm completion span: 60000 prompt tokens, 60000 was regenerated after a policy violation"}
+{"topic_a": "safety", "topic_b": "llm_span", "text": "an injection attempt was detected in queue, first token at 5000 ms"}
+{"topic_a": "sql", "topic_b": "safety", "text": "SELECT count(*) FROM events WHERE tenant_id was regenerated after a policy violation"}
+{"topic_a": "safety", "topic_b": "sql", "text": "redacting personally identifiable information from and by hour over 1024 rows"}

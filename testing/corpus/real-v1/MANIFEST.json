@@ -17,15 +17,19 @@
     "sql",
     "safety"
   ],
-  "distinct_bodies": 2529,
+  "distinct_bodies": 2619,
   "queries": 60,
   "seed": 20260725,
   "generated_by": "scripts/gen-real-corpus.py",
   "note": "Embeddings generated ONCE and committed as data; nothing at test time runs a model or the network (S13 dir 1/5). C-2 frozen; a new corpus is a new version directory.",
   "sha256": {
-    "bodies.txt": "1eb355c4ed938df6f206a5978d3cee6c98bb9708a50ff13712d20d486acad898",
-    "embeddings.f32": "c8957285d14892f2b56985413de4600c9c284db74ee2f687b926852ceec11325",
+    "bodies.txt": "0adb4231e3e4b59c58f695bf26247e369a721f45cfdadee82eafc6c784a71824",
+    "embeddings.f32": "56313a5bbd47f5a9b76fb61e7aa16935de58cf98ec891ca688faed1e39f1b020",
     "events.jsonl": "8836157a1261087c74cb41405cabc2f120a1c0cad699a9f867b33b1557e1d1be",
-    "queries.jsonl": "b5f58e988d8d6abcbba06966ad420f7b4fcc742473d80e1d0973e059b0377c41"
-  }
+    "queries.jsonl": "b5f58e988d8d6abcbba06966ad420f7b4fcc742473d80e1d0973e059b0377c41",
+    "boundary_queries.jsonl": "33168d3ca1b6d5298d9bf03e41fa0f23acf289333e900c1d73a32d2d1ab6e064"
+  },
+  "boundary_queries": 90,
+  "boundary_seed": 20260727,
+  "boundary_note": "Cluster-boundary queries (S13 dir 2) appended by scripts/gen-real-corpus-boundary.py: half a render of topic A + half a render of topic B, embedded by the same model and APPENDED so every existing row (and thus every prior receipt) is byte-identical. Drives the nprobe/adaptive tail (p1/p5) re-derivation; kept separate from queries.jsonl so \u03b5 is untouched."
 }

@@ -1074,18 +1074,18 @@ fn cluster_boundary_queries_are_what_expose_the_recall_tail() {
         "the tail is supposed to be catastrophic here"
     );
 
-    // The derived default: nobody is left behind.
-    let dflt = oracle::measure_recall(
-        &engine,
-        &golden,
-        prism_types::query::DEFAULT_NPROBE,
-        200,
-        50,
+    // The derived default: nobody is left behind. This test lives on the HASH corpus, so it uses the
+    // HASH series' own chosen nprobe (retained in the receipt), NOT the shipped DEFAULT_NPROBE — which
+    // S13 dir 2 re-derived on real-v1 (14) and no longer describes this corpus's geometry.
+    let prov: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(repo_root().join("testing/evidence/nprobe.json")).unwrap(),
     )
     .unwrap();
+    let hash_nprobe = prov["series"]["hash-v1"]["chosen_nprobe"].as_u64().unwrap() as usize;
+    let dflt = oracle::measure_recall(&engine, &golden, hash_nprobe, 200, 50).unwrap();
     assert_eq!(
         dflt.zero_recall_queries, 0,
-        "the default probe count still fails {} queries entirely",
+        "the hash-derived probe count still fails {} queries entirely",
         dflt.zero_recall_queries
     );
     assert!(

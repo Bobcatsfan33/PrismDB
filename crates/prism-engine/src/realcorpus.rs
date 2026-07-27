@@ -25,11 +25,23 @@ pub struct RealQuery {
     pub text: String,
 }
 
+/// A **cluster-boundary** query (S13 dir 2): its text lands between topics `a` and `b`, so its true
+/// neighbours are split across two centroids. This is the query class a mean recall hides and a small
+/// `nprobe` fails completely on — the tail the nprobe default is derived to hold.
+#[derive(Clone, Debug)]
+pub struct BoundaryQuery {
+    pub topic_a: String,
+    pub topic_b: String,
+    pub text: String,
+}
+
 /// The loaded frozen corpus: the committed body→embedding map, the events, and the queries.
 pub struct RealCorpus {
     embeddings: Arc<HashMap<String, Vec<f32>>>,
     pub events: Vec<Event>,
     pub queries: Vec<RealQuery>,
+    /// Cluster-boundary queries (`boundary_queries.jsonl`); empty if the corpus predates them.
+    pub boundary_queries: Vec<BoundaryQuery>,
 }
 
 impl RealCorpus {
@@ -81,10 +93,30 @@ impl RealCorpus {
             })
             .collect::<Result<_>>()?;
 
+        // Boundary queries are optional (a corpus may predate S13 dir 2). Absent file → empty set.
+        let boundary_queries: Vec<BoundaryQuery> =
+            match std::fs::read_to_string(dir.join("boundary_queries.jsonl")) {
+                Ok(s) => s
+                    .lines()
+                    .filter(|l| !l.trim().is_empty())
+                    .map(|l| {
+                        let v: serde_json::Value = serde_json::from_str(l)?;
+                        Ok(BoundaryQuery {
+                            topic_a: v["topic_a"].as_str().unwrap_or_default().to_string(),
+                            topic_b: v["topic_b"].as_str().unwrap_or_default().to_string(),
+                            text: v["text"].as_str().unwrap_or_default().to_string(),
+                        })
+                    })
+                    .collect::<Result<_>>()?,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+                Err(e) => return Err(PrismError::from(e)),
+            };
+
         Ok(RealCorpus {
             embeddings: Arc::new(embeddings),
             events,
             queries,
+            boundary_queries,
         })
     }
 
