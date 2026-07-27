@@ -71,7 +71,7 @@
       "evidence": "testing/evidence/widths.json",
       "evidence_key": "chosen_candidates",
       "rule": "swept JOINTLY with DEFAULT_RERANK against the frozen golden corpus, holding nprobe at its own receipted value. They interact -- the candidate width decides who is allowed to be reranked, the rerank width decides how many of them actually are -- so an independent single-axis sweep of either measures a cross-section of a surface and reports it as the surface. Among the points clearing both tail floors (p1 recall@10 >= 0.8 AND zero_recall_queries == 0, the same floors nprobe was chosen against), smallest rerank first, then smallest candidates.",
-      "corpus_version": "v1",
+      "corpus_version": "real-v1",
       "corpus_conditional": true,
       "corpus_conditional_reason": "derived on the deterministic hash-embedder corpus, whose motifs are unusually well-separated. On a real embedding space this value may move -- issue #3.",
       "policy_bounds": [
@@ -81,7 +81,8 @@
         }
       ],
       "generation_conditional": true,
-      "generation_conditional_reason": "A new codebook generation changes the PQ geometry, so this constant may not transfer across one. Re-sweep on a new generation -- the same standing obligation as re-sweeping on a real-embedding corpus (charter C-3, issue #3)."
+      "generation_conditional_reason": "A new codebook generation changes the PQ geometry, so this constant may not transfer across one. Re-sweep on a new generation -- the same standing obligation as re-sweeping on a real-embedding corpus (charter C-3, issue #3).",
+      "geometry_sensitivity": "sensitive"
     },
     {
       "name": "DEFAULT_RERANK",
@@ -89,8 +90,8 @@
       "kind": "tuned",
       "evidence": "testing/evidence/widths.json",
       "evidence_key": "chosen_rerank",
-      "rule": "swept JOINTLY with DEFAULT_CANDIDATES; see that entry. THE RECALL FLOORS DO NOT BIND ON THIS CORPUS -- every point in the grid clears them, because PQ's top-10 already contains the true top-10 -- so the binding constraint is MIN_PAGEABLE_ROWS: the paginated result set IS the rerank survivor set, and rerank=10 with a page size of 10 would make the cursor decorative. Rerank leads the ordering because it is the expensive control: an exact vector is ~32x a coded row.",
-      "corpus_version": "v1",
+      "rule": "swept JOINTLY with DEFAULT_CANDIDATES holding nprobe at its receipted value (14, D-081). Among points clearing both tail floors (p1 recall@10>=0.8, zero empties), smallest rerank then smallest candidates, subject to rerank>=MIN_PAGEABLE_ROWS (the paginated result set IS the rerank survivor set). S13 dir 2 re-derived on real-v1: recall now BINDS at exactly the policy floor \u2014 rerank=25 gives p1 0.600 (fails), rerank=50 gives 0.900 (clears), so the recall-only minimum rerank rose from 10 (hash, fully slack) to 50, coinciding with MIN_PAGEABLE_ROWS. Value unchanged (50) but now doubly justified. Recall is flat in candidates (nprobe=14 delivers the true neighbours into a 50-wide heap), so candidates=rerank=50 is the minimum-memory choice.",
+      "corpus_version": "real-v1",
       "corpus_conditional": true,
       "corpus_conditional_reason": "derived on the deterministic hash-embedder corpus, whose motifs are unusually well-separated. On a real embedding space this value may move -- issue #3.",
       "policy_bounds": [
@@ -100,7 +101,8 @@
         }
       ],
       "generation_conditional": true,
-      "generation_conditional_reason": "A new codebook generation changes the PQ geometry, so this constant may not transfer across one. Re-sweep on a new generation -- the same standing obligation as re-sweeping on a real-embedding corpus (charter C-3, issue #3)."
+      "generation_conditional_reason": "A new codebook generation changes the PQ geometry, so this constant may not transfer across one. Re-sweep on a new generation -- the same standing obligation as re-sweeping on a real-embedding corpus (charter C-3, issue #3).",
+      "geometry_sensitivity": "sensitive"
     },
     {
       "name": "KMEANS_RESTARTS",

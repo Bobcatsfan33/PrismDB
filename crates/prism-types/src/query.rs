@@ -94,26 +94,28 @@ pub fn adaptive_nprobe(dists: &[f32], base: usize, margin: f32, max: usize) -> u
 /// to be reranked*; the rerank width decides *how many of them actually are*. A rerank
 /// budget of 200 buys nothing if only 50 candidates ever entered the heap.
 ///
-/// The receipt is `testing/evidence/widths.json`.
+/// **S13 dir 2 — re-derived on real-v1: recall is *flat* in candidates.** At a fixed rerank width,
+/// candidate widths from 25 to 800 give identical p1 recall — because [`DEFAULT_NPROBE`] (14) already
+/// delivers the true neighbours into even a 50-wide heap, so a wider heap buys nothing but memory and
+/// I/O. So the candidate width is pinned to the rerank width (`= 50`, the minimum feasible since
+/// `rerank <= candidates`). The receipt is `testing/evidence/widths.json` (geometry-sensitive).
 pub const DEFAULT_CANDIDATES: usize = 50;
 
 /// Default rerank width — the declared exact-vector fetch budget.
 ///
-/// Derived jointly with [`DEFAULT_CANDIDATES`], and **the binding constraint is not
-/// recall**: on the golden corpus every point in the grid clears the tail floors, because
-/// PQ's top-10 already contains the true top-10. Left there, the sweep would have chosen
-/// `rerank = 10` — the hard floor, since you cannot return ten hits from fewer than ten
-/// reranked rows — and that would be overfitting to a synthetic corpus with unusually
-/// well-separated motifs.
+/// Derived jointly with [`DEFAULT_CANDIDATES`]. On the *hash* corpus the binding constraint was **not
+/// recall**: every grid point cleared the tail floors (PQ's top-10 already held the true top-10), so
+/// the sweep would have chosen `rerank = 10` — overfitting a synthetic corpus — were it not for a
+/// *policy* bound. **The paginated result set *is* the rerank survivor set** (`docs/QUERY-CONTRACT.md`
+/// §4), so a rerank of 10 at a page size of 10 makes the first page the whole result and the cursor
+/// decorative; the derivation carries `MIN_PAGEABLE_ROWS = 50`.
 ///
-/// It would also quietly break pagination. **The paginated result set *is* the rerank
-/// survivor set** (`docs/QUERY-CONTRACT.md` §4), so a rerank width of 10 with a page size
-/// of 10 makes the first page the entire result and the cursor decorative. So the
-/// derivation carries a *policy* bound — `MIN_PAGEABLE_ROWS = 50`, five pages at the
-/// default page size — and that bound is what actually selects the value.
-///
-/// Rerank is the expensive control: an exact vector is ~32x a coded row, so one rerank
-/// fetch costs 32 rows of scanning. The candidate heap costs memory, not I/O.
+/// **S13 dir 2 — on real-v1 the recall floor now BINDS, at exactly that policy floor.** rerank=25 gives
+/// p1 recall 0.600 (fails the 0.8 floor), rerank=50 gives 0.900 (clears), and recall saturates there —
+/// so the recall-only minimum rerank rose from 10 (hash) to **50**, coinciding with `MIN_PAGEABLE_ROWS`.
+/// The value is unchanged but now **doubly justified**: recall *and* pagination both land on 50, where
+/// the hash corpus had only policy holding it up. Rerank stays the expensive control (an exact vector
+/// is ~32x a coded row); the candidate heap costs memory, not I/O.
 pub const DEFAULT_RERANK: usize = 50;
 
 /// The **overfetch margin** for threshold-query candidate bounding ([D-074](../../../docs/DECISIONS.md)).
