@@ -10,10 +10,14 @@ use prism_engine::realcorpus::RealCorpus;
 use prism_engine::Engine;
 use prism_part::store::{StoreConfig, STORE_VERSION};
 use prism_types::vector::l2_sq;
+use prism_types::Query;
 use std::path::PathBuf;
 
+static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn tmp() -> PathBuf {
-    let p = std::env::temp_dir().join(format!("prism-eps-{}", std::process::id()));
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let p = std::env::temp_dir().join(format!("prism-eps-{}-{}", std::process::id(), n));
     let _ = std::fs::remove_dir_all(&p);
     p
 }
@@ -103,6 +107,128 @@ fn rederive_threshold_epsilon_on_real_v1() {
     assert!(
         p999 <= epsilon,
         "real-v1 p999 {p999} exceeds the receipted ε {epsilon}; re-derive the margin (C-6)"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// **The cost of ε=0.30 (S13 dir 2, addition 1).** ε is a recall margin; its price is *overfetch* —
+/// the relaxed candidate bound `l2² ≤ 2(1−τ) + ε` admits rows that the exact τ then rejects. This
+/// measures the overfetch ratio (candidates admitted / rows that actually clear τ) across selectivities
+/// on real-v1, and shows the S9 state-budget refusal firing when the margin admits past its budget. ε is
+/// NOT tightened below the receipted p999 to make the number look better — the quantile is the recall
+/// contract; a severe overfetch is a finding to file, not a knob to turn.
+#[test]
+#[ignore]
+fn epsilon_overfetch_cost_on_real_v1() {
+    let corpus = RealCorpus::load_default().unwrap();
+    let root = tmp();
+    let engine = Engine::init(&root, config())
+        .unwrap()
+        .with_plane(corpus.plane());
+    engine
+        .ingest(corpus.events.clone(), 1_760_000_000_000)
+        .unwrap();
+    let snap = engine.snapshot().unwrap();
+    let total = corpus.events.len();
+
+    // Disarmed: measure the SHIPPED ε=0.30 as it bites on natural geometry (no injection).
+    prism_engine::search::inject_threshold_margin(None, None);
+    eprintln!("\n===== ε=0.30 OVERFETCH COST (real-v1, {total} rows, shipped margin) =====");
+    eprintln!("  τ    queries  qualify(med)  overfetch_med  overfetch_max  admit%(med)");
+    for tau in [0.20f32, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80] {
+        let mut ratios: Vec<f64> = Vec::new();
+        let mut admit_frac: Vec<f64> = Vec::new();
+        let mut quals: Vec<usize> = Vec::new();
+        let mut zero_qual = 0usize;
+        for q in &corpus.queries {
+            let query = Query {
+                text: q.text.clone(),
+                k: total,   // no width cap: keep every row clearing exact τ
+                nprobe: 64, // = nlist: scan all cells, so admitted is the true relaxed-bound count
+                candidates: total,
+                rerank: total,
+                threshold: Some(tau),
+                ..Default::default()
+            };
+            let r = engine.search_at(&snap, &query).unwrap();
+            let qualifying = r.hits.len();
+            let admitted = r.counters.candidates_considered;
+            admit_frac.push(admitted as f64 / total as f64);
+            if qualifying == 0 {
+                zero_qual += 1;
+            } else {
+                quals.push(qualifying);
+                ratios.push(admitted as f64 / qualifying as f64);
+            }
+        }
+        ratios.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        admit_frac.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        quals.sort_unstable();
+        let med = |v: &[f64]| {
+            if v.is_empty() {
+                f64::NAN
+            } else {
+                v[v.len() / 2]
+            }
+        };
+        let medq = if quals.is_empty() {
+            0
+        } else {
+            quals[quals.len() / 2]
+        };
+        eprintln!(
+            "{tau:.2}   {:>3}({}·0q)   {:>10}   {:>12.2}   {:>12.2}   {:>9.1}%",
+            corpus.queries.len(),
+            zero_qual,
+            medq,
+            med(&ratios),
+            ratios.last().copied().unwrap_or(f64::NAN),
+            med(&admit_frac) * 100.0
+        );
+    }
+    eprintln!(
+        "overfetch_med/max = candidates admitted by the relaxed bound / rows clearing exact τ."
+    );
+    eprintln!(
+        "admit% = fraction of the whole corpus the candidate phase kept (scan-all nprobe).\n"
+    );
+
+    // The S9 state-budget refusal still fires when the margin admits past the budget. Inject a small
+    // budget and a broad τ; the query is refused by name, never answered short.
+    prism_engine::search::inject_threshold_margin(None, Some(200));
+    let broad = Query {
+        text: corpus.queries[0].text.clone(),
+        k: total,
+        nprobe: 64,
+        candidates: total,
+        rerank: total,
+        threshold: Some(0.1),
+        ..Default::default()
+    };
+    let refused = engine.search_at(&snap, &broad);
+    prism_engine::search::inject_threshold_margin(None, None);
+    let refused_ok = refused
+        .as_ref()
+        .err()
+        .map(|e| e.to_string())
+        .unwrap_or_default();
+    eprintln!(
+        "state-budget refusal (budget=200, τ=0.1): {}",
+        if refused.is_err() {
+            format!("REFUSED — {refused_ok}")
+        } else {
+            "did NOT fire".into()
+        }
+    );
+    eprintln!("note: real-v1 is {total} rows; the production 100k state budget never fires at this scale.");
+    eprintln!(
+        "The refusal is SCALE-DEPENDENT: at N rows a broad-τ query admits admit%·N, refusing past"
+    );
+    eprintln!("THRESHOLD_STATE_BUDGET. The overfetch RATIO above is scale-free and is the number to file.");
+    eprintln!("=====================================================================\n");
+    assert!(
+        refused.is_err() && refused_ok.contains("state budget"),
+        "the S9 state-budget refusal must still fire under the shipped margin when admits exceed budget"
     );
     let _ = std::fs::remove_dir_all(&root);
 }

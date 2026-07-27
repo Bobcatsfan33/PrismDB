@@ -35,6 +35,22 @@
     "orders_of_magnitude": 5.5,
     "mechanism": "The hash embedder produces a handful of near-identical motif vectors, so PQ reconstruction is near-exact and |adc - true l2²| ≈ 1e-6 — a degenerate artifact. Real 768d all-mpnet embeddings are CONTINUOUS and spread across the sphere, so product quantization (96 subquantizers, 256 codes each) leaves a real reconstruction error whose p999 is ~0.28 in squared-L2 units. The margin the recall contract actually needs is ~300000x what the hash corpus implied. This validates the D-074 margin-injection paths against natural geometry: at ε=0.30 the relaxed bound genuinely overfetches and rerank genuinely prunes back, where at 1e-6 both were vacuous."
   },
+  "cost": {
+    "_what": "The price of ε=0.30 is OVERFETCH: the relaxed candidate bound l2² ≤ 2(1−τ)+ε admits rows the exact τ then rejects. Measured on real-v1 (60 queries × 3000 rows, scan-all nprobe=64) by tests/rederive_epsilon.rs::epsilon_overfetch_cost_on_real_v1. overfetch_ratio = candidates admitted / rows clearing exact τ; admit_pct = fraction of the whole corpus the candidate phase kept.",
+    "by_selectivity": [
+      { "tau": 0.20, "qualify_med": 1103, "overfetch_med": 2.69, "overfetch_max": 12.25, "admit_pct": 98.2 },
+      { "tau": 0.30, "qualify_med": 400,  "overfetch_med": 5.74, "overfetch_max": 21.19, "admit_pct": 79.9 },
+      { "tau": 0.40, "qualify_med": 176,  "overfetch_med": 6.28, "overfetch_max": 25.00, "admit_pct": 37.5 },
+      { "tau": 0.50, "qualify_med": 62,   "overfetch_med": 5.38, "overfetch_max": 15.28, "admit_pct": 11.8 },
+      { "tau": 0.60, "qualify_med": 34,   "overfetch_med": 4.35, "overfetch_max": 16.30, "admit_pct": 4.2 },
+      { "tau": 0.70, "qualify_med": 18,   "overfetch_med": 3.08, "overfetch_max": 32.50, "admit_pct": 1.8 },
+      { "tau": 0.80, "qualify_med": 6,    "overfetch_med": 3.85, "overfetch_max": 50.00, "admit_pct": 0.9 }
+    ],
+    "finding": "Overfetch is MATERIAL: median 2.7–6.3x (peaking ~6.3x at moderate selectivity τ≈0.40), worst-case up to 50x on tight answers. At BROAD selectivity (τ=0.20) the candidate phase admits 98.2% of the corpus — the answer set is already most of the corpus, so the overfetch RATIO is modest (2.7x) but the ABSOLUTE work is a near-full scan. This is exactly where the S9 state-budget refusal is the safety valve: at production scale a broad-τ query admits admit_pct·N rows and is REFUSED past THRESHOLD_STATE_BUDGET (100k) rather than reranked without bound — verified firing at an injected budget of 200 on real-v1.",
+    "state_budget_refusal": "Scale-dependent. On real-v1 (3000 rows) the production 100k budget never fires; the refusal was demonstrated with an injected budget=200 at τ=0.1 (named, cites D-074). At N rows a broad-τ query admits ~admit_pct·N candidates; the refusal fires when that exceeds THRESHOLD_STATE_BUDGET.",
+    "improvement_path": "Filed as issue #8 (do NOT tighten ε below the receipted p999 — the quantile IS the recall contract). Two candidate mechanisms: (1) asymmetric bound tightening — the +ε margin only needs to cover the p999 of the ONE-SIDED error adc − true_l2² > 0 (rows the approximation over-estimates are already safe), so a tighter one-sided quantile could halve the admitted set without touching recall; (2) a residual/refinement pass — a cheap second-stage exact distance on the admitted candidates before full rerank, bounding the rerank input at moderate selectivities where overfetch peaks (~6x at τ≈0.40).",
+    "not_tightened_below_p999": true
+  },
   "corpus_conditional": true,
   "generation_conditional": true,
   "_honest_wall": "This is the real number the README's recall/threshold economics stand on, not the hash corpus's flattering 1e-6. ε is the MOST geometry-sensitive constant in the ledger: it MUST be re-derived per real-embedding corpus and per generation (C-3/C-6), forever."
