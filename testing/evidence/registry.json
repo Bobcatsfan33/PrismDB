@@ -50,12 +50,12 @@
     },
     {
       "name": "BLOCK_SIZE",
-      "value": 2048,
+      "value": 16384,
       "kind": "tuned",
       "evidence": "testing/evidence/block-size.json",
       "evidence_key": "chosen_block_size",
       "rule": "the block size minimising physically-read bytes across the golden query set (whole blocks, frame headers and over-read, measured by the reader), subject to the block DIRECTORY staying under 4 bytes/row. The budget is on the directory term ALONE, isolated by subtracting the fixed manifest overhead (the S4/S5 per-tenant-stats and lineage extensions, which do not scale with block size) -- before S6 the manifest was small enough that whole-manifest was a fine proxy, but the extensions broke that. Re-derived from 4096 to 2048 in S6 when the sweep was re-run against the current engine (determinism contract \u00a75): the corrected directory budget makes 2048 eligible, and it reads fewer bytes than 4096.",
-      "corpus_version": "v1",
+      "corpus_version": "real-v1",
       "corpus_conditional": true,
       "corpus_conditional_reason": "derived on the deterministic hash-embedder corpus, whose motifs are unusually well-separated. On a real embedding space this value may move -- issue #3.",
       "policy_bounds": [
@@ -66,7 +66,8 @@
       ],
       "generation_conditional": true,
       "generation_conditional_reason": "A new codebook generation changes the PQ geometry, so this constant may not transfer across one. Re-sweep on a new generation -- the same standing obligation as re-sweeping on a real-embedding corpus (charter C-3, issue #3).",
-      "upstream": []
+      "upstream": [],
+      "geometry_sensitivity": "stable"
     },
     {
       "name": "DEFAULT_CANDIDATES",

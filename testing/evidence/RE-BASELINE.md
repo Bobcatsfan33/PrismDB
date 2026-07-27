@@ -20,10 +20,10 @@ one pass at the *end*, not per constant.
 
 ## Config-superseded receipts (tagged)
 
-| Receipt | Measured at | Why superseded |
+| Receipt | Measured at | Status |
 |---|---|---|
-| `block-size.json` | `DEFAULT_NPROBE=6`, hash corpus | `sweep_block_size` builds its golden via `oracle::build` → default query (nprobe=6); its `bytes_read`, `read_amplification`, and `query_p50_ms` are all at the old probe count. The *chosen block size* (a bytes-moved trade-off) is robust to nprobe, but the absolute numbers are not. |
-| `s12-scaling.json` | explicit `nprobe=16`, hash corpus | Used explicit probe counts, not the default, so it is not superseded *by the nprobe change alone* — but it predates D-081 and was measured on the hash corpus at a pre-real operating point. The scaling **lower bound** is re-run at the re-derived constants on real-v1 for an honest S16 inheritance. |
+| `block-size.json` | ~~`DEFAULT_NPROBE=6`, hash corpus~~ → **re-derived on real-v1** | **Resolved.** Re-derived on the real 768d corpus at restarts=8/nprobe=11 (D-083 pass): `DEFAULT_BLOCK_SIZE` **2048 → 16384**, because the 12×-wider exact-rerank column pushes smaller blocks past the directory-openability budget. The hash 64d sweep is retained as the paired series. No longer a pending baseline — it is a current constant receipt. |
+| `s12-scaling.json` | explicit `nprobe=16`, hash corpus | **Still pending.** Used explicit probe counts, not the default, so it is not superseded *by the nprobe change alone* — but it predates D-081 and was measured on the hash corpus at a pre-real operating point. The scaling **lower bound** is re-run at the final constants (restarts=8 / nprobe=11) on real-v1 for an honest S16 inheritance. |
 
 Correctness receipts (nprobe.json, adaptive.json, pq-margin.json, widths.json, kmeans-restarts.json,
 fp16.json) are **derivations**, not performance baselines — they are re-derived per corpus/generation

@@ -83,7 +83,15 @@ pub const BYTE_ORDER_LITTLE: u8 = 0;
 // Re-derived from 4 KiB to 2 KiB in S6: the S4/S5 manifest extensions grew the fixed
 // per-part overhead, so the block-size sweep's budget was corrected to the DIRECTORY term alone
 // and re-run against the current engine (docs/DETERMINISM-CONTRACT.md §5; testing/evidence/block-size.json).
-pub const DEFAULT_BLOCK_SIZE: u32 = 2 * 1024;
+//
+// S13 dir 2: re-derived from 2 KiB to 16 KiB on the real 768d corpus. This is NOT embedding-geometry
+// sensitive (it turns on column sizes and row counts, not cluster structure, so it is not downstream of
+// KMEANS_RESTARTS) — but it IS dimension-sensitive: the 768d exact-rerank column is 12x wider than the
+// hash corpus's 64d, so smaller blocks now blow the 4-byte/row directory budget (2 KiB → 25.4 bytes/row,
+// ineligible), and among the block sizes that fit, 16 KiB reads the fewest bytes. It is classified
+// geometry-STABLE (an engineering default; re-derive on the COLUMN LAYOUT changing, not per corpus or
+// generation). See testing/evidence/block-size.json (real-v1 series) and D-083's re-derivation pass.
+pub const DEFAULT_BLOCK_SIZE: u32 = 16 * 1024;
 
 /// Retained as the v2 block size: v2 parts have no per-column block size field, so
 /// they are all this, forever.

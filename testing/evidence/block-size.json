@@ -1,117 +1,270 @@
 {
   "constant": "BLOCK_SIZE",
-  "chosen_block_size": 2048,
-  "rule": "the block size minimising physically-read bytes across the golden query set (whole blocks, frame headers and block over-read included, as measured by the reader itself), SUBJECT TO the manifest block directory staying under 4 bytes per row. The constraint is what stops the sweep collapsing onto its own smallest candidate: the directory is read in full on every part open, including opens that prune the part away, so at 512-byte blocks a billion-row part would carry a ~16 GB directory. Ties go to the smaller block, because smaller blocks localize damage more tightly.",
-  "corpus_rows": 2000,
-  "dim": 64,
-  "nlist": 32,
-  "pq_m": 8,
+  "shipped_series": "real-v1",
+  "geometry_sensitivity": "stable",
+  "upstream": [],
+  "_what": "DEFAULT_BLOCK_SIZE (C-1): the default column block size for new parts (every part records its own, so this is a default not a law). A bytes-moved trade-off \u2014 bigger blocks over-read on a ranged fetch, smaller blocks grow the block directory every reader loads on every open. Rule: minimise physically-read bytes across the golden query set, SUBJECT TO the directory staying under MANIFEST_BUDGET_BYTES_PER_ROW (4/row); ties to the smaller block.",
+  "chosen_block_size": 16384,
+  "corpus_rows": 3000,
+  "dim": 768,
+  "nlist": 64,
+  "pq_m": 96,
   "queries": 9,
   "sweep": [
     {
       "block_size": 512,
-      "manifest_bytes": 43781,
-      "bytes_read": 51530958,
-      "read_amplification": 29.51967292375095,
-      "total_bytes": 56084182,
-      "query_p50_ms": 7.486458,
-      "recall_at_10": 0.998077,
-      "directory_bytes_per_row": 13.808,
-      "manifest_bytes_per_row": 21.8905
+      "bytes_read": 98801418,
+      "directory_bytes_per_row": 104.18133333333333,
+      "eligible": false,
+      "manifest_bytes": 398258
     },
     {
       "block_size": 1024,
-      "manifest_bytes": 29749,
-      "bytes_read": 54610614,
-      "read_amplification": 31.283863642612943,
-      "total_bytes": 57704510,
-      "query_p50_ms": 7.709708,
-      "recall_at_10": 0.998077,
-      "directory_bytes_per_row": 6.792,
-      "manifest_bytes_per_row": 14.8745
+      "bytes_read": 109509266,
+      "directory_bytes_per_row": 51.626666666666665,
+      "eligible": false,
+      "manifest_bytes": 240594
     },
     {
       "block_size": 2048,
-      "manifest_bytes": 22597,
-      "bytes_read": 61712174,
-      "read_amplification": 35.352014839188655,
-      "total_bytes": 64062262,
-      "query_p50_ms": 8.138542000000001,
-      "recall_at_10": 0.998077,
-      "directory_bytes_per_row": 3.216,
-      "manifest_bytes_per_row": 11.2985
+      "bytes_read": 134434962,
+      "directory_bytes_per_row": 25.429333333333332,
+      "eligible": false,
+      "manifest_bytes": 162002
     },
     {
       "block_size": 4096,
-      "manifest_bytes": 18901,
-      "bytes_read": 76271566,
-      "read_amplification": 43.69240877886034,
-      "total_bytes": 78237270,
-      "query_p50_ms": 9.140417,
-      "recall_at_10": 0.998077,
-      "directory_bytes_per_row": 1.368,
-      "manifest_bytes_per_row": 9.4505
+      "bytes_read": 182035650,
+      "directory_bytes_per_row": 12.608,
+      "eligible": false,
+      "manifest_bytes": 123538
     },
     {
       "block_size": 8192,
-      "manifest_bytes": 17381,
-      "bytes_read": 99563766,
-      "read_amplification": 57.03541951183744,
-      "total_bytes": 101371390,
-      "query_p50_ms": 10.775666,
-      "recall_at_10": 0.998077,
-      "directory_bytes_per_row": 0.608,
-      "manifest_bytes_per_row": 8.6905
+      "bytes_read": 263900746,
+      "directory_bytes_per_row": 6.192,
+      "eligible": false,
+      "manifest_bytes": 104290
     },
     {
       "block_size": 16384,
-      "manifest_bytes": 16725,
-      "bytes_read": 141182150,
-      "read_amplification": 80.87664294290717,
-      "total_bytes": 142921550,
-      "query_p50_ms": 13.744,
-      "recall_at_10": 0.998077,
-      "directory_bytes_per_row": 0.28,
-      "manifest_bytes_per_row": 8.3625
+      "bytes_read": 391199162,
+      "directory_bytes_per_row": 3.04,
+      "eligible": true,
+      "manifest_bytes": 94834
     },
     {
       "block_size": 65536,
-      "manifest_bytes": 16261,
-      "bytes_read": 365400294,
-      "read_amplification": 209.32071872450803,
-      "total_bytes": 367091438,
-      "query_p50_ms": 30.839167,
-      "recall_at_10": 0.998077,
-      "directory_bytes_per_row": 0.048,
-      "manifest_bytes_per_row": 8.1305
+      "bytes_read": 602322594,
+      "directory_bytes_per_row": 0.704,
+      "eligible": true,
+      "manifest_bytes": 87826
     },
     {
       "block_size": 262144,
-      "manifest_bytes": 16165,
-      "bytes_read": 798554086,
-      "read_amplification": 457.45424392546494,
-      "total_bytes": 800235246,
-      "query_p50_ms": 60.133542,
-      "recall_at_10": 0.998077,
-      "directory_bytes_per_row": 0.0,
-      "manifest_bytes_per_row": 8.0825
+      "bytes_read": 602322594,
+      "directory_bytes_per_row": 0.13333333333333333,
+      "eligible": true,
+      "manifest_bytes": 86114
     },
     {
       "block_size": 1048576,
-      "manifest_bytes": 16165,
-      "bytes_read": 798554086,
-      "read_amplification": 457.45424392546494,
-      "total_bytes": 800235246,
-      "query_p50_ms": 60.102208,
-      "recall_at_10": 0.998077,
+      "bytes_read": 602322594,
       "directory_bytes_per_row": 0.0,
-      "manifest_bytes_per_row": 8.0825
+      "eligible": true,
+      "manifest_bytes": 85714
     }
   ],
-  "note": "Measured, not modelled: a real store is built at each candidate size and the real golden query set is run against it. Re-derive with `prism evidence block-size` whenever the corpus, the index geometry, or the column layout changes. The value is a DEFAULT, not a law \u2014 every part records its own block size, so a store built at one size stays readable whatever this default later becomes.",
-  "config_superseded": {
-    "superseded_by": "D-081 + S13 dir-2 re-derivation",
-    "re_baseline": "testing/evidence/RE-BASELINE.md",
-    "note": "Measured at DEFAULT_NPROBE=6 (via oracle::build default query) on the hash corpus. Absolute bytes_read/query_p50_ms describe a pre-D-081 operating point; re-baseline per testing/evidence/RE-BASELINE.md. Chosen block size (bytes-moved trade-off) is robust to nprobe; not deleted (paired-series discipline)."
-  }
+  "series": {
+    "real-v1": {
+      "shipped": true,
+      "corpus_version": "real-v1 (all-mpnet 768d, 3000 rows, restarts=8)",
+      "chosen_block_size": 16384,
+      "dim": 768,
+      "corpus_rows": 3000,
+      "sweep": [
+        {
+          "block_size": 512,
+          "bytes_read": 98801418,
+          "directory_bytes_per_row": 104.18133333333333,
+          "eligible": false,
+          "manifest_bytes": 398258
+        },
+        {
+          "block_size": 1024,
+          "bytes_read": 109509266,
+          "directory_bytes_per_row": 51.626666666666665,
+          "eligible": false,
+          "manifest_bytes": 240594
+        },
+        {
+          "block_size": 2048,
+          "bytes_read": 134434962,
+          "directory_bytes_per_row": 25.429333333333332,
+          "eligible": false,
+          "manifest_bytes": 162002
+        },
+        {
+          "block_size": 4096,
+          "bytes_read": 182035650,
+          "directory_bytes_per_row": 12.608,
+          "eligible": false,
+          "manifest_bytes": 123538
+        },
+        {
+          "block_size": 8192,
+          "bytes_read": 263900746,
+          "directory_bytes_per_row": 6.192,
+          "eligible": false,
+          "manifest_bytes": 104290
+        },
+        {
+          "block_size": 16384,
+          "bytes_read": 391199162,
+          "directory_bytes_per_row": 3.04,
+          "eligible": true,
+          "manifest_bytes": 94834
+        },
+        {
+          "block_size": 65536,
+          "bytes_read": 602322594,
+          "directory_bytes_per_row": 0.704,
+          "eligible": true,
+          "manifest_bytes": 87826
+        },
+        {
+          "block_size": 262144,
+          "bytes_read": 602322594,
+          "directory_bytes_per_row": 0.13333333333333333,
+          "eligible": true,
+          "manifest_bytes": 86114
+        },
+        {
+          "block_size": 1048576,
+          "bytes_read": 602322594,
+          "directory_bytes_per_row": 0.0,
+          "eligible": true,
+          "manifest_bytes": 85714
+        }
+      ],
+      "note": "SHIPPED. The 768d exact-rerank column is 12x the hash corpus's, so smaller blocks blow the 4-byte/row directory budget (512\u2192104/row, 2048\u219225.4/row: ineligible) and 16 KiB is the smallest eligible AND the min-bytes-read among eligible."
+    },
+    "hash-v1": {
+      "shipped": false,
+      "retained": true,
+      "corpus_version": "v1 (hash embedder, dim 64, 2000 rows)",
+      "chosen_block_size": 2048,
+      "dim": 64,
+      "corpus_rows": 2000,
+      "sweep": [
+        {
+          "block_size": 512,
+          "manifest_bytes": 43781,
+          "bytes_read": 51530958,
+          "read_amplification": 29.51967292375095,
+          "total_bytes": 56084182,
+          "query_p50_ms": 7.486458,
+          "recall_at_10": 0.998077,
+          "directory_bytes_per_row": 13.808,
+          "manifest_bytes_per_row": 21.8905
+        },
+        {
+          "block_size": 1024,
+          "manifest_bytes": 29749,
+          "bytes_read": 54610614,
+          "read_amplification": 31.283863642612943,
+          "total_bytes": 57704510,
+          "query_p50_ms": 7.709708,
+          "recall_at_10": 0.998077,
+          "directory_bytes_per_row": 6.792,
+          "manifest_bytes_per_row": 14.8745
+        },
+        {
+          "block_size": 2048,
+          "manifest_bytes": 22597,
+          "bytes_read": 61712174,
+          "read_amplification": 35.352014839188655,
+          "total_bytes": 64062262,
+          "query_p50_ms": 8.138542000000001,
+          "recall_at_10": 0.998077,
+          "directory_bytes_per_row": 3.216,
+          "manifest_bytes_per_row": 11.2985
+        },
+        {
+          "block_size": 4096,
+          "manifest_bytes": 18901,
+          "bytes_read": 76271566,
+          "read_amplification": 43.69240877886034,
+          "total_bytes": 78237270,
+          "query_p50_ms": 9.140417,
+          "recall_at_10": 0.998077,
+          "directory_bytes_per_row": 1.368,
+          "manifest_bytes_per_row": 9.4505
+        },
+        {
+          "block_size": 8192,
+          "manifest_bytes": 17381,
+          "bytes_read": 99563766,
+          "read_amplification": 57.03541951183744,
+          "total_bytes": 101371390,
+          "query_p50_ms": 10.775666,
+          "recall_at_10": 0.998077,
+          "directory_bytes_per_row": 0.608,
+          "manifest_bytes_per_row": 8.6905
+        },
+        {
+          "block_size": 16384,
+          "manifest_bytes": 16725,
+          "bytes_read": 141182150,
+          "read_amplification": 80.87664294290717,
+          "total_bytes": 142921550,
+          "query_p50_ms": 13.744,
+          "recall_at_10": 0.998077,
+          "directory_bytes_per_row": 0.28,
+          "manifest_bytes_per_row": 8.3625
+        },
+        {
+          "block_size": 65536,
+          "manifest_bytes": 16261,
+          "bytes_read": 365400294,
+          "read_amplification": 209.32071872450803,
+          "total_bytes": 367091438,
+          "query_p50_ms": 30.839167,
+          "recall_at_10": 0.998077,
+          "directory_bytes_per_row": 0.048,
+          "manifest_bytes_per_row": 8.1305
+        },
+        {
+          "block_size": 262144,
+          "manifest_bytes": 16165,
+          "bytes_read": 798554086,
+          "read_amplification": 457.45424392546494,
+          "total_bytes": 800235246,
+          "query_p50_ms": 60.133542,
+          "recall_at_10": 0.998077,
+          "directory_bytes_per_row": 0.0,
+          "manifest_bytes_per_row": 8.0825
+        },
+        {
+          "block_size": 1048576,
+          "manifest_bytes": 16165,
+          "bytes_read": 798554086,
+          "read_amplification": 457.45424392546494,
+          "total_bytes": 800235246,
+          "query_p50_ms": 60.102208,
+          "recall_at_10": 0.998077,
+          "directory_bytes_per_row": 0.0,
+          "manifest_bytes_per_row": 8.0825
+        }
+      ],
+      "note": "Retained paired series. At dim 64 the exact-rerank column is small, so 2 KiB fit the 4-byte/row directory budget and read the fewest bytes. Measured at nprobe=6/restarts=5."
+    }
+  },
+  "delta": {
+    "old_hash_v1": 2048,
+    "new_real_v1": 16384,
+    "mechanism": "Block size is not embedding-geometry sensitive (it turns on column sizes and row counts, not cluster structure) \u2014 but it IS dimension-sensitive. At dim 64 the directory budget admitted 2 KiB blocks; at dim 768 the exact-rerank column is 12x wider, so the same-size directory now costs 12x the bytes per row and blocks below 16 KiB exceed the 4-byte/row openability budget. Among the eligible sizes 16 KiB reads the fewest bytes (391 MB vs 65 KiB's 602 MB \u2014 bigger blocks over-read). Classified geometry-STABLE: re-derive on the COLUMN LAYOUT changing, not per corpus/generation."
+  },
+  "rule": "minimise physically-read bytes across the golden query set (whole blocks, frame headers, over-read included), SUBJECT TO the block directory staying under 4 bytes/row (the openability policy bound). Ties to the smaller block.",
+  "note": "geometry-STABLE, dimension-sensitive. Re-derive with a real-v1 block-size sweep when the column layout (dim, encodings) changes. Every part records its own block size, so a store built at one size is readable whatever this default becomes."
 }
