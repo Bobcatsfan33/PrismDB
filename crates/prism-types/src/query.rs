@@ -20,19 +20,22 @@ use serde::{Deserialize, Serialize};
 /// neighbours split across two centroids and a single probe reaches only one — a mean cannot see the
 /// query class that fails completely. A default tuned on a mean is one that works until it matters.
 ///
-/// **S13 dir 2 — re-derived on real-v1 (all-mpnet 768d, nlist=64): the number is 14, up from the hash
+/// **S13 dir 2 — re-derived on real-v1 (all-mpnet 768d, nlist=64): the number is 11, up from the hash
 /// corpus's 6.** This is the uncomfortable direction, and it is the honest one. The hash embedder's
 /// handful of near-identical motifs could not produce *real* boundaries, so `nprobe=6` was measured
-/// against geometry that flattered it — at `nprobe=6` on the real corpus, p1 recall@10 is only **0.400**
-/// and 4 boundary queries return nothing at `nprobe=1` (mean 0.730, min 0.000 for the boundary class).
-/// The first probe count whose p1 clears 0.8 on real geometry is **14**, and holding that tail costs a
-/// **25.5% scan fraction — 2.3× the 10.9% that nprobe=6 bought** on the same corpus. That scan cost is
-/// the latency the recall contract is actually paid for; it is the number S16's benchmarks stand on.
+/// against geometry that flattered it. The first probe count whose p1 recall@10 clears 0.8 on real
+/// geometry is **11**, and holding that tail costs a **~19% scan fraction — ~1.75× the 10.9% nprobe=6
+/// bought** on the same corpus. That scan cost is the latency the recall contract is actually paid for;
+/// it is the number S16's benchmarks stand on.
 ///
-/// This number is not universal: a different `nlist`, embedder, or corpus re-derives it
-/// (`tests/rederive_nprobe.rs`, `prism golden sweep`). The hash-corpus sweep is retained as the paired
-/// series in the receipt.
-pub const DEFAULT_NPROBE: usize = 14;
+/// **Downstream of [`KMEANS_RESTARTS`](prism_quantizer::kmeans::KMEANS_RESTARTS)** (charter C-8): this
+/// value was first derived at restarts=5 as 14, but the restarts re-derivation ([D-083](../../../docs/DECISIONS.md))
+/// found restarts=5 to be a jagged sub-optimum and pinned the plateau at restarts=8 — whose better
+/// codebook holds the tail at **11**, not 14. The 14 is retained as `config_superseded` in the receipt.
+///
+/// This number is not universal: a different `nlist`, embedder, corpus, or codebook re-derives it
+/// (`tests/rederive_nprobe.rs`). The hash-corpus sweep is retained as the paired series.
+pub const DEFAULT_NPROBE: usize = 11;
 
 /// Adaptive-probing margin (S6, [issue #1](https://github.com/Bobcatsfan33/PrismDB/issues/1)).
 ///

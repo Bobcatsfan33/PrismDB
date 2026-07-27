@@ -402,6 +402,14 @@ pub struct RegistryEntry {
     /// re-deriving everything.
     #[serde(default)]
     pub geometry_sensitivity: Option<String>,
+    /// **Which constants are UPSTREAM of this one** (charter C-8, S13 dir 2). A constant is upstream
+    /// when a change to it invalidates this one's evidence — e.g. `KMEANS_RESTARTS` produces both the
+    /// IVF centroids and the PQ codebook, so it is upstream of every geometry-derived constant (ε,
+    /// nprobe, adaptive-margin, the widths). Sweeps execute in topological order of this relation, and
+    /// a change to an upstream constant marks the downstream receipts stale — the same bidirectional
+    /// binding C-1 enforces between ledger and code, now between constants ([D-083](../../docs/DECISIONS.md)).
+    #[serde(default)]
+    pub upstream: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

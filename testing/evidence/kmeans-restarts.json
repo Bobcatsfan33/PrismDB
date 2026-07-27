@@ -1,92 +1,252 @@
 {
-  "corpus_version": "v1",
-  "generation_id": "d93625d4300c0a30",
-  "p1_floor": 0.8,
+  "shipped_series": "real-v1",
+  "geometry_sensitivity": "sensitive",
+  "upstream": [],
+  "downstream": [
+    "THRESHOLD_OVERFETCH_MARGIN_EPSILON_MICROS",
+    "DEFAULT_NPROBE",
+    "ADAPTIVE_MARGIN_X1000",
+    "DEFAULT_CANDIDATES",
+    "DEFAULT_RERANK"
+  ],
+  "_what": "KMEANS_RESTARTS (C-1): independent k-means++ restarts, keeping the best by inertia. Produces BOTH the IVF coarse centroids and the PQ codebook, so it is UPSTREAM of every geometry-derived constant (C-8). Chosen by the PLATEAU rule (not smallest-that-passes), because on a stochastic training process the derived probe count is jagged across restart counts and only a plateau proves the codebook has stopped depending on its lucky draw.",
+  "generation_note": "real-v1",
+  "p1_floor": 0.800000011920929,
+  "chosen_restarts": 8,
+  "chosen_nprobe": 11,
+  "chosen_scan_fraction": 0.19145333333333336,
   "sweep": [
     {
+      "derived_nprobe": 11,
+      "mean_scan_fraction": 0.21350888888888883,
+      "p1_recall": 0.800000011920929,
       "restarts": 1,
-      "generation_id": "0c6f4b2a93cb8177",
-      "derived_nprobe": 7,
-      "mean_scan_fraction": 0.24571236464567908,
-      "mean_recall": 0.9951923,
-      "p1_recall": 0.8,
-      "zero_recall_queries": 0,
-      "train_seconds": 0.559483333
+      "train_seconds": 6.378468084
     },
     {
+      "derived_nprobe": 11,
+      "mean_scan_fraction": 0.21799777777777776,
+      "p1_recall": 0.800000011920929,
       "restarts": 2,
-      "generation_id": "0c6f4b2a93cb8177",
-      "derived_nprobe": 7,
-      "mean_scan_fraction": 0.24571236464567908,
-      "mean_recall": 0.9951923,
-      "p1_recall": 0.8,
-      "zero_recall_queries": 0,
-      "train_seconds": 0.784209417
+      "train_seconds": 9.904990833
     },
     {
+      "derived_nprobe": 14,
+      "mean_scan_fraction": 0.25481777777777764,
+      "p1_recall": 0.8999999761581421,
       "restarts": 3,
-      "generation_id": "833b1780e7d99d64",
-      "derived_nprobe": 3,
-      "mean_scan_fraction": 0.10572035910960437,
-      "mean_recall": 0.99038464,
-      "p1_recall": 0.8,
-      "zero_recall_queries": 0,
-      "train_seconds": 1.0336409579999999
+      "train_seconds": 14.131569542
     },
     {
+      "derived_nprobe": 14,
+      "mean_scan_fraction": 0.25481777777777764,
+      "p1_recall": 0.8999999761581421,
       "restarts": 5,
-      "generation_id": "d93625d4300c0a30",
-      "derived_nprobe": 6,
-      "mean_scan_fraction": 0.20330958394450208,
-      "mean_recall": 0.998077,
-      "p1_recall": 1.0,
-      "zero_recall_queries": 0,
-      "train_seconds": 1.462316041
+      "train_seconds": 21.591121834
     },
     {
+      "derived_nprobe": 11,
+      "mean_scan_fraction": 0.19145333333333336,
+      "p1_recall": 0.800000011920929,
       "restarts": 8,
-      "generation_id": "d93625d4300c0a30",
-      "derived_nprobe": 6,
-      "mean_scan_fraction": 0.20330958394450208,
-      "mean_recall": 0.998077,
-      "p1_recall": 1.0,
-      "zero_recall_queries": 0,
-      "train_seconds": 2.1544495
+      "train_seconds": 33.115745916
     },
     {
+      "derived_nprobe": 11,
+      "mean_scan_fraction": 0.19145333333333336,
+      "p1_recall": 0.800000011920929,
       "restarts": 12,
-      "generation_id": "d93625d4300c0a30",
-      "derived_nprobe": 6,
-      "mean_scan_fraction": 0.20330958394450208,
-      "mean_recall": 0.998077,
-      "p1_recall": 1.0,
-      "zero_recall_queries": 0,
-      "train_seconds": 3.071201333
+      "train_seconds": 49.144455833
     },
     {
+      "derived_nprobe": 11,
+      "mean_scan_fraction": 0.19145333333333336,
+      "p1_recall": 0.800000011920929,
       "restarts": 16,
-      "generation_id": "d93625d4300c0a30",
-      "derived_nprobe": 6,
-      "mean_scan_fraction": 0.20330958394450208,
-      "mean_recall": 0.998077,
-      "p1_recall": 1.0,
-      "zero_recall_queries": 0,
-      "train_seconds": 3.997122875
+      "train_seconds": 66.845428916
     },
     {
+      "derived_nprobe": 11,
+      "mean_scan_fraction": 0.19145333333333336,
+      "p1_recall": 0.800000011920929,
       "restarts": 25,
-      "generation_id": "d93625d4300c0a30",
-      "derived_nprobe": 6,
-      "mean_scan_fraction": 0.20330958394450208,
-      "mean_recall": 0.998077,
-      "p1_recall": 1.0,
-      "zero_recall_queries": 0,
-      "train_seconds": 6.040869291
+      "train_seconds": 103.028446541
     }
   ],
-  "chosen_restarts": 5,
-  "chosen_nprobe": 6,
-  "chosen_scan_fraction": 0.20330958394450208,
-  "rule": "the SMALLEST restart count that begins a PLATEAU -- one whose derived probe count is matched by every larger point on the grid. Deliberately NOT 'the restart count with the best derived nprobe', which is the obvious rule and a trap: this sweep is jagged (1-2 restarts need 7 probes, 3 needs only 3, and 5 through 25 all settle on 6), so the winner-takes-all rule would pick 3 -- a single lucky draw that no larger restart count reproduces. We are choosing a METHOD, not a lottery ticket, and selecting the luckiest point on the grid would reintroduce exactly the dependence on a fortunate init that this constant exists to remove. A plateau is the signature of a method that has stopped depending on its draw. Note also that the objective is NOT inertia: inertia is what each restart minimizes internally, and best-by-inertia is not best-by-recall, because a tighter fit in the k-means sense can be a more unbalanced one in the IVF sense -- and IVF is what a query pays for. Smallest on the plateau, because training cost is linear in this and the plateau is flat.",
-  "note": "S5. This constant became TUNED the moment it was chosen by measurement, and it was chosen because fixing charter C-4 (the training sample keyed on event_id rather than on physical position) removed a LUCKY INPUT ORDER that k-means++ had been quietly relying on -- recall fell below its floor, and the fix was to stop depending on a draw. Corpus- AND generation-conditional: a different corpus or a different embedder will have a different answer."
+  "series": {
+    "real-v1": {
+      "shipped": true,
+      "corpus_version": "real-v1 (all-mpnet 768d, nlist=64) + boundary queries",
+      "config": {
+        "dim": 768,
+        "nlist": 64,
+        "pq_m": 96,
+        "seed": 42
+      },
+      "p1_floor": 0.800000011920929,
+      "chosen_restarts": 8,
+      "chosen_nprobe": 11,
+      "chosen_scan_fraction": 0.19145333333333336,
+      "sweep": [
+        {
+          "derived_nprobe": 11,
+          "mean_scan_fraction": 0.21350888888888883,
+          "p1_recall": 0.800000011920929,
+          "restarts": 1,
+          "train_seconds": 6.378468084
+        },
+        {
+          "derived_nprobe": 11,
+          "mean_scan_fraction": 0.21799777777777776,
+          "p1_recall": 0.800000011920929,
+          "restarts": 2,
+          "train_seconds": 9.904990833
+        },
+        {
+          "derived_nprobe": 14,
+          "mean_scan_fraction": 0.25481777777777764,
+          "p1_recall": 0.8999999761581421,
+          "restarts": 3,
+          "train_seconds": 14.131569542
+        },
+        {
+          "derived_nprobe": 14,
+          "mean_scan_fraction": 0.25481777777777764,
+          "p1_recall": 0.8999999761581421,
+          "restarts": 5,
+          "train_seconds": 21.591121834
+        },
+        {
+          "derived_nprobe": 11,
+          "mean_scan_fraction": 0.19145333333333336,
+          "p1_recall": 0.800000011920929,
+          "restarts": 8,
+          "train_seconds": 33.115745916
+        },
+        {
+          "derived_nprobe": 11,
+          "mean_scan_fraction": 0.19145333333333336,
+          "p1_recall": 0.800000011920929,
+          "restarts": 12,
+          "train_seconds": 49.144455833
+        },
+        {
+          "derived_nprobe": 11,
+          "mean_scan_fraction": 0.19145333333333336,
+          "p1_recall": 0.800000011920929,
+          "restarts": 16,
+          "train_seconds": 66.845428916
+        },
+        {
+          "derived_nprobe": 11,
+          "mean_scan_fraction": 0.19145333333333336,
+          "p1_recall": 0.800000011920929,
+          "restarts": 25,
+          "train_seconds": 103.028446541
+        }
+      ],
+      "jaggedness_finding": "The derived-nprobe-over-restarts sequence is NON-MONOTONE: [11,11,14,14,11,11,11,11] over restarts [1,2,3,5,8,12,16,25]. restarts 1,2 draw a lucky-low codebook (nprobe 11); 3 and 5 get STUCK in a worse local optimum (nprobe 14, scan 0.255); 8,12,16,25 all converge to the same good codebook (nprobe 11, scan 0.1915, byte-identical). The PLATEAU RULE (smallest restart whose derived nprobe is matched by every larger one) picks 8 \u2014 and it is exactly what stopped a 'smallest value that passes' rule from shipping restarts=5's worse draw. This jaggedness is the evidence for keeping plateau-detection as the standard sweep method for any constant governing a stochastic process (C-8).",
+      "note": "SHIPPED. KMEANS_RESTARTS is UPSTREAM of every geometry-derived constant (it produces both IVF centroids and the PQ codebook), so pinning 8 forced re-derivation of \u03b5, nprobe, adaptive, widths on the restarts=8 codebook (D-083, dependency-order error in the sweep sequence \u2014 not a measurement error)."
+    },
+    "hash-v1": {
+      "shipped": false,
+      "retained": true,
+      "corpus_version": "v1 (hash embedder, dim64/nlist32)",
+      "chosen_restarts": 5,
+      "chosen_nprobe": 6,
+      "sweep": [
+        {
+          "restarts": 1,
+          "generation_id": "0c6f4b2a93cb8177",
+          "derived_nprobe": 7,
+          "mean_scan_fraction": 0.24571236464567908,
+          "mean_recall": 0.9951923,
+          "p1_recall": 0.8,
+          "zero_recall_queries": 0,
+          "train_seconds": 0.559483333
+        },
+        {
+          "restarts": 2,
+          "generation_id": "0c6f4b2a93cb8177",
+          "derived_nprobe": 7,
+          "mean_scan_fraction": 0.24571236464567908,
+          "mean_recall": 0.9951923,
+          "p1_recall": 0.8,
+          "zero_recall_queries": 0,
+          "train_seconds": 0.784209417
+        },
+        {
+          "restarts": 3,
+          "generation_id": "833b1780e7d99d64",
+          "derived_nprobe": 3,
+          "mean_scan_fraction": 0.10572035910960437,
+          "mean_recall": 0.99038464,
+          "p1_recall": 0.8,
+          "zero_recall_queries": 0,
+          "train_seconds": 1.0336409579999999
+        },
+        {
+          "restarts": 5,
+          "generation_id": "d93625d4300c0a30",
+          "derived_nprobe": 6,
+          "mean_scan_fraction": 0.20330958394450208,
+          "mean_recall": 0.998077,
+          "p1_recall": 1.0,
+          "zero_recall_queries": 0,
+          "train_seconds": 1.462316041
+        },
+        {
+          "restarts": 8,
+          "generation_id": "d93625d4300c0a30",
+          "derived_nprobe": 6,
+          "mean_scan_fraction": 0.20330958394450208,
+          "mean_recall": 0.998077,
+          "p1_recall": 1.0,
+          "zero_recall_queries": 0,
+          "train_seconds": 2.1544495
+        },
+        {
+          "restarts": 12,
+          "generation_id": "d93625d4300c0a30",
+          "derived_nprobe": 6,
+          "mean_scan_fraction": 0.20330958394450208,
+          "mean_recall": 0.998077,
+          "p1_recall": 1.0,
+          "zero_recall_queries": 0,
+          "train_seconds": 3.071201333
+        },
+        {
+          "restarts": 16,
+          "generation_id": "d93625d4300c0a30",
+          "derived_nprobe": 6,
+          "mean_scan_fraction": 0.20330958394450208,
+          "mean_recall": 0.998077,
+          "p1_recall": 1.0,
+          "zero_recall_queries": 0,
+          "train_seconds": 3.997122875
+        },
+        {
+          "restarts": 25,
+          "generation_id": "d93625d4300c0a30",
+          "derived_nprobe": 6,
+          "mean_scan_fraction": 0.20330958394450208,
+          "mean_recall": 0.998077,
+          "p1_recall": 1.0,
+          "zero_recall_queries": 0,
+          "train_seconds": 6.040869291
+        }
+      ],
+      "note": "Retained paired series. On the hash corpus the plateau was nprobe=6 from restart=5 (derived_nprobe [7,7,3,6,6,6,6,6] \u2014 restart=3 a lucky-low draw). Measured at the old KMEANS_RESTARTS=5."
+    }
+  },
+  "delta": {
+    "old_hash_v1": 5,
+    "new_real_v1": 8,
+    "derived_nprobe_at_new": 11,
+    "mechanism": "On the hash corpus the plateau sat at restart=5 (nprobe 6). On real 768d geometry the plateau is restart=8 (nprobe 11): restarts 3 and 5 are stuck in a worse local optimum (nprobe 14, scan 0.255) while 8+ converge to the good codebook (nprobe 11, scan 0.1915). Because KMEANS_RESTARTS is upstream of \u03b5/nprobe/adaptive/widths, this session's restarts=5 real-v1 numbers were config_superseded and re-derived on the restarts=8 codebook (D-083)."
+  },
+  "corpus_conditional": true,
+  "generation_conditional": true,
+  "rule": "the smallest restart count that begins a PLATEAU \u2014 a derived nprobe matched by every larger restart count. NOT smallest-that-passes: the sequence is jagged and the luckiest low draw does not reproduce.",
+  "note": "geometry-SENSITIVE and UPSTREAM (C-8). Re-derive per corpus/generation; a change here marks every downstream geometry receipt stale. tests/rederive_restarts.rs re-measures the plateau and asserts KMEANS_RESTARTS is its choice."
 }

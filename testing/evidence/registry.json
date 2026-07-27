@@ -27,7 +27,7 @@
   "constants": [
     {
       "name": "DEFAULT_NPROBE",
-      "value": 14,
+      "value": 11,
       "kind": "tuned",
       "evidence": "testing/evidence/nprobe.json",
       "evidence_key": "chosen_nprobe",
@@ -43,7 +43,10 @@
       ],
       "generation_conditional": true,
       "generation_conditional_reason": "A new codebook generation changes the PQ geometry, so this constant may not transfer across one. Re-sweep on a new generation -- the same standing obligation as re-sweeping on a real-embedding corpus (charter C-3, issue #3).",
-      "geometry_sensitivity": "sensitive"
+      "geometry_sensitivity": "sensitive",
+      "upstream": [
+        "KMEANS_RESTARTS"
+      ]
     },
     {
       "name": "BLOCK_SIZE",
@@ -62,7 +65,8 @@
         }
       ],
       "generation_conditional": true,
-      "generation_conditional_reason": "A new codebook generation changes the PQ geometry, so this constant may not transfer across one. Re-sweep on a new generation -- the same standing obligation as re-sweeping on a real-embedding corpus (charter C-3, issue #3)."
+      "generation_conditional_reason": "A new codebook generation changes the PQ geometry, so this constant may not transfer across one. Re-sweep on a new generation -- the same standing obligation as re-sweeping on a real-embedding corpus (charter C-3, issue #3).",
+      "upstream": []
     },
     {
       "name": "DEFAULT_CANDIDATES",
@@ -82,7 +86,10 @@
       ],
       "generation_conditional": true,
       "generation_conditional_reason": "A new codebook generation changes the PQ geometry, so this constant may not transfer across one. Re-sweep on a new generation -- the same standing obligation as re-sweeping on a real-embedding corpus (charter C-3, issue #3).",
-      "geometry_sensitivity": "sensitive"
+      "geometry_sensitivity": "sensitive",
+      "upstream": [
+        "KMEANS_RESTARTS"
+      ]
     },
     {
       "name": "DEFAULT_RERANK",
@@ -102,16 +109,19 @@
       ],
       "generation_conditional": true,
       "generation_conditional_reason": "A new codebook generation changes the PQ geometry, so this constant may not transfer across one. Re-sweep on a new generation -- the same standing obligation as re-sweeping on a real-embedding corpus (charter C-3, issue #3).",
-      "geometry_sensitivity": "sensitive"
+      "geometry_sensitivity": "sensitive",
+      "upstream": [
+        "KMEANS_RESTARTS"
+      ]
     },
     {
       "name": "KMEANS_RESTARTS",
-      "value": 5,
+      "value": 8,
       "kind": "tuned",
       "evidence": "testing/evidence/kmeans-restarts.json",
       "evidence_key": "chosen_restarts",
-      "rule": "the SMALLEST restart count whose codebook reaches the best derived nprobe on the grid (and leaves no query empty). The objective is deliberately NOT inertia -- inertia is what each restart minimizes internally, and best-by-inertia is NOT best-by-recall: at 3 and 5 restarts the lowest-inertia codebook needs SEVEN probes to clear the tail floors, where one unlucky init needed five and eight restarts need four. A tighter fit in the k-means sense can be a more unbalanced one in the IVF sense, and IVF is what a query pays for. So the objective is probes -- which are scan fraction, which is the bill. Smallest-on-the-plateau, because training cost is linear in this and paying for 25 restarts to get what 8 gives you is paying for nothing.",
-      "corpus_version": "v1",
+      "rule": "the smallest restart count that begins a PLATEAU \u2014 a derived nprobe matched by every larger restart count (NOT smallest-that-passes). S13 dir 2 re-derived on real-v1: the derived-nprobe sequence over restarts [1,2,3,5,8,12,16,25] is NON-MONOTONE [11,11,14,14,11,11,11,11] \u2014 restarts 3,5 stuck in a worse local optimum (nprobe 14), 8+ converge to the good codebook (nprobe 11). Plateau at 8, up from the hash corpus's 5. UPSTREAM of every geometry-derived constant (produces both IVF centroids and PQ codebook, C-8), so this change re-derived \u03b5/nprobe/adaptive/widths (D-083).",
+      "corpus_version": "real-v1",
       "corpus_conditional": true,
       "corpus_conditional_reason": "derived on the deterministic hash-embedder corpus -- issue #3.",
       "generation_conditional": true,
@@ -122,7 +132,16 @@
           "why_measurement_cannot_see_it": "Training cost is linear in this constant and training is on the critical path of a MIGRATION, which is an operation an operator is watching. Measurement will happily keep buying marginal codebook quality with unbounded training time; the bound says how much time we are willing to spend. The chosen value (8) is interior to the grid and sits at the start of a plateau that 12, 16 and 25 do not improve on, so this bound is not what selected it (charter C-3)."
         }
       ],
-      "note": "S5. This constant exists because of charter C-4. When the training sample stopped being keyed on physical position, recall fell below its floor -- k-means++ had been relying on a lucky first point handed to it by the corpus's natural order. The recall we had been reporting was, in part, a coincidence of the input order. Restarts make the codebook depend on the data instead of on a draw."
+      "note": "S5. This constant exists because of charter C-4. When the training sample stopped being keyed on physical position, recall fell below its floor -- k-means++ had been relying on a lucky first point handed to it by the corpus's natural order. The recall we had been reporting was, in part, a coincidence of the input order. Restarts make the codebook depend on the data instead of on a draw.",
+      "upstream": [],
+      "geometry_sensitivity": "sensitive",
+      "downstream": [
+        "ADAPTIVE_MARGIN_X1000",
+        "DEFAULT_CANDIDATES",
+        "DEFAULT_NPROBE",
+        "DEFAULT_RERANK",
+        "THRESHOLD_OVERFETCH_MARGIN_EPSILON_MICROS"
+      ]
     },
     {
       "name": "ADAPTIVE_MARGIN_X1000",
@@ -143,7 +162,10 @@
         }
       ],
       "note": "S6, issue #1 (adaptive nprobe). MONOTONE ONLY in v1: the margin may add probes above DEFAULT_NPROBE for boundary queries and may never go below it, so recall can only improve. Stored x1000 because the ledger holds integers and the margin is 0.05.",
-      "geometry_sensitivity": "sensitive"
+      "geometry_sensitivity": "sensitive",
+      "upstream": [
+        "KMEANS_RESTARTS"
+      ]
     },
     {
       "name": "FP16_COSINE_TOLERANCE_MICROS",
@@ -163,271 +185,316 @@
           "why_measurement_cannot_see_it": "A tolerance that merely bounded score error would still permit fp16 to reorder the answer, which is the thing a lossy encoding must NOT do silently. The binding constraint is that no >tolerance-separated pair inverts -- a property about ORDER, not magnitude -- and it is what makes fp16 a smaller store rather than a different database."
         }
       ],
-      "note": "S7, D-049. The first negotiated accuracy contract. fp32-exact remains the only default; fp16 is opt-in behind encoding_id=2 / accuracy_contract_id=2, and a build that does not implement the pair REFUSES the part. Contract text, evidence, and the unknown-encoding fixture were all updated in the same change."
+      "note": "S7, D-049. The first negotiated accuracy contract. fp32-exact remains the only default; fp16 is opt-in behind encoding_id=2 / accuracy_contract_id=2, and a build that does not implement the pair REFUSES the part. Contract text, evidence, and the unknown-encoding fixture were all updated in the same change.",
+      "upstream": []
     },
     {
       "name": "MAX_ATTRIBUTE_KEYS",
       "value": 64,
       "kind": "policy",
-      "rationale": "docs/INGESTION-CONTRACT.md \u00a75 -- bounds the size of ONE EVENT, not the shape of the dataset. Sixty-four keys is generous for a real GenAI span (a dozen or so) and small enough that a runaway producer is caught rather than absorbed."
+      "rationale": "docs/INGESTION-CONTRACT.md \u00a75 -- bounds the size of ONE EVENT, not the shape of the dataset. Sixty-four keys is generous for a real GenAI span (a dozen or so) and small enough that a runaway producer is caught rather than absorbed.",
+      "upstream": []
     },
     {
       "name": "MAX_ATTRIBUTE_KEY_BYTES",
       "value": 128,
       "kind": "policy",
-      "rationale": "docs/INGESTION-CONTRACT.md \u00a75 -- a key is an identifier, not a payload. 128 bytes comfortably fits every OTel GenAI convention key with room to spare, and anything longer is a value that has been mistaken for a key."
+      "rationale": "docs/INGESTION-CONTRACT.md \u00a75 -- a key is an identifier, not a payload. 128 bytes comfortably fits every OTel GenAI convention key with room to spare, and anything longer is a value that has been mistaken for a key.",
+      "upstream": []
     },
     {
       "name": "MAX_ATTRIBUTE_VALUE_BYTES",
       "value": 4096,
       "kind": "policy",
-      "rationale": "docs/INGESTION-CONTRACT.md \u00a75 -- values may be large (a model name, a stop reason, a session id) but they are not documents. Anything past 4 KiB belongs in the body, where it will be embedded and searchable, rather than in a map where it is merely stored."
+      "rationale": "docs/INGESTION-CONTRACT.md \u00a75 -- values may be large (a model name, a stop reason, a session id) but they are not documents. Anything past 4 KiB belongs in the body, where it will be embedded and searchable, rather than in a map where it is merely stored.",
+      "upstream": []
     },
     {
       "name": "MAX_ATTRIBUTES_BYTES",
       "value": 16384,
       "kind": "policy",
-      "rationale": "docs/INGESTION-CONTRACT.md \u00a75 -- the total budget binds even when every individual value is legal: 32 keys x 4 KiB is 32 legal values adding up to an illegal event."
+      "rationale": "docs/INGESTION-CONTRACT.md \u00a75 -- the total budget binds even when every individual value is legal: 32 keys x 4 KiB is 32 legal values adding up to an illegal event.",
+      "upstream": []
     },
     {
       "name": "MAX_ATTRIBUTE_KEY_CARDINALITY",
       "value": 512,
       "kind": "policy",
-      "rationale": "docs/INGESTION-CONTRACT.md \u00a75 -- THE ONE THAT MATTERS. The other caps bound one event; only this bounds the SHAPE of the dataset. A tenant using a uuid as an attribute KEY would otherwise grow a dictionary the size of their traffic, carried in every manifest, forever. That is how a columnar format dies."
+      "rationale": "docs/INGESTION-CONTRACT.md \u00a75 -- THE ONE THAT MATTERS. The other caps bound one event; only this bounds the SHAPE of the dataset. A tenant using a uuid as an attribute KEY would otherwise grow a dictionary the size of their traffic, carried in every manifest, forever. That is how a columnar format dies.",
+      "upstream": []
     },
     {
       "name": "MAX_LATENESS_MS",
       "value": 604800000,
       "kind": "policy",
-      "rationale": "docs/INGESTION-CONTRACT.md \u00a74 -- seven days. Beyond it an event's partition may already have been merged, tiered or expired, and admitting it would resurrect a closed partition."
+      "rationale": "docs/INGESTION-CONTRACT.md \u00a74 -- seven days. Beyond it an event's partition may already have been merged, tiered or expired, and admitting it would resurrect a closed partition.",
+      "upstream": []
     },
     {
       "name": "MAX_SKEW_AHEAD_MS",
       "value": 3600000,
       "kind": "policy",
-      "rationale": "docs/INGESTION-CONTRACT.md \u00a74 -- one hour. A clock-skewed producer emitting event_time=2099 would make its partition immortal: no retention policy would ever reclaim it."
+      "rationale": "docs/INGESTION-CONTRACT.md \u00a74 -- one hour. A clock-skewed producer emitting event_time=2099 would make its partition immortal: no retention policy would ever reclaim it.",
+      "upstream": []
     },
     {
       "name": "IDEMPOTENCY_WINDOW_MS",
       "value": 604800000,
       "kind": "policy",
-      "rationale": "docs/INGESTION-CONTRACT.md \u00a72 -- the honest limit. Beyond this window a replayed key is admitted as a new event and becomes a duplicate ROW, which merge reconciles by last-write-wins on event_time (D-012). Two mechanisms, one seam, documented rather than pretended away."
+      "rationale": "docs/INGESTION-CONTRACT.md \u00a72 -- the honest limit. Beyond this window a replayed key is admitted as a new event and becomes a duplicate ROW, which merge reconciles by last-write-wins on event_time (D-012). Two mechanisms, one seam, documented rather than pretended away.",
+      "upstream": []
     },
     {
       "name": "IDEMPOTENCY_MAX_ENTRIES",
       "value": 1000000,
       "kind": "policy",
-      "rationale": "docs/INGESTION-CONTRACT.md \u00a72 -- the backstop for a store whose clock never advances. A window that never rolls over is not a bound."
+      "rationale": "docs/INGESTION-CONTRACT.md \u00a72 -- the backstop for a store whose clock never advances. A window that never rolls over is not a bound.",
+      "upstream": []
     },
     {
       "name": "MAX_BODY_BYTES",
       "value": 1048576,
       "kind": "policy",
-      "rationale": "docs/DECISIONS.md D-005 -- an oversized body is DEAD-LETTERED, never truncated. A stored event whose body is silently half-missing is a lie nobody will ever catch."
+      "rationale": "docs/DECISIONS.md D-005 -- an oversized body is DEAD-LETTERED, never truncated. A stored event whose body is silently half-missing is a lie nobody will ever catch.",
+      "upstream": []
     },
     {
       "name": "MAX_EMBED_INPUT_BYTES",
       "value": 32768,
       "kind": "policy",
-      "rationale": "docs/DECISIONS.md D-005 -- embedding cost is bounded; the stored body is not damaged. Distinct from MAX_BODY_BYTES on purpose."
+      "rationale": "docs/DECISIONS.md D-005 -- embedding cost is bounded; the stored body is not damaged. Distinct from MAX_BODY_BYTES on purpose.",
+      "upstream": []
     },
     {
       "name": "MIN_PAGEABLE_ROWS",
       "value": 50,
       "kind": "policy",
-      "rationale": "docs/QUERY-CONTRACT.md \u00a74 -- the paginated result set IS the plan's rerank survivor set, so the default plan must be able to serve at least five pages at the default page size (5 x 10 = 50). Measurement cannot see this: on the golden corpus the recall floors do not bind at all, and without this bound the joint width sweep chooses rerank=10, making the first page the entire result and the cursor decorative."
+      "rationale": "docs/QUERY-CONTRACT.md \u00a74 -- the paginated result set IS the plan's rerank survivor set, so the default plan must be able to serve at least five pages at the default page size (5 x 10 = 50). Measurement cannot see this: on the golden corpus the recall floors do not bind at all, and without this bound the joint width sweep chooses rerank=10, making the first page the entire result and the cursor decorative.",
+      "upstream": []
     },
     {
       "name": "ADAPTIVE_MAX_NPROBE",
       "value": 16,
       "kind": "policy",
-      "rationale": "The hard ceiling on adaptive probing (S6, issue #1). A query may never probe more than this many centroids however tight its margins, so a pathological query near many cluster boundaries cannot silently turn an approximate scan into a full one. It bounds WORST-CASE query cost, which measurement of average queries cannot see. Not the measured-best ceiling -- a statement about how much a single query is allowed to cost."
+      "rationale": "The hard ceiling on adaptive probing (S6, issue #1). A query may never probe more than this many centroids however tight its margins, so a pathological query near many cluster boundaries cannot silently turn an approximate scan into a full one. It bounds WORST-CASE query cost, which measurement of average queries cannot see. Not the measured-best ceiling -- a statement about how much a single query is allowed to cost.",
+      "upstream": []
     },
     {
       "name": "MAX_STATEMENT_BYTES",
       "value": 65536,
       "kind": "policy",
-      "rationale": "docs/QUERY-CONTRACT.md \u00a77 -- the SQL text is network-facing input, the same category of thing as a part file. S1's bounded-allocation discipline applies in full."
+      "rationale": "docs/QUERY-CONTRACT.md \u00a77 -- the SQL text is network-facing input, the same category of thing as a part file. S1's bounded-allocation discipline applies in full.",
+      "upstream": []
     },
     {
       "name": "MAX_EXPR_DEPTH",
       "value": 32,
       "kind": "policy",
-      "rationale": "docs/QUERY-CONTRACT.md \u00a77 -- the one that matters most. A recursive-descent parser without a depth counter is a stack overflow waiting for '((((...))))', and a stack overflow is a PROCESS DEATH, not an error: it cannot be caught, reported, or attributed to the query that caused it."
+      "rationale": "docs/QUERY-CONTRACT.md \u00a77 -- the one that matters most. A recursive-descent parser without a depth counter is a stack overflow waiting for '((((...))))', and a stack overflow is a PROCESS DEATH, not an error: it cannot be caught, reported, or attributed to the query that caused it.",
+      "upstream": []
     },
     {
       "name": "MAX_IN_LIST",
       "value": 1024,
       "kind": "policy",
-      "rationale": "docs/QUERY-CONTRACT.md \u00a77 -- an IN list is an untrusted length that would otherwise reserve capacity on the strength of a number a stranger sent us."
+      "rationale": "docs/QUERY-CONTRACT.md \u00a77 -- an IN list is an untrusted length that would otherwise reserve capacity on the strength of a number a stranger sent us.",
+      "upstream": []
     },
     {
       "name": "MAX_TOKENS",
       "value": 4096,
       "kind": "policy",
-      "rationale": "docs/QUERY-CONTRACT.md \u00a77 -- bounds the lexer independently of the byte cap: 64 KiB of single-character tokens is a different attack from one long string literal."
+      "rationale": "docs/QUERY-CONTRACT.md \u00a77 -- bounds the lexer independently of the byte cap: 64 KiB of single-character tokens is a different attack from one long string literal.",
+      "upstream": []
     },
     {
       "name": "TRAIN_SAMPLE_MAX",
       "value": 50000,
       "kind": "policy",
-      "rationale": "A bound on how long codebook training may take and how much memory it may hold, chosen so a codebook can be trained on a laptop. Not a measured optimum: raising it buys a marginally better-fitted codebook at a linear cost in time, and the recall receipts are what measure whether the fit is good enough. NOTE: this constant steered behaviour from S0 and was never registered -- an existing hole in the ledger, found by the S5 charter-C-4 audit and closed there. The audit was worth running for this alone."
+      "rationale": "A bound on how long codebook training may take and how much memory it may hold, chosen so a codebook can be trained on a laptop. Not a measured optimum: raising it buys a marginally better-fitted codebook at a linear cost in time, and the recall receipts are what measure whether the fit is good enough. NOTE: this constant steered behaviour from S0 and was never registered -- an existing hole in the ledger, found by the S5 charter-C-4 audit and closed there. The audit was worth running for this alone.",
+      "upstream": []
     },
     {
       "name": "STRATUM_FLOOR_SHARE",
       "value": 4,
       "kind": "policy",
-      "rationale": "docs/GENERATION-CONTRACT.md \u00a72 -- the share (one quarter) of the training sample allocated EQUALLY across partition strata before the remainder goes proportionally. Purely proportional allocation is not stratification: it reproduces exactly the imbalance it claims to fix, because a stratum holding 1% of the rows gets 1% of the sample whether you stratify or not. The floor is what makes a small tenant's geometry visible to the codebook at all. Measurement cannot see this -- a codebook that ignores a quiet tenant still scores well on a corpus dominated by the loud one, which is precisely the problem."
+      "rationale": "docs/GENERATION-CONTRACT.md \u00a72 -- the share (one quarter) of the training sample allocated EQUALLY across partition strata before the remainder goes proportionally. Purely proportional allocation is not stratification: it reproduces exactly the imbalance it claims to fix, because a stratum holding 1% of the rows gets 1% of the sample whether you stratify or not. The floor is what makes a small tenant's geometry visible to the codebook at all. Measurement cannot see this -- a codebook that ignores a quiet tenant still scores well on a corpus dominated by the loud one, which is precisely the problem.",
+      "upstream": []
     },
     {
       "name": "BASELINE_CLUSTERS",
       "value": 16,
       "kind": "policy",
-      "rationale": "docs/GENERATION-CONTRACT.md \u00a77 -- how coarse a summary of 'normal' a drift baseline is. Too few and every cluster is a blur that nothing looks novel against; too many and the baseline memorizes its own window and nothing is ever novel again. S9 owns drift as a feature, and is where this earns a receipt rather than a rationale."
+      "rationale": "docs/GENERATION-CONTRACT.md \u00a77 -- how coarse a summary of 'normal' a drift baseline is. Too few and every cluster is a blur that nothing looks novel against; too many and the baseline memorizes its own window and nothing is ever novel again. S9 owns drift as a feature, and is where this earns a receipt rather than a rationale.",
+      "upstream": []
     },
     {
       "name": "BASELINE_QUANTILE_PCT",
       "value": 99,
       "kind": "policy",
-      "rationale": "The novelty percentile of a baseline's OWN window that becomes its alarm threshold. A threshold picked by hand is a number somebody liked; a threshold calibrated from the data is a statement about the data. At p99 roughly one event in a hundred of normal traffic is 'novel', which is what makes an alarm firing on 20% of a window mean something. An integer on purpose: a constant that escaped C-1 because of its TYPE would be a constant that escaped on a technicality."
+      "rationale": "The novelty percentile of a baseline's OWN window that becomes its alarm threshold. A threshold picked by hand is a number somebody liked; a threshold calibrated from the data is a statement about the data. At p99 roughly one event in a hundred of normal traffic is 'novel', which is what makes an alarm firing on 20% of a window mean something. An integer on purpose: a constant that escaped C-1 because of its TYPE would be a constant that escaped on a technicality.",
+      "upstream": []
     },
     {
       "name": "DRIFT_FIRE_MULTIPLE",
       "value": 5,
       "kind": "policy",
-      "rationale": "How many times the calibrated novelty rate must be exceeded before a drift alarm fires. The baseline is calibrated so that ~1% of normal traffic is novel; five times the expected rate is not noise, it is a different distribution. Firing at 2x would page somebody every time a tenant deployed a new prompt, and an alarm that pages on deploys is an alarm that gets muted."
+      "rationale": "How many times the calibrated novelty rate must be exceeded before a drift alarm fires. The baseline is calibrated so that ~1% of normal traffic is novel; five times the expected rate is not noise, it is a different distribution. Firing at 2x would page somebody every time a tenant deployed a new prompt, and an alarm that pages on deploys is an alarm that gets muted.",
+      "upstream": []
     },
     {
       "name": "DIST_COST_MILLI",
       "value": 1000,
       "kind": "policy",
-      "rationale": "The numeraire of the plan cost model (S8): cost is measured in units of one ADC distance, so this is 1.0 (x1000). testing/evidence/cost-model.json measures the absolute distances/sec for documentation; the plan choice needs only the ratio to PRED_COST_MILLI."
+      "rationale": "The numeraire of the plan cost model (S8): cost is measured in units of one ADC distance, so this is 1.0 (x1000). testing/evidence/cost-model.json measures the absolute distances/sec for documentation; the plan choice needs only the ratio to PRED_COST_MILLI.",
+      "upstream": []
     },
     {
       "name": "PRED_COST_MILLI",
       "value": 1000,
       "kind": "policy",
-      "rationale": "The cost of one general-predicate evaluation, relative to a distance (S8). The honest microbench finding (cost-model.json): a real interpreted predicate::eval costs as much as or MORE than a SIMD-batched ADC distance (~2.7x on the dev machine), so the predicate is the expensive per-row op and 'distance-first, predicate-lazily' (semantic-first) tends to win. Committed as a stable in-magnitude value (equal to a distance) rather than an exact ratio -- a constant bound to a stopwatch is a flaky gate. Engine-conditional (C-6): a compiled predicate path would slash it."
+      "rationale": "The cost of one general-predicate evaluation, relative to a distance (S8). The honest microbench finding (cost-model.json): a real interpreted predicate::eval costs as much as or MORE than a SIMD-batched ADC distance (~2.7x on the dev machine), so the predicate is the expensive per-row op and 'distance-first, predicate-lazily' (semantic-first) tends to win. Committed as a stable in-magnitude value (equal to a distance) rather than an exact ratio -- a constant bound to a stopwatch is a flaky gate. Engine-conditional (C-6): a compiled predicate path would slash it.",
+      "upstream": []
     },
     {
       "name": "PLAN_REGRET_BOUND_PCT",
       "value": 15,
       "kind": "policy",
-      "rationale": "The worst-cell regret bound (S8, directive 3): the chosen plan must be within 15% of the best fixed plan's actual cost in EVERY cell of the selectivity matrix, not on average. An optimizer that wins on average by losing badly in one cell is worse than a fixed heuristic for the customer in that cell. Measurement cannot pick this -- it is a statement of how much regret we are willing to ship. 15% is wide enough for a crude sampled selectivity estimate (directive 7) to meet, tight enough that a plainly-wrong choice fails the gate."
+      "rationale": "The worst-cell regret bound (S8, directive 3): the chosen plan must be within 15% of the best fixed plan's actual cost in EVERY cell of the selectivity matrix, not on average. An optimizer that wins on average by losing badly in one cell is worse than a fixed heuristic for the customer in that cell. Measurement cannot pick this -- it is a statement of how much regret we are willing to ship. 15% is wide enough for a crude sampled selectivity estimate (directive 7) to meet, tight enough that a plainly-wrong choice fails the gate.",
+      "upstream": []
     },
     {
       "name": "MAX_SEMANTIC_K",
       "value": 256,
       "kind": "policy",
-      "rationale": "docs/QUERY-CONTRACT.md#17 \u2014 the ceiling on k for GROUP BY semantic_cluster. A cluster result is read by a human; the exemplars are the product. Past a couple hundred groups it stops being an explanation and becomes a second dataset. A query asking for more is refused with a named limit, never silently clamped, because clamping answers a different question than the one asked. Measurement cannot pick this; it is a statement about what a person can read."
+      "rationale": "docs/QUERY-CONTRACT.md#17 \u2014 the ceiling on k for GROUP BY semantic_cluster. A cluster result is read by a human; the exemplars are the product. Past a couple hundred groups it stops being an explanation and becomes a second dataset. A query asking for more is refused with a named limit, never silently clamped, because clamping answers a different question than the one asked. Measurement cannot pick this; it is a statement about what a person can read.",
+      "upstream": []
     },
     {
       "name": "SEMANTIC_STATE_BUDGET_BYTES",
       "value": 536870912,
       "kind": "policy",
-      "rationale": "docs/QUERY-CONTRACT.md#17 \u2014 the clustering working-set budget. A semantic_cluster over a billion-row filtered set must decline, not OOM the node (the S2 lesson, bound the aggregate before it exists). A query whose (rows, dim, k) would exceed 512 MiB is refused with a named limit before the first vector is gathered. 512 MiB admits every corpus S9 clusters and refuses the sets that would need the streaming PQ-code fit filed for the distributed sprint."
+      "rationale": "docs/QUERY-CONTRACT.md#17 \u2014 the clustering working-set budget. A semantic_cluster over a billion-row filtered set must decline, not OOM the node (the S2 lesson, bound the aggregate before it exists). A query whose (rows, dim, k) would exceed 512 MiB is refused with a named limit before the first vector is gathered. 512 MiB admits every corpus S9 clusters and refuses the sets that would need the streaming PQ-code fit filed for the distributed sprint.",
+      "upstream": []
     },
     {
       "name": "SEMANTIC_MINIBATCH_SIZE",
       "value": 4096,
       "kind": "policy",
-      "rationale": "docs/DETERMINISM-CONTRACT.md#13 \u2014 rows per mini-batch in the k-means fit. A throughput/memory knob, not an optimum: large enough that per-batch overhead is amortized, small enough that the working set stays bounded. Because the fit accumulates in logical (event_id) order regardless of batch size, this changes memory and never the answer."
+      "rationale": "docs/DETERMINISM-CONTRACT.md#13 \u2014 rows per mini-batch in the k-means fit. A throughput/memory knob, not an optimum: large enough that per-batch overhead is amortized, small enough that the working set stays bounded. Because the fit accumulates in logical (event_id) order regardless of batch size, this changes memory and never the answer.",
+      "upstream": []
     },
     {
       "name": "SEMANTIC_MINIBATCH_EPOCHS",
       "value": 15,
       "kind": "policy",
-      "rationale": "docs/QUERY-CONTRACT.md#15 \u2014 passes over the filtered set in the fit, chosen to clear the ARI>=0.8 floor on the frozen labeled corpus with margin. The gate test clustering_recovers_the_true_labels binds it: drop it too low and the ARI floor fails, so the committed test is the receipt. More epochs buy quality with linear cost; this is where the curve flattens on the corpus. Corpus-conditional."
+      "rationale": "docs/QUERY-CONTRACT.md#15 \u2014 passes over the filtered set in the fit, chosen to clear the ARI>=0.8 floor on the frozen labeled corpus with margin. The gate test clustering_recovers_the_true_labels binds it: drop it too low and the ARI floor fails, so the committed test is the receipt. More epochs buy quality with linear cost; this is where the curve flattens on the corpus. Corpus-conditional.",
+      "upstream": []
     },
     {
       "name": "SEMANTIC_MINIBATCH_RESTARTS",
       "value": 5,
       "kind": "policy",
-      "rationale": "docs/DECISIONS.md#d-036 \u2014 independent seeded restarts, keeping the lowest-inertia fit. A single k-means++ draw is a lottery (the defect D-036 killed once for the codebook); a single draw scored ARI 0.76 on the corpus and five clears the 0.8 floor. Each restart seed is derived from the content seed, so the choice stays a deterministic function of the data (C-7). The ARI gate binds it. Corpus-conditional."
+      "rationale": "docs/DECISIONS.md#d-036 \u2014 independent seeded restarts, keeping the lowest-inertia fit. A single k-means++ draw is a lottery (the defect D-036 killed once for the codebook); a single draw scored ARI 0.76 on the corpus and five clears the 0.8 floor. Each restart seed is derived from the content seed, so the choice stays a deterministic function of the data (C-7). The ARI gate binds it. Corpus-conditional.",
+      "upstream": []
     },
     {
       "name": "CLUSTER_CONFIDENCE_MIN_X1000",
       "value": 250,
       "kind": "policy",
-      "rationale": "docs/QUERY-CONTRACT.md#17 \u2014 the cluster-quality floor (1 - inertia_k/inertia_1, x1000) below which a result is reported low-confidence. On the frozen corpus the no-structure shape scores ~0.13 and every labeled shape ~0.38-0.44, so the line at 0.25 sits with margin on both sides; the gate test no_structure_is_reported_low_confidence binds it. Corpus-conditional."
+      "rationale": "docs/QUERY-CONTRACT.md#17 \u2014 the cluster-quality floor (1 - inertia_k/inertia_1, x1000) below which a result is reported low-confidence. On the frozen corpus the no-structure shape scores ~0.13 and every labeled shape ~0.38-0.44, so the line at 0.25 sits with margin on both sides; the gate test no_structure_is_reported_low_confidence binds it. Corpus-conditional.",
+      "upstream": []
     },
     {
       "name": "MERGE_SAFETY_MARGIN_BYTES",
       "value": 67108864,
       "kind": "policy",
-      "rationale": "docs/MERGE-CONTRACT.md#3 \u2014 free-space headroom required BEYOND the projected merge output before a merge is admitted. A merge writes a second copy before it can free the first, so it is refused with a named deferral unless projected output + this margin fits in free space. 64 MiB is a headroom decision, not a measured optimum: enough that the snapshot commit, WAL, and concurrent ingest have room while a merge runs, small enough not to refuse a merge on a nearly-full disk that the merge would itself relieve. Measurement cannot pick it; it states how close to full we operate."
+      "rationale": "docs/MERGE-CONTRACT.md#3 \u2014 free-space headroom required BEYOND the projected merge output before a merge is admitted. A merge writes a second copy before it can free the first, so it is refused with a named deferral unless projected output + this margin fits in free space. 64 MiB is a headroom decision, not a measured optimum: enough that the snapshot commit, WAL, and concurrent ingest have room while a merge runs, small enough not to refuse a merge on a nearly-full disk that the merge would itself relieve. Measurement cannot pick it; it states how close to full we operate.",
+      "upstream": []
     },
     {
       "name": "LEASE_TTL_MS",
       "value": 3600000,
       "kind": "policy",
-      "rationale": "docs/MERGE-CONTRACT.md#5 \u2014 the maximum time a reader may hold a snapshot pinned across a paginated query (invariant 4/6). A query paginating longer than this has its lease expire and its next page returns the explicit expired-snapshot error rather than a stale answer. One hour is generous for an interactive paginating reader and short enough that a crashed reader does not pin storage for long. This is the ONE lifecycle-timing constant; GC grace and the reclaim horizon are derived const fns of it (catalog::GC_GRACE_MS/GC_HORIZON_MS), never registered separately, so grace<lease can never arise and orphan a live reader."
+      "rationale": "docs/MERGE-CONTRACT.md#5 \u2014 the maximum time a reader may hold a snapshot pinned across a paginated query (invariant 4/6). A query paginating longer than this has its lease expire and its next page returns the explicit expired-snapshot error rather than a stale answer. One hour is generous for an interactive paginating reader and short enough that a crashed reader does not pin storage for long. This is the ONE lifecycle-timing constant; GC grace and the reclaim horizon are derived const fns of it (catalog::GC_GRACE_MS/GC_HORIZON_MS), never registered separately, so grace<lease can never arise and orphan a live reader.",
+      "upstream": []
     },
     {
       "name": "MAX_CLOCK_SKEW_MS",
       "value": 300000,
       "kind": "policy",
-      "rationale": "docs/DECISIONS.md#d-075 \u2014 the maximum cross-node wall-clock disagreement a distributed reader lease tolerates (S12). Within a node the lease clock is MONOTONIC (prism_engine::clock), so a wall-clock jump cannot move a reclaim decision at all \u2014 the primary defence, needing no constant. The one unavoidable wall-clock use is a persisted created_at_ms, stamped by the wall clock of whichever node wrote the snapshot and compared by GC to its own monotonic now; this bounds the disagreement assumed between those two clocks. Five minutes is generous relative to the sub-second skew an NTP-corrected fleet runs, and a compile-time const assertion pins it strictly below GC_GRACE_MS (one hour) so the derived grace absorbs any disagreement within the bound \u2014 a reader within its lease is never orphaned by a clock it does not control, and nothing lives past horizon+skew. Derived-adjacent: the assertion is the code half of the C-1 binding, so grace<skew can never arise."
+      "rationale": "docs/DECISIONS.md#d-075 \u2014 the maximum cross-node wall-clock disagreement a distributed reader lease tolerates (S12). Within a node the lease clock is MONOTONIC (prism_engine::clock), so a wall-clock jump cannot move a reclaim decision at all \u2014 the primary defence, needing no constant. The one unavoidable wall-clock use is a persisted created_at_ms, stamped by the wall clock of whichever node wrote the snapshot and compared by GC to its own monotonic now; this bounds the disagreement assumed between those two clocks. Five minutes is generous relative to the sub-second skew an NTP-corrected fleet runs, and a compile-time const assertion pins it strictly below GC_GRACE_MS (one hour) so the derived grace absorbs any disagreement within the bound \u2014 a reader within its lease is never orphaned by a clock it does not control, and nothing lives past horizon+skew. Derived-adjacent: the assertion is the code half of the C-1 binding, so grace<skew can never arise.",
+      "upstream": []
     },
     {
       "name": "MERGE_TIER_FANOUT",
       "value": 4,
       "kind": "policy",
-      "rationale": "docs/MERGE-CONTRACT.md#2 \u2014 parts per size tier before it is merged. Too low merges constantly (write amplification); too high lets part count drift up (read amplification) before a merge fires. 4 is the boring middle: a tier holds at most 3 parts in steady state, so part count per partition is bounded by ~3xtiers. The soak gate binds it \u2014 an unbounded part count fails it."
+      "rationale": "docs/MERGE-CONTRACT.md#2 \u2014 parts per size tier before it is merged. Too low merges constantly (write amplification); too high lets part count drift up (read amplification) before a merge fires. 4 is the boring middle: a tier holds at most 3 parts in steady state, so part count per partition is bounded by ~3xtiers. The soak gate binds it \u2014 an unbounded part count fails it.",
+      "upstream": []
     },
     {
       "name": "MERGE_TIER_RATIO",
       "value": 4,
       "kind": "policy",
-      "rationale": "docs/MERGE-CONTRACT.md#2 \u2014 the row-count ratio between adjacent size tiers. Equal to the fan-out on purpose: merging a full tier of FANOUT parts produces one part that lands exactly one tier up, so a merged part does not immediately re-trigger its new tier."
+      "rationale": "docs/MERGE-CONTRACT.md#2 \u2014 the row-count ratio between adjacent size tiers. Equal to the fan-out on purpose: merging a full tier of FANOUT parts produces one part that lands exactly one tier up, so a merged part does not immediately re-trigger its new tier.",
+      "upstream": []
     },
     {
       "name": "MERGE_TIER_BASE_ROWS",
       "value": 256,
       "kind": "policy",
-      "rationale": "docs/MERGE-CONTRACT.md#2 \u2014 the upper row count of tier 0, where freshly-ingested batches land, so a batch lands in tier 0 and climbs from there. Near a typical ingest batch size."
+      "rationale": "docs/MERGE-CONTRACT.md#2 \u2014 the upper row count of tier 0, where freshly-ingested batches land, so a batch lands in tier 0 and climbs from there. Near a typical ingest batch size.",
+      "upstream": []
     },
     {
       "name": "MERGE_IO_BUDGET_ROWS",
       "value": 1000000,
       "kind": "policy",
-      "rationale": "docs/MERGE-CONTRACT.md#2 \u2014 the most rows a single merge cycle will move. A cycle admits ops until this is spent, then defers the rest by name, so one cycle can never rewrite the whole store even under an ingest burst. Generous enough that steady-state merges are never starved."
+      "rationale": "docs/MERGE-CONTRACT.md#2 \u2014 the most rows a single merge cycle will move. A cycle admits ops until this is spent, then defers the rest by name, so one cycle can never rewrite the whole store even under an ingest burst. Generous enough that steady-state merges are never starved.",
+      "upstream": []
     },
     {
       "name": "MERGE_MAX_OPS",
       "value": 16,
       "kind": "policy",
-      "rationale": "docs/MERGE-CONTRACT.md#2 \u2014 the most merges a single cycle runs (concurrency budget). Bounds how many partitions a cycle touches, so no cycle's work is unbounded even on a store with thousands of partitions. Excess ops are deferred, not dropped."
+      "rationale": "docs/MERGE-CONTRACT.md#2 \u2014 the most merges a single cycle runs (concurrency budget). Bounds how many partitions a cycle touches, so no cycle's work is unbounded even on a store with thousands of partitions. Excess ops are deferred, not dropped.",
+      "upstream": []
     },
     {
       "name": "OBJECT_REQUEST_COST_MICROS",
       "value": 100,
       "kind": "policy",
-      "rationale": "docs/STORAGE-CONTRACT.md#5 \u2014 estimated cost of one cold-tier object request, micro-units. BACKEND-CONDITIONAL: a fixed per-call cost (round trip, auth, request charge) independent of size. This is the local-object-store figure (a syscall's worth); an S3-over-WAN request is orders of magnitude more, and a receipt measured against one backend is not the number for the other. Named so EXPLAIN's per-query cost is a consistent unit, re-derived per backend."
+      "rationale": "docs/STORAGE-CONTRACT.md#5 \u2014 estimated cost of one cold-tier object request, micro-units. BACKEND-CONDITIONAL: a fixed per-call cost (round trip, auth, request charge) independent of size. This is the local-object-store figure (a syscall's worth); an S3-over-WAN request is orders of magnitude more, and a receipt measured against one backend is not the number for the other. Named so EXPLAIN's per-query cost is a consistent unit, re-derived per backend.",
+      "upstream": []
     },
     {
       "name": "RETRIEVED_BYTE_COST_PICOS",
       "value": 1,
       "kind": "policy",
-      "rationale": "docs/STORAGE-CONTRACT.md#5 \u2014 estimated cost of retrieving one cold-tier byte, pico-units. BACKEND-CONDITIONAL: per-byte egress/transfer. Local object storage is near-free per byte; S3-over-WAN egress is the dominant term of a real bill. Pico unit so a megabyte is a meaningful integer and the two backends' figures stay distinguishable."
+      "rationale": "docs/STORAGE-CONTRACT.md#5 \u2014 estimated cost of retrieving one cold-tier byte, pico-units. BACKEND-CONDITIONAL: per-byte egress/transfer. Local object storage is near-free per byte; S3-over-WAN egress is the dominant term of a real bill. Pico unit so a megabyte is a meaningful integer and the two backends' figures stay distinguishable.",
+      "upstream": []
     },
     {
       "name": "CACHE_QUOTA_BYTES",
       "value": 268435456,
       "kind": "policy",
-      "rationale": "docs/STORAGE-CONTRACT.md#4 \u2014 the local NVMe block cache byte quota. The cache is a bounded, disposable optimization: sized, not unbounded, so it cannot itself become the thing that fills the disk. A full cache evicts under pressure and at the hard limit reports S10 OutOfSpace backpressure rather than growing without bound. 256 MiB is a working default; the real size is a deployment knob. Backend-conditional numbers ride on it."
+      "rationale": "docs/STORAGE-CONTRACT.md#4 \u2014 the local NVMe block cache byte quota. The cache is a bounded, disposable optimization: sized, not unbounded, so it cannot itself become the thing that fills the disk. A full cache evicts under pressure and at the hard limit reports S10 OutOfSpace backpressure rather than growing without bound. 256 MiB is a working default; the real size is a deployment knob. Backend-conditional numbers ride on it.",
+      "upstream": []
     },
     {
       "name": "COLD_FETCH_MAX_RETRIES",
       "value": 3,
       "kind": "policy",
-      "rationale": "docs/STORAGE-CONTRACT.md#4 \u2014 bounded retries of a transient cold-tier fetch (5xx, dropped connection) before the query fails with the named remote condition. BACKEND-CONDITIONAL: a remote read hiccups; a small bounded retry turns a transient blip into the correct answer, and the bound turns a dead remote into a NAMED failure not an unbounded hang. Three rides out a blip and names a genuinely-down remote quickly. A truncated/corrupt read is NOT retried \u2014 named byte error at once."
+      "rationale": "docs/STORAGE-CONTRACT.md#4 \u2014 bounded retries of a transient cold-tier fetch (5xx, dropped connection) before the query fails with the named remote condition. BACKEND-CONDITIONAL: a remote read hiccups; a small bounded retry turns a transient blip into the correct answer, and the bound turns a dead remote into a NAMED failure not an unbounded hang. Three rides out a blip and names a genuinely-down remote quickly. A truncated/corrupt read is NOT retried \u2014 named byte error at once.",
+      "upstream": []
     },
     {
       "name": "MULTIPART_THRESHOLD_BYTES",
       "value": 16777216,
       "kind": "policy",
-      "rationale": "docs/STORAGE-CONTRACT.md#2 \u2014 object size at/above which an upload uses multipart instead of a single PUT, AND the size of each part. BACKEND-CONDITIONAL: a single PUT is fine to the backend's limit, but a large object wants multipart so a mid-upload crash leaves resumable server-side parts that GC's list-and-abort sweep reclaims, rather than re-sending whole. 16 MiB (> S3's 5 MiB minimum part size) is a common part size; a cold-tier rerank.vec crosses it at scale. Multipart initiate/part/complete/abort + the GC sweep are implemented (S11 boundary d); this constant is both the threshold and the part size."
+      "rationale": "docs/STORAGE-CONTRACT.md#2 \u2014 object size at/above which an upload uses multipart instead of a single PUT, AND the size of each part. BACKEND-CONDITIONAL: a single PUT is fine to the backend's limit, but a large object wants multipart so a mid-upload crash leaves resumable server-side parts that GC's list-and-abort sweep reclaims, rather than re-sending whole. 16 MiB (> S3's 5 MiB minimum part size) is a common part size; a cold-tier rerank.vec crosses it at scale. Multipart initiate/part/complete/abort + the GC sweep are implemented (S11 boundary d); this constant is both the threshold and the part size.",
+      "upstream": []
     },
     {
       "name": "THRESHOLD_OVERFETCH_MARGIN_EPSILON_MICROS",
@@ -441,37 +508,45 @@
       "corpus_conditional_reason": "the hash-embedder corpus reconstructs vectors near-exactly, so its PQ error \u2014 and thus \u03b5 \u2014 is unusually small. A real 768d embedding space re-derives a materially larger \u03b5 (issue #3); the margin-injection test exercises the mechanism at production-shaped \u03b5 that this corpus's geometry does not reach.",
       "generation_conditional": true,
       "generation_conditional_reason": "\u03b5 is a function of the codebook's quantization geometry (C-6). A new generation re-derives it \u2014 the pq_margin test is the C-6 guard that a codebook change updates testing/evidence/pq-margin.json.",
-      "geometry_sensitivity": "sensitive"
+      "geometry_sensitivity": "sensitive",
+      "upstream": [
+        "KMEANS_RESTARTS"
+      ]
     },
     {
       "name": "THRESHOLD_STATE_BUDGET",
       "value": 100000,
       "kind": "policy",
-      "rationale": "docs/QUERY-CONTRACT.md#22 \u2014 the most candidates a threshold query's relaxed bound may keep, per shard, before the query is REFUSED BY NAME (S9 named-limit) rather than reranked without bound. A threshold query is bounded by the threshold, not a top-k width, so a broad filter with a low \u03c4 could otherwise qualify an unbounded set and rerank every one. This is a safety ceiling on unbounded exact-scoring work, not an empirical optimum: 100k candidates per shard is generous for any real threshold query and small enough that the refusal fires before the work does. Narrow the filter or raise \u03c4."
+      "rationale": "docs/QUERY-CONTRACT.md#22 \u2014 the most candidates a threshold query's relaxed bound may keep, per shard, before the query is REFUSED BY NAME (S9 named-limit) rather than reranked without bound. A threshold query is bounded by the threshold, not a top-k width, so a broad filter with a low \u03c4 could otherwise qualify an unbounded set and rerank every one. This is a safety ceiling on unbounded exact-scoring work, not an empirical optimum: 100k candidates per shard is generous for any real threshold query and small enough that the refusal fires before the work does. Narrow the filter or raise \u03c4.",
+      "upstream": []
     },
     {
       "name": "HEDGE_DELAY_MS",
       "value": 50,
       "kind": "policy",
-      "rationale": "docs/QUERY-CONTRACT.md#21 \u2014 the tail-latency threshold at which a slow cross-shard fragment is hedged (re-issued). Long enough that a healthy fragment is never hedged, so hedging adds no load in the common case; short enough to cut a real straggler. POLICY, and INERT in the synchronous coordinator (which has no latency to wait on) \u2014 the asynchronous transport will honour it; the hedge idempotence/dedup/blast-radius semantics ship and are gated now (honest-wall, D-079)."
+      "rationale": "docs/QUERY-CONTRACT.md#21 \u2014 the tail-latency threshold at which a slow cross-shard fragment is hedged (re-issued). Long enough that a healthy fragment is never hedged, so hedging adds no load in the common case; short enough to cut a real straggler. POLICY, and INERT in the synchronous coordinator (which has no latency to wait on) \u2014 the asynchronous transport will honour it; the hedge idempotence/dedup/blast-radius semantics ship and are gated now (honest-wall, D-079).",
+      "upstream": []
     },
     {
       "name": "HEDGE_FANOUT",
       "value": 1,
       "kind": "policy",
-      "rationale": "docs/QUERY-CONTRACT.md#21 \u2014 the most hedges a single fragment may spawn. One hedge cuts the tail without a fan-out storm; more issues have sharply diminishing returns and multiply load exactly when the cluster is already struggling. POLICY; load-bearing (bounds the coordinator's re-execution per fragment). D-079."
+      "rationale": "docs/QUERY-CONTRACT.md#21 \u2014 the most hedges a single fragment may spawn. One hedge cuts the tail without a fan-out storm; more issues have sharply diminishing returns and multiply load exactly when the cluster is already struggling. POLICY; load-bearing (bounds the coordinator's re-execution per fragment). D-079.",
+      "upstream": []
     },
     {
       "name": "HEDGE_DEDUP_WINDOW_MS",
       "value": 200,
       "kind": "policy",
-      "rationale": "docs/QUERY-CONTRACT.md#21 \u2014 how long the coordinator holds a fragment's slot open to absorb a duplicate (hedged) response before treating a late arrival as new. POLICY, and INERT here: the pinned snapshot makes duplicates byte-identical, so dedup is by identity and needs no window; the asynchronous transport uses it (honest-wall, D-079)."
+      "rationale": "docs/QUERY-CONTRACT.md#21 \u2014 how long the coordinator holds a fragment's slot open to absorb a duplicate (hedged) response before treating a late arrival as new. POLICY, and INERT here: the pinned snapshot makes duplicates byte-identical, so dedup is by identity and needs no window; the asynchronous transport uses it (honest-wall, D-079).",
+      "upstream": []
     },
     {
       "name": "MAX_INFLIGHT_FRAGMENTS",
       "value": 32,
       "kind": "policy",
-      "rationale": "docs/QUERY-CONTRACT.md#21 \u2014 the blast-radius cap: the most fragments (originals plus hedges) in flight for one query at once. A slow cluster must not hedge itself into collapse, so a hedge is issued only while the total stays under this bound; past it the query waits on the originals rather than amplifying load during a degradation. POLICY; load-bearing (bounds hedge amplification). D-079."
+      "rationale": "docs/QUERY-CONTRACT.md#21 \u2014 the blast-radius cap: the most fragments (originals plus hedges) in flight for one query at once. A slow cluster must not hedge itself into collapse, so a hedge is issued only while the total stays under this bound; past it the query waits on the originals rather than amplifying load during a degradation. POLICY; load-bearing (bounds hedge amplification). D-079.",
+      "upstream": []
     }
   ]
 }

@@ -3,7 +3,7 @@
 //! `DEFAULT_CANDIDATES` and `DEFAULT_RERANK` are swept **jointly** (never independent axes: the
 //! candidate width decides who may be reranked, the rerank width decides how many actually are, so a
 //! single-axis sweep measures a cross-section of a surface and reports it as the surface), holding
-//! `nprobe` at its own re-derived receipted value (14, D-081). The rule: among points clearing BOTH
+//! `nprobe` at its own re-derived receipted value (11, D-081 as amended by D-083). The rule: among points clearing BOTH
 //! tail floors (p1 recall@10 >= 0.8 AND zero empties — the same floors nprobe was chosen against),
 //! smallest rerank first then smallest candidates, **subject to `rerank >= MIN_PAGEABLE_ROWS` (50)** —
 //! the S3 policy bound, because the paginated result set IS the rerank survivor set.
@@ -37,7 +37,7 @@ fn config() -> StoreConfig {
         nlist: 64,
         pq_m: 96,
         seed: 42,
-        kmeans_restarts: 5,
+        kmeans_restarts: prism_quantizer::kmeans::KMEANS_RESTARTS,
         block_size: prism_part::format::DEFAULT_BLOCK_SIZE,
         partitions: Default::default(),
         promote: Vec::new(),
@@ -159,7 +159,7 @@ fn rederive_widths_on_real_v1() {
             "  → FINDING: recall now binds at EXACTLY the policy floor — rerank=25 gives p1 0.600 (fails), \
              rerank=50 gives 0.900 (clears), and MIN_PAGEABLE_ROWS is also 50. The two constraints COINCIDE, \
              so 50 is now doubly justified (hash corpus: recall cleared at rerank=10, policy alone chose 50). \
-             Candidates is irrelevant to recall — nprobe=14 already delivers the true neighbours into a 50-wide \
+             Candidates is irrelevant to recall — nprobe=11 already delivers the true neighbours into a 50-wide \
              heap — so candidates=rerank=50 (minimum memory) is the honest choice."
         );
     } else {

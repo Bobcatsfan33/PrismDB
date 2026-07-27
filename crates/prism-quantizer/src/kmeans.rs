@@ -22,9 +22,17 @@ use serde::{Deserialize, Serialize};
 /// whose quality depends on a lucky draw is not a pipeline, it is a coincidence. Restarts make
 /// the outcome depend on the data instead.
 ///
-/// Five is a deliberate compromise: training is offline and its cost is linear in this number,
-/// while the variance it removes is most of the variance there is.
-pub const KMEANS_RESTARTS: usize = 5;
+/// **S13 dir 2 — re-derived on real-v1: 8, up from 5, and this constant is UPSTREAM of every
+/// geometry-derived constant** (it produces both the IVF centroids and the PQ codebook, so ε, nprobe,
+/// adaptive-margin and the widths all depend on it — [D-083](../../../docs/DECISIONS.md), charter C-8).
+/// The derived-nprobe-over-restarts sequence on real geometry is **non-monotone** — restarts 1,2 draw
+/// a lucky-low codebook (nprobe 11), 3 and 5 get *stuck in a worse local optimum* (nprobe 14), and 8,
+/// 12, 16, 25 all converge to the same good codebook (nprobe 11, byte-identical scan). The **plateau
+/// rule** — the smallest restart count whose derived nprobe is matched by every larger one — picks 8,
+/// and it is exactly what stopped a "smallest value that passes" rule from shipping restarts=5's worse
+/// draw. That jaggedness is why plateau-detection is the standard sweep method for any constant
+/// governing a stochastic process. Receipt `testing/evidence/kmeans-restarts.json`; geometry-sensitive.
+pub const KMEANS_RESTARTS: usize = 8;
 
 /// Train, restarting `KMEANS_RESTARTS` times and keeping the codebook that fits best.
 ///

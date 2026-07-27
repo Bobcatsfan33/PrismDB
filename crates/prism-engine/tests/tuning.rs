@@ -154,6 +154,56 @@ fn the_ledger_holds_no_constant_the_code_does_not() {
 }
 
 #[test]
+fn the_dependency_graph_is_consistent_and_geometry_flows_downstream() {
+    // Charter C-8: each constant declares which constants are UPSTREAM of it. Two invariants:
+    //   (1) referential integrity — every named upstream constant exists in the ledger;
+    //   (2) geometry flows downstream — if a constant is geometry-sensitive, so is anything that
+    //       lists it as upstream (a downstream of a moving input cannot itself be stable).
+    let reg = registry();
+    let by_name: std::collections::BTreeMap<&str, &prism_engine::tuning::RegistryEntry> =
+        reg.constants.iter().map(|e| (e.name.as_str(), e)).collect();
+
+    for e in &reg.constants {
+        for up in &e.upstream {
+            let parent = by_name.get(up.as_str()).unwrap_or_else(|| {
+                panic!(
+                    "`{}` lists upstream `{up}`, which is not in the ledger",
+                    e.name
+                )
+            });
+            assert_ne!(
+                up.as_str(),
+                e.name.as_str(),
+                "`{}` cannot be its own upstream",
+                e.name
+            );
+            if parent.geometry_sensitivity.as_deref() == Some("sensitive") {
+                assert_eq!(
+                    e.geometry_sensitivity.as_deref(),
+                    Some("sensitive"),
+                    "`{}` is downstream of the geometry-sensitive `{up}`, so it must itself be \
+                     geometry-sensitive — a receipt derived on a moving codebook cannot be stable (C-8)",
+                    e.name
+                );
+            }
+        }
+    }
+
+    // KMEANS_RESTARTS is the root of the geometry graph: it must be upstream of every
+    // geometry-sensitive constant except itself (it produces both the IVF centroids and the PQ
+    // codebook), so nothing geometry-sensitive may float free of it.
+    for e in &reg.constants {
+        if e.geometry_sensitivity.as_deref() == Some("sensitive") && e.name != "KMEANS_RESTARTS" {
+            assert!(
+                e.upstream.iter().any(|u| u == "KMEANS_RESTARTS"),
+                "`{}` is geometry-sensitive but does not declare KMEANS_RESTARTS upstream (C-8)",
+                e.name
+            );
+        }
+    }
+}
+
+#[test]
 fn the_block_size_evidence_actually_justifies_the_choice() {
     // Not just "the number in the file matches the number in the code" — the *rule*
     // the evidence claims to have followed must actually select that number from the

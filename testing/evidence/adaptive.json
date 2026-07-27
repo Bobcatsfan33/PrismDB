@@ -7,71 +7,71 @@
   "chosen_margin": 0.02,
   "chosen_margin_x1000": 20,
   "selection_basis": "benefit",
-  "starved_base": 13,
-  "shipping_base": 14,
+  "starved_base": 10,
+  "shipping_base": 11,
   "sweep": [
     {
       "margin": 0.0,
       "starved_p1_recall": 0.7,
       "starved_zero_recall_queries": 0,
-      "starved_mean_probes": 195.0,
-      "shipping_p1_recall": 0.9,
-      "shipping_mean_probes": 210.0
+      "starved_mean_probes": 150.0,
+      "shipping_p1_recall": 0.8,
+      "shipping_mean_probes": 165.0
     },
     {
       "margin": 0.02,
-      "starved_p1_recall": 0.9,
+      "starved_p1_recall": 0.8,
       "starved_zero_recall_queries": 0,
-      "starved_mean_probes": 224.0,
-      "shipping_p1_recall": 0.9,
-      "shipping_mean_probes": 234.0
+      "starved_mean_probes": 180.1,
+      "shipping_p1_recall": 0.8,
+      "shipping_mean_probes": 196.4
     },
     {
       "margin": 0.05,
-      "starved_p1_recall": 0.9,
+      "starved_p1_recall": 0.8,
       "starved_zero_recall_queries": 0,
-      "starved_mean_probes": 238.4,
-      "shipping_p1_recall": 0.9,
-      "shipping_mean_probes": 239.7
+      "starved_mean_probes": 216.5,
+      "shipping_p1_recall": 0.8,
+      "shipping_mean_probes": 228.0
     },
     {
       "margin": 0.1,
-      "starved_p1_recall": 0.9,
+      "starved_p1_recall": 0.8,
       "starved_zero_recall_queries": 0,
-      "starved_mean_probes": 240.0,
-      "shipping_p1_recall": 0.9,
-      "shipping_mean_probes": 240.0
+      "starved_mean_probes": 237.2,
+      "shipping_p1_recall": 0.8,
+      "shipping_mean_probes": 239.3
     },
     {
       "margin": 0.15,
-      "starved_p1_recall": 0.9,
+      "starved_p1_recall": 0.8,
       "starved_zero_recall_queries": 0,
-      "starved_mean_probes": 240.0,
-      "shipping_p1_recall": 0.9,
+      "starved_mean_probes": 239.8,
+      "shipping_p1_recall": 0.8,
       "shipping_mean_probes": 240.0
     },
     {
       "margin": 0.2,
-      "starved_p1_recall": 0.9,
+      "starved_p1_recall": 0.8,
       "starved_zero_recall_queries": 0,
-      "starved_mean_probes": 240.0,
-      "shipping_p1_recall": 0.9,
+      "starved_mean_probes": 239.9,
+      "shipping_p1_recall": 0.8,
       "shipping_mean_probes": 240.0
     },
     {
       "margin": 0.3,
-      "starved_p1_recall": 0.9,
+      "starved_p1_recall": 0.8,
       "starved_zero_recall_queries": 0,
       "starved_mean_probes": 240.0,
-      "shipping_p1_recall": 0.9,
+      "shipping_p1_recall": 0.8,
       "shipping_mean_probes": 240.0
     },
     {
       "margin": 0.5,
-      "starved_p1_recall": 0.9,
+      "starved_p1_recall": 0.8,
       "starved_zero_recall_queries": 0,
       "starved_mean_probes": 240.0,
-      "shipping_p1_recall": 0.9,
+      "shipping_p1_recall": 0.8,
       "shipping_mean_probes": 240.0
     }
   ],
@@ -81,8 +81,8 @@
       "selection_basis": "benefit",
       "generation_id": "6155e352fd25b26e",
       "corpus": "real-v1 (768d, nlist=64) + boundary_queries.jsonl",
-      "starved_base": 13,
-      "shipping_base": 14,
+      "starved_base": 10,
+      "shipping_base": 11,
       "flat_starved_p1_recall": 0.7,
       "chosen_margin": 0.02,
       "chosen_margin_x1000": 20,
@@ -93,68 +93,141 @@
           "margin": 0.0,
           "starved_p1_recall": 0.7,
           "starved_zero_recall_queries": 0,
-          "starved_mean_probes": 195.0,
-          "shipping_p1_recall": 0.9,
-          "shipping_mean_probes": 210.0
+          "starved_mean_probes": 150.0,
+          "shipping_p1_recall": 0.8,
+          "shipping_mean_probes": 165.0
         },
         {
           "margin": 0.02,
-          "starved_p1_recall": 0.9,
+          "starved_p1_recall": 0.8,
           "starved_zero_recall_queries": 0,
-          "starved_mean_probes": 224.0,
-          "shipping_p1_recall": 0.9,
-          "shipping_mean_probes": 234.0
+          "starved_mean_probes": 180.1,
+          "shipping_p1_recall": 0.8,
+          "shipping_mean_probes": 196.4
         },
         {
           "margin": 0.05,
-          "starved_p1_recall": 0.9,
+          "starved_p1_recall": 0.8,
           "starved_zero_recall_queries": 0,
-          "starved_mean_probes": 238.4,
-          "shipping_p1_recall": 0.9,
-          "shipping_mean_probes": 239.7
+          "starved_mean_probes": 216.5,
+          "shipping_p1_recall": 0.8,
+          "shipping_mean_probes": 228.0
         },
         {
           "margin": 0.1,
-          "starved_p1_recall": 0.9,
+          "starved_p1_recall": 0.8,
           "starved_zero_recall_queries": 0,
-          "starved_mean_probes": 240.0,
-          "shipping_p1_recall": 0.9,
-          "shipping_mean_probes": 240.0
+          "starved_mean_probes": 237.2,
+          "shipping_p1_recall": 0.8,
+          "shipping_mean_probes": 239.3
         },
         {
           "margin": 0.15,
-          "starved_p1_recall": 0.9,
+          "starved_p1_recall": 0.8,
           "starved_zero_recall_queries": 0,
-          "starved_mean_probes": 240.0,
-          "shipping_p1_recall": 0.9,
+          "starved_mean_probes": 239.8,
+          "shipping_p1_recall": 0.8,
           "shipping_mean_probes": 240.0
         },
         {
           "margin": 0.2,
-          "starved_p1_recall": 0.9,
+          "starved_p1_recall": 0.8,
           "starved_zero_recall_queries": 0,
-          "starved_mean_probes": 240.0,
-          "shipping_p1_recall": 0.9,
+          "starved_mean_probes": 239.9,
+          "shipping_p1_recall": 0.8,
           "shipping_mean_probes": 240.0
         },
         {
           "margin": 0.3,
-          "starved_p1_recall": 0.9,
+          "starved_p1_recall": 0.8,
           "starved_zero_recall_queries": 0,
           "starved_mean_probes": 240.0,
-          "shipping_p1_recall": 0.9,
+          "shipping_p1_recall": 0.8,
           "shipping_mean_probes": 240.0
         },
         {
           "margin": 0.5,
-          "starved_p1_recall": 0.9,
+          "starved_p1_recall": 0.8,
           "starved_zero_recall_queries": 0,
           "starved_mean_probes": 240.0,
-          "shipping_p1_recall": 0.9,
+          "shipping_p1_recall": 0.8,
           "shipping_mean_probes": 240.0
         }
       ],
-      "note": "SHIPPED. On real geometry the mechanism's benefit is finally MEASURABLE: the starved base (13, flat p1 0.700) recovers to p1 0.900 at margin 0.02 \u2014 so the choice is by BENEFIT (smallest margin recovering the starved tail to the 0.8 floor), not the hash corpus's cost-ceiling fallback."
+      "note": "SHIPPED (restarts=8, D-083). Shipping base = DEFAULT_NPROBE=11; starved base 10 recovers p1 0.700\u21920.800 at margin 0.02 (benefit-first). Value unchanged from restarts=5.",
+      "config_superseded_within_real_v1": {
+        "superseded_by": "D-083 (KMEANS_RESTARTS 5\u21928)",
+        "starved_base": 13,
+        "shipping_base": 14,
+        "chosen_margin": 0.02,
+        "sweep": [
+          {
+            "margin": 0.0,
+            "starved_p1_recall": 0.7,
+            "starved_zero_recall_queries": 0,
+            "starved_mean_probes": 195.0,
+            "shipping_p1_recall": 0.9,
+            "shipping_mean_probes": 210.0
+          },
+          {
+            "margin": 0.02,
+            "starved_p1_recall": 0.9,
+            "starved_zero_recall_queries": 0,
+            "starved_mean_probes": 224.0,
+            "shipping_p1_recall": 0.9,
+            "shipping_mean_probes": 234.0
+          },
+          {
+            "margin": 0.05,
+            "starved_p1_recall": 0.9,
+            "starved_zero_recall_queries": 0,
+            "starved_mean_probes": 238.4,
+            "shipping_p1_recall": 0.9,
+            "shipping_mean_probes": 239.7
+          },
+          {
+            "margin": 0.1,
+            "starved_p1_recall": 0.9,
+            "starved_zero_recall_queries": 0,
+            "starved_mean_probes": 240.0,
+            "shipping_p1_recall": 0.9,
+            "shipping_mean_probes": 240.0
+          },
+          {
+            "margin": 0.15,
+            "starved_p1_recall": 0.9,
+            "starved_zero_recall_queries": 0,
+            "starved_mean_probes": 240.0,
+            "shipping_p1_recall": 0.9,
+            "shipping_mean_probes": 240.0
+          },
+          {
+            "margin": 0.2,
+            "starved_p1_recall": 0.9,
+            "starved_zero_recall_queries": 0,
+            "starved_mean_probes": 240.0,
+            "shipping_p1_recall": 0.9,
+            "shipping_mean_probes": 240.0
+          },
+          {
+            "margin": 0.3,
+            "starved_p1_recall": 0.9,
+            "starved_zero_recall_queries": 0,
+            "starved_mean_probes": 240.0,
+            "shipping_p1_recall": 0.9,
+            "shipping_mean_probes": 240.0
+          },
+          {
+            "margin": 0.5,
+            "starved_p1_recall": 0.9,
+            "starved_zero_recall_queries": 0,
+            "starved_mean_probes": 240.0,
+            "shipping_p1_recall": 0.9,
+            "shipping_mean_probes": 240.0
+          }
+        ],
+        "note": "Retained. Derived at restarts=5 (shipping base 14); margin 0.02 held there too."
+      }
     },
     "hash-v1": {
       "starved_base": 2,
@@ -239,7 +312,8 @@
     "new_real_v1": 0.5,
     "old_selection": "cost-ceiling",
     "new_selection": "benefit",
-    "mechanism": "The hash corpus could never recover its starved tail to the floor within the cost budget, so ADAPTIVE_MARGIN was picked by a cost ceiling (largest cost-bounded margin that helped at all = 0.05) \u2014 the real benefit-driven derivation was explicitly deferred to a real-embedding corpus (issue #3). real-v1 delivers it: the starved base (13) recovers from p1 0.700 to 0.900 at margin 0.02, so the SMALLEST margin recovering the tail to the 0.8 floor is 0.02. The selection rule is now benefit-first with a cost-ceiling fallback (evidence.rs::select_adaptive_margin), which yields 0.02 on real-v1 and leaves the retained hash value at 0.05."
+    "mechanism": "The hash corpus could never recover its starved tail to the floor within the cost budget, so ADAPTIVE_MARGIN was picked by a cost ceiling (largest cost-bounded margin that helped at all = 0.05) \u2014 the real benefit-driven derivation was explicitly deferred to a real-embedding corpus (issue #3). real-v1 delivers it: the starved base (13) recovers from p1 0.700 to 0.900 at margin 0.02, so the SMALLEST margin recovering the tail to the 0.8 floor is 0.02. The selection rule is now benefit-first with a cost-ceiling fallback (evidence.rs::select_adaptive_margin), which yields 0.02 on real-v1 and leaves the retained hash value at 0.05.",
+    "restarts_note": "Re-derived on restarts=8 (D-083); margin unchanged at 0.02, shipping base moved 14\u219211."
   },
   "interaction_finding": "At the real-v1 shipping base (DEFAULT_NPROBE=14) adaptive has almost no room to widen before ADAPTIVE_MAX_NPROBE=16 (2 probes of headroom), so the cost ceiling cannot discriminate margins at the shipping base and the benefit signal comes entirely from the starved base. As DEFAULT_NPROBE rose to 14, ADAPTIVE_MAX_NPROBE=16 is now tight; a future revision should re-derive the max relative to the base (filed as a note on issue #1).",
   "policy_bounds": [
@@ -251,5 +325,8 @@
   "corpus_conditional": true,
   "generation_conditional": true,
   "rule": "benefit-first, cost-ceiling fallback (evidence.rs::select_adaptive_margin). Where the corpus recovers its starved tail to the floor within the cost budget, the SMALLEST such margin (real-v1: 0.02); else the largest cost-bounded margin that helps at all (hash: 0.05).",
-  "note": "S6, issue #1; benefit-first selection realised S13 dir 2. geometry-SENSITIVE: re-derive per corpus/generation (C-3/C-6)."
+  "note": "S6, issue #1; benefit-first selection realised S13 dir 2. geometry-SENSITIVE: re-derive per corpus/generation (C-3/C-6).",
+  "upstream": [
+    "KMEANS_RESTARTS"
+  ]
 }

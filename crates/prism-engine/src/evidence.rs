@@ -695,12 +695,12 @@ pub struct PolicyBound {
 ///   (the derivation a real-embedding corpus enables; real-v1 → 0.02);
 /// * **cost-ceiling** — where no cost-bounded margin reaches the floor (the hash corpus), the largest
 ///   cost-bounded margin that at least lifts the starved base above its flat baseline (hash → 0.05).
-pub(crate) fn select_adaptive_margin<'a>(
-    sweep: &'a [AdaptiveRow],
+pub(crate) fn select_adaptive_margin(
+    sweep: &[AdaptiveRow],
     flat_starved_p1: f32,
     ceiling: f64,
     p1_floor: f32,
-) -> Option<(&'a AdaptiveRow, &'static str)> {
+) -> Option<(&AdaptiveRow, &'static str)> {
     let within = |r: &&AdaptiveRow| r.shipping_mean_probes <= ceiling;
     if let Some(r) = sweep
         .iter()
