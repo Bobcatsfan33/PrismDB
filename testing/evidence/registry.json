@@ -174,7 +174,7 @@
       "evidence": "testing/evidence/fp16.json",
       "evidence_key": "committed_tolerance_micros",
       "rule": "the fp16-cosine accuracy contract's tolerance, in micro-units. Must be >= 2x the worst |fp16 - fp32| rerank score gap over every stored vector and every golden query, WITH HEADROOM. The 2x is not arbitrary: if the tolerance exceeds twice the max per-score gap, then two rows whose fp32 scores differ by more than the tolerance have fp16 scores that differ by more than (tolerance - 2*max_gap) > 0 with the same sign, so fp16 can NEVER invert a >tolerance-separated pair. That is exactly the selection-stability the contract promises: fp16 respects the fp32 order except among rows it (by contract) treats as tied. Measured max gap on the golden corpus is ~4.6e-4, so the floor is ~9.2e-4; 2e-3 is the committed value with headroom.",
-      "corpus_version": "v1",
+      "corpus_version": "real-v1",
       "corpus_conditional": true,
       "corpus_conditional_reason": "The fp16 rounding error depends on the magnitude distribution of the stored vectors, which the hash embedder does not represent faithfully. issue #3.",
       "generation_conditional": true,
@@ -186,7 +186,8 @@
         }
       ],
       "note": "S7, D-049. The first negotiated accuracy contract. fp32-exact remains the only default; fp16 is opt-in behind encoding_id=2 / accuracy_contract_id=2, and a build that does not implement the pair REFUSES the part. Contract text, evidence, and the unknown-encoding fixture were all updated in the same change.",
-      "upstream": []
+      "upstream": [],
+      "geometry_sensitivity": "stable"
     },
     {
       "name": "MAX_ATTRIBUTE_KEYS",

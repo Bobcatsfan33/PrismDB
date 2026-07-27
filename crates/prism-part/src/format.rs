@@ -227,9 +227,18 @@ pub const RERANK_CONTRACT_EXACT: u16 = 1;
 /// accuracy contract it does not implement rather than guessing at what its scores mean.
 pub const RERANK_CONTRACT_FP16_COSINE: u16 = 2;
 
-/// The tolerance the fp16 cosine contract promises. **Tuned** (charter C-1): measured as the
-/// worst |fp16 − fp32| cosine gap over the golden corpus, with headroom, and committed in the
-/// receipt. An absolute bound because a cosine near zero has no relative scale.
+/// The tolerance the fp16 cosine contract promises. **Tuned** (charter C-1): a conservative bound at
+/// or above the worst |fp16 − fp32| cosine gap, committed in the receipt (`testing/evidence/fp16.json`).
+/// An absolute bound because a cosine near zero has no relative scale.
+///
+/// **S13 dir 2 — re-verified on real-v1, and classified geometry-STABLE.** Real 768d all-mpnet vectors
+/// have tiny per-component magnitudes, so their fp16 rounding gap (worst **4.28e-5**) is *smaller* than
+/// the hash corpus's (~4.6e-4); `2e-3` bounds it with **46.7× headroom** and selection is stable. The
+/// value does not move with the geometry — it is a conservative contract bound both corpora satisfy —
+/// so it is `"stable"`, re-*verified* per corpus (it must still bound the gap), not re-derived, and
+/// **not tightened to a single corpus** (a different corpus may have a larger gap). Unlike the codebook
+/// constants it is **not downstream of `KMEANS_RESTARTS`** (C-8): fp16 rounds the raw stored vectors,
+/// independent of the IVF/PQ codebook.
 pub const FP16_COSINE_TOLERANCE: f32 = 2e-3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

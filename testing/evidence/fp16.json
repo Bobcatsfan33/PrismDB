@@ -1,15 +1,49 @@
 {
-  "corpus_version": "v1",
-  "generation_id": "d93625d4300c0a30",
+  "corpus_version": "real-v1",
+  "generation_id": "327f33abfc0ab12c",
   "contract": "fp16-cosine",
   "queries": 104,
   "candidates_scored": 208000,
-  "max_score_gap": 0.00046193599700927734,
-  "mean_score_gap": 0.00004871370209954106,
+  "max_score_gap": 4.279613494873047e-05,
+  "mean_score_gap": 6.5638132376787125e-06,
   "committed_tolerance": 0.0020000000949949026,
   "committed_tolerance_micros": 2000,
   "selection_stable": true,
   "unstable_queries": [],
   "rule": "the committed tolerance must be >= the worst |fp16 - fp32| score gap over every reranked candidate of every golden query, with headroom; and selection must be STABLE -- the fp16 answer's ordered event ids identical to fp32-exact on every query. A lossy encoding that reorders the answer is not a smaller store, it is a different database.",
-  "note": "S7, D-049. The first negotiated accuracy contract. fp32-exact remains the only DEFAULT; fp16 is opt-in, and a part written under it declares encoding_id=2, accuracy_contract_id=2 so a build that does not implement the contract refuses the part rather than guessing. Corpus- and generation-conditional."
+  "note": "S7, D-049. The first negotiated accuracy contract. fp32-exact remains the only DEFAULT; fp16 is opt-in, and a part written under it declares encoding_id=2, accuracy_contract_id=2 so a build that does not implement the contract refuses the part rather than guessing. Corpus- and generation-conditional.",
+  "series": {
+    "real-v1": {
+      "shipped": true,
+      "corpus_version": "real-v1 (all-mpnet 768d, restarts=8)",
+      "generation_id": "327f33abfc0ab12c",
+      "queries": 150,
+      "candidates_scored": 450000,
+      "max_score_gap": 4.279613494873047e-05,
+      "mean_score_gap": 6.5638132376787125e-06,
+      "selection_stable": true,
+      "unstable_queries": [],
+      "headroom_x": 46.7,
+      "note": "SHIPPED measurement. Real 768d normalized vectors have tiny per-component magnitudes, so the fp16 rounding gap is SMALLER than the hash corpus's (4.28e-5 vs 4.6e-4). Tolerance 2e-3 holds with 46.7x headroom, selection stable. NOT codebook-dependent \u2014 fp16 rounds the raw stored vectors, so this is independent of KMEANS_RESTARTS."
+    },
+    "hash-v1": {
+      "corpus_version": "v1",
+      "generation_id": "d93625d4300c0a30",
+      "max_score_gap": 0.00046193599700927734,
+      "mean_score_gap": 4.871370209954106e-05,
+      "selection_stable": true,
+      "shipped": false,
+      "retained": true,
+      "note": "Retained paired series. Hash 64d vectors have larger per-component magnitudes, so the fp16 gap (~4.6e-4) is ~10x the real 768d gap. Tolerance 2e-3 bounds it with ~4.3x headroom."
+    }
+  },
+  "geometry_sensitivity": "stable",
+  "upstream": [],
+  "delta": {
+    "old_hash_v1_max_gap": 0.00046,
+    "new_real_v1_max_gap": 4.28e-05,
+    "tolerance_value": "unchanged at 2e-3",
+    "mechanism": "The fp16 tolerance is a CONSERVATIVE contract bound, not tightened to any single corpus. The measured worst gap is geometry-dependent (real 768d 4.28e-5 vs hash 64d 4.6e-4) but the VALUE holds across both with large headroom, so it is classified geometry-STABLE \u2014 re-VERIFIED per corpus (it must still bound the gap), not re-derived. It is NOT downstream of KMEANS_RESTARTS: fp16 rounds the raw stored vectors, independent of the codebook."
+  },
+  "_classification_note": "geometry-STABLE: a conservative contract bound that held (46.7x headroom) across the hash and real corpora. Re-verify per corpus that it still bounds the measured gap; do NOT tighten to a single corpus (a different corpus may have a larger gap). tests/rederive_fp16.rs asserts tolerance>=max_gap and selection stability."
 }
