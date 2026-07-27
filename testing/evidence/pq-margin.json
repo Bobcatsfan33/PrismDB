@@ -1,12 +1,41 @@
 {
-  "epsilon": 0.000001,
-  "epsilon_micros": 1,
-  "measured_p999": 0.00000060,
-  "measured_max": 0.00000083,
-  "quantile": 0.999,
-  "config": { "dim": 64, "pq_m": 8, "corpus": "Zipf 3000 5", "generation": "bootstrap seed=9" },
+  "epsilon": 0.30,
+  "epsilon_micros": 300000,
+  "shipped_series": "real-v1",
+  "geometry_sensitivity": "sensitive",
+  "_what": "The threshold overfetch margin ε (D-074): a similarity threshold τ maps to a squared-L2 bound l2² ≤ 2(1-τ) on unit vectors; the candidate phase holds only the PQ approximation of l2², so it keeps rows with PQ_dist ≤ 2(1-τ) + ε and rerank applies exact τ. ε is a MEASURED high quantile (p999) of |adc - true l2²| — the quantile IS the recall contract (a qualifying row is missed only if its own PQ error exceeds ε, at most 1-in-1000).",
+  "series": {
+    "real-v1": {
+      "shipped": true,
+      "corpus": "testing/corpus/real-v1 (all-mpnet-base-v2, 768d, 3000 rows, 2529 distinct)",
+      "config": { "dim": 768, "pq_m": 96, "nlist": 64, "kmeans_restarts": 5, "seed": 42 },
+      "queries": "the 60 real corpus queries x all rows (n=180000 pairs)",
+      "p50": 0.10164380,
+      "p90": 0.16935897,
+      "p99": 0.23064721,
+      "p999": 0.27995777,
+      "max": 0.35165334,
+      "epsilon": 0.30,
+      "note": "ε = p999 rounded up (~7% headroom). The 0.1% of pairs above ε (up to max 0.352) are the accepted miss budget — that IS the p999 contract. tests/rederive_epsilon.rs re-measures and asserts p999 <= ε."
+    },
+    "hash-v1": {
+      "shipped": false,
+      "retained": true,
+      "corpus": "corpus::generate(Zipf, 3000, 5) hash embedder (dim 64, pq_m 8)",
+      "queries": "stride sample of stored vectors x all rows (n=180000 pairs)",
+      "p999": 0.00000060,
+      "max": 0.00000083,
+      "epsilon_would_be": 0.000001,
+      "note": "Retained as the paired data series (NOT shipped). tests/pq_margin.rs still measures it. On the hash corpus the shipped ε=0.30 bounds this trivially."
+    }
+  },
+  "delta": {
+    "old_hash_v1": 0.000001,
+    "new_real_v1": 0.30,
+    "orders_of_magnitude": 5.5,
+    "mechanism": "The hash embedder produces a handful of near-identical motif vectors, so PQ reconstruction is near-exact and |adc - true l2²| ≈ 1e-6 — a degenerate artifact. Real 768d all-mpnet embeddings are CONTINUOUS and spread across the sphere, so product quantization (96 subquantizers, 256 codes each) leaves a real reconstruction error whose p999 is ~0.28 in squared-L2 units. The margin the recall contract actually needs is ~300000x what the hash corpus implied. This validates the D-074 margin-injection paths against natural geometry: at ε=0.30 the relaxed bound genuinely overfetches and rerank genuinely prunes back, where at 1e-6 both were vacuous."
+  },
   "corpus_conditional": true,
   "generation_conditional": true,
-  "_rule": "The overfetch margin for threshold-query candidate bounding (D-074). A similarity threshold tau translates to a squared-L2 bound l2^2 <= 2(1-tau) on unit vectors; the candidate phase, holding only the PQ approximation of l2^2, keeps rows with PQ_dist <= 2(1-tau) + epsilon, and rerank applies the exact tau. epsilon is a MEASURED high quantile (p999) of the PQ quantization error |adc - true l2^2| -- the quantile IS the recall contract for threshold queries (C-3): a qualifying row is missed only if its PQ error exceeds epsilon, i.e. at most 1-in-1000. It is a property of the CODEBOOK, so a new generation re-derives it (C-6).",
-  "_honest_wall": "Measured on the hash-embedder golden corpus, where PQ reconstruction is near-exact (few distinct motif vectors) so the error is ~1e-6 and epsilon is set to 1e-6 (bounds the measured max 8.3e-7 with headroom). A REAL-embedding corpus (768d, continuous vectors) has materially larger PQ error and re-derives a larger epsilon -- the same filed obligation as the measured-at-768d worksheet (issue #3). The threshold-bounding MECHANISM ships and is gated on this corpus; its recall BENEFIT is a real-corpus number, honestly filed."
+  "_honest_wall": "This is the real number the README's recall/threshold economics stand on, not the hash corpus's flattering 1e-6. ε is the MOST geometry-sensitive constant in the ledger: it MUST be re-derived per real-embedding corpus and per generation (C-3/C-6), forever."
 }

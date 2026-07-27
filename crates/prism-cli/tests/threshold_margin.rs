@@ -134,10 +134,13 @@ fn a_threshold_query_is_bounded_by_the_threshold_and_the_mechanism_holds_at_inje
         a.hits.iter().all(|h| h.score >= tau),
         "every returned row must clear the exact threshold"
     );
-    // On the near-exact corpus the un-injected margin keeps no slop: nothing lands within ε of the bar.
-    assert_eq!(
-        a.counters.threshold_overfetch, 0,
-        "the measured ε keeps no overfetch on this near-exact corpus"
+    // The re-derived real ε (0.30, S13 dir 2 — up from the hash corpus's degenerate 1e-6) is large
+    // enough that the margin now **bites on natural geometry**: the un-injected path already
+    // overfetches and rerank prunes it back to the exact-τ set. This is exactly what the hash corpus's
+    // 1e-6 ε could never exercise; the margin-injection below stays as the extreme-ε stress.
+    assert!(
+        a.counters.threshold_overfetch > 0,
+        "the real-derived ε must exercise the overfetch on natural geometry, not only under injection"
     );
 
     // --- (a) + (b): inject a production-shaped ε; overfetch, then prune back byte-identically --------

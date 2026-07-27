@@ -115,11 +115,14 @@ pub const DEFAULT_RERANK: usize = 50;
 /// vectors `cos ≥ τ` ⇔ `l2² ≤ 2(1−τ)`, and the candidate phase, holding only the PQ approximation of
 /// `l2²`, keeps rows with `PQ_dist ≤ 2(1−τ) + ε`. Rerank then applies the exact `τ`, so a false
 /// positive costs an overfetch and a false negative is bounded by `ε`. `ε` is a **measured** p999 of
-/// the PQ quantization error (`testing/evidence/pq-margin.json`, `tests/pq_margin.rs`) — the quantile
-/// IS the recall contract. It is **generation-conditional** (a property of the codebook). `1e-6` on
-/// the hash golden corpus, where PQ reconstruction is near-exact; a real-embedding corpus re-derives
-/// a larger one ([#3](https://github.com/Bobcatsfan33/PrismDB/issues/3)).
-pub const THRESHOLD_OVERFETCH_MARGIN_EPSILON: f32 = 1e-6;
+/// the PQ quantization error (`testing/evidence/pq-margin.json`) — the quantile IS the recall
+/// contract. It is **geometry- and generation-sensitive** (a property of the vectors and the
+/// codebook): **re-derived on the real-embedding corpus** (S13 dir 2, `real-v1`, all-mpnet 768d) to
+/// `0.30`, up from `1e-6` on the hash golden corpus — **~5.5 orders of magnitude**. The hash corpus's
+/// handful of motifs reconstructed near-exactly and hid the PQ error entirely; continuous 768d vectors
+/// have a real error distribution (p999 ≈ 0.28), so the margin the recall contract actually needs is
+/// this large. The most geometry-sensitive constant in the ledger.
+pub const THRESHOLD_OVERFETCH_MARGIN_EPSILON: f32 = 0.30;
 
 /// The **state budget** for a threshold query: the most candidates its relaxed bound may keep before
 /// the query is **refused by name** rather than reranking without bound ([D-074](../../../docs/DECISIONS.md),

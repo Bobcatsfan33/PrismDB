@@ -394,6 +394,14 @@ pub struct RegistryEntry {
     /// `policy` only: prose that argues for it.
     #[serde(default)]
     pub rationale: Option<String>,
+    /// **How a constant responds to the embedding geometry** (S13 dir 2). The hash-corpus vs real-v1
+    /// re-derivation is a paired series, and the delta classifies each constant: `"sensitive"` — it
+    /// moves with the geometry, so it MUST be re-derived per real-embedding corpus and per generation,
+    /// forever (C-3/C-6); `"stable"` — it barely moves, so it is safe as an engineering default;
+    /// `"untested"` — not yet re-derived on a real corpus. This saves every future re-derivation from
+    /// re-deriving everything.
+    #[serde(default)]
+    pub geometry_sensitivity: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

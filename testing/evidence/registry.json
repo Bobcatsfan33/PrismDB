@@ -427,16 +427,17 @@
     },
     {
       "name": "THRESHOLD_OVERFETCH_MARGIN_EPSILON_MICROS",
-      "value": 1,
+      "value": 300000,
       "kind": "tuned",
       "evidence": "testing/evidence/pq-margin.json",
       "evidence_key": "epsilon_micros",
-      "rule": "A similarity threshold τ on the exact cosine score is an exact squared-L2 bound l2² ≤ 2(1−τ) (unit vectors), but the candidate phase only has the PQ approximation of l2², which is exact ± quantization error. ε is a MEASURED high quantile (p999) of |adc − true l2²| over representative (query,row) pairs on the golden corpus; the candidate bound is relaxed to PQ ≤ 2(1−τ)+ε so every row clearing τ survives the approximate phase and rerank prunes the overfetch against exact τ. The quantile IS the recall contract. Stored in micro-units: on this near-exact hash corpus the measured p999 (6e-7) and the receipted ε (1e-6) both round to 1µ.",
-      "corpus_version": "v1",
+      "rule": "A similarity threshold τ maps to l2² ≤ 2(1-τ) (unit vectors); the candidate phase holds only the PQ approximation of l2², so it keeps PQ ≤ 2(1-τ)+ε and rerank applies exact τ. ε is the MEASURED p999 of |adc - true l2²| — the quantile IS the recall contract (miss only if a row's own PQ error exceeds ε, ≤1-in-1000). RE-DERIVED on the real-embedding corpus real-v1 (all-mpnet 768d): p999=0.280 → ε=0.30 (300000µ), up from 1e-6 (1µ) on the hash corpus — ~5.5 orders of magnitude. Continuous 768d vectors have a real PQ error distribution the hash corpus's near-identical motifs hid entirely. tests/rederive_epsilon.rs re-measures and asserts p999 ≤ ε; hash series retained in tests/pq_margin.rs / pq-margin.json. The MOST geometry-sensitive constant in the ledger.",
+      "corpus_version": "real-v1",
       "corpus_conditional": true,
       "corpus_conditional_reason": "the hash-embedder corpus reconstructs vectors near-exactly, so its PQ error — and thus ε — is unusually small. A real 768d embedding space re-derives a materially larger ε (issue #3); the margin-injection test exercises the mechanism at production-shaped ε that this corpus's geometry does not reach.",
       "generation_conditional": true,
-      "generation_conditional_reason": "ε is a function of the codebook's quantization geometry (C-6). A new generation re-derives it — the pq_margin test is the C-6 guard that a codebook change updates testing/evidence/pq-margin.json."
+      "generation_conditional_reason": "ε is a function of the codebook's quantization geometry (C-6). A new generation re-derives it — the pq_margin test is the C-6 guard that a codebook change updates testing/evidence/pq-margin.json.",
+      "geometry_sensitivity": "sensitive"
     },
     {
       "name": "THRESHOLD_STATE_BUDGET",
