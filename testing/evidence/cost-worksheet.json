@@ -1,6 +1,6 @@
 {
   "_comment": [
-    "S11 cost worksheet (storage contract §7). The number the company watches -- cost per billion",
+    "S11 cost worksheet (storage contract \u00a77). The number the company watches -- cost per billion",
     "events retained -- as a MEASURED output, not a slide. Bytes per row are measured by the",
     "two-tier bench accounting (crates/prism-engine/src/bench.rs; committed baselines.json), then",
     "scaled to per-million and per-billion events. A byte is a byte; the dollar cost is a function",
@@ -15,8 +15,11 @@
   "backend": "local-object-store",
   "backend_conditional": true,
   "measured_from": "baselines.json (bench two-tier accounting)",
-  "reference_config": { "dim": 64, "pq_m": 8, "parts": 16 },
-
+  "reference_config": {
+    "dim": 64,
+    "pq_m": 8,
+    "parts": 16
+  },
   "_dimensionality_warning": [
     "The measured numbers below are at dim=64 -- the TEST config, NOT a product number. Real",
     "embedding models are ~768-dimensional, where the cold tier (exact float32 vectors) is",
@@ -24,9 +27,9 @@
     "material MUST quote the 768d numbers (projected_at_768d below), never the dim=64 ones.",
     "A measured-at-768d worksheet is a filed obligation (measured_at_768d), unlocked by the first",
     "real-embedding corpus -- the SAME C-3 standing item (issue #3) that unlocks the real-embedding",
-    "index re-derivation. One corpus, both obligations."
+    "index re-derivation. One corpus, both obligations.",
+    "DISCHARGED (S13 dir 3): the 768d worksheet is now MEASURED, not projected \u2014 see measured_at_768d and testing/evidence/cost-worksheet-real-v1.json. The projection is RETAINED above for comparison; it was validated (total within 0.06%)."
   ],
-
   "projected_at_768d": {
     "_rule": "PROJECTION, not a measurement: the cold tier scales linearly with dimension (exact float32 = dim*4 bytes/vector); the hot PQ tier does not (pq_m bytes, fixed). At dim=768, pq_m=8: PQ = 8 B/vector unchanged; exact vectors = 768*4 = 3072 B = 3.07 KB/vector. Scalars_and_text are dimension-independent (~284 B/row). These are the numbers the README quotes.",
     "pq_codes_bytes_per_vector": 8,
@@ -37,13 +40,36 @@
     "total_GB_per_billion_events": 3364,
     "note": "1e9 events x 3072 B cold = 3072 GB (~3 TB) of exact vectors per billion events; the hot scan tier stays ~292 GB. rerank_tier_multiple at 768d = 3072/8 = 384x."
   },
-
   "measured_at_768d": {
-    "status": "OBLIGATION -- not yet measured",
-    "filed": "unlocked by the first real-embedding corpus (issue #3, C-3 standing item)",
-    "_rule": "The projection above assumes float32 exact vectors and no backend compression. A measured-at-768d worksheet against a real-embedding corpus on the MinIO/S3 backend replaces the projection, and any material quoting a 768d number switches to the measured one the moment it exists."
+    "status": "MEASURED (S13 dir 3, issue #3 obligation discharged)",
+    "receipt": "testing/evidence/cost-worksheet-real-v1.json",
+    "shipped_config": {
+      "dim": 768,
+      "pq_m": 96,
+      "nlist": 64,
+      "kmeans_restarts": 8,
+      "block_size": 16384
+    },
+    "bytes_per_row": {
+      "hot_pq_codes": 96.0,
+      "cold_exact_vectors": 3072.0,
+      "scalars_and_text": 193.8,
+      "total": 3361.8
+    },
+    "per_billion_events_GB": {
+      "hot": 96,
+      "cold": 3072,
+      "scalars_and_text": 194,
+      "total": 3362
+    },
+    "projection_validated": {
+      "projected_total_GB_per_billion": 3364,
+      "measured_total_GB_per_billion": 3362,
+      "agreement": "within 0.06% \u2014 the projection's headline (~3.36 TB/billion, cold-tier-dominated) is CONFIRMED by measurement.",
+      "cold_tier": "exact match (3072 B/vec = dim*4) \u2014 the projection got the dominant term right.",
+      "hot_tier": "the projection assumed pq_m=8 (test config); the SHIPPED config is pq_m=96, so measured hot (96) is 12x the projected (8). This under-count was offset by an over-counted scalars term (projected ~284 vs measured 194, real agent-telemetry text), so the TOTAL matched."
+    }
   },
-
   "bytes_per_row": {
     "pq_codes": 8.0,
     "exact_vectors": 256.0,
@@ -51,14 +77,12 @@
     "total": 548.3598,
     "_note": "pq_m bytes for the PQ codes; dim*4 for the exact float32 vectors; the rest is the scalar columns and the bodies. rerank_tier_multiple = exact / pq = 32x."
   },
-
   "tiers": {
     "_rule": "Hot tier = the scan path (PQ codes + scalar columns), always resident/cached and read on every query. Cold tier = the rerank path (exact vectors) plus the bodies, fetched only for survivors/returns. Bodies currently live inside scalars_and_text in the bench accounting; separating them out is a filed refinement, so the split below assigns exact_vectors to cold and the rest to hot, which is the conservative reading for cold-tier egress.",
     "hot_bytes_per_row": 292.3598,
     "cold_bytes_per_row": 256.0,
     "cold_fraction": 0.467
   },
-
   "per_million_events": {
     "pq_codes_MB": 8.0,
     "exact_vectors_MB": 256.0,
@@ -67,23 +91,24 @@
     "hot_MB": 292.36,
     "cold_MB": 256.0
   },
-
   "per_billion_events": {
     "total_GB": 548.36,
     "hot_GB": 292.36,
     "cold_GB": 256.0,
     "_note": "1e9 events x 548.36 B/event = 548.36 GB total retained. The cold tier -- the expensive-to-egress exact vectors -- is 256 GB of that. The scan tier a query always touches is the 292 GB hot half."
   },
-
   "request_counts": {
-    "_rule": "Cold-tier object requests per query, from Counters.object_requests: one per part whose exact vectors are fetched, coalesced ranged reads within a part counting as one. A query touching P eligible parts issues <= P cold requests; the fetch budget (§6) bounds the bytes those requests move.",
+    "_rule": "Cold-tier object requests per query, from Counters.object_requests: one per part whose exact vectors are fetched, coalesced ranged reads within a part counting as one. A query touching P eligible parts issues <= P cold requests; the fetch budget (\u00a76) bounds the bytes those requests move.",
     "cold_requests_per_query": "<= eligible parts touched",
-    "bytes_per_request_bounded_by": "Query.fetch_budget_bytes (storage contract §6)",
-
+    "bytes_per_request_bounded_by": "Query.fetch_budget_bytes (storage contract \u00a76)",
     "measured": {
-      "_source": "crates/prism-cli/tests/storage.rs::cold_path_request_counts_are_measured_and_bounded (permanent, storage CI job) — prints the numbers below; the S11 MinIO gate exercises the same path against a real remote.",
-      "_backend_independent": "object_requests and retrieved_bytes are a function of the query and the data, NOT the backend: cold_read_vectors fetches the same rows from the same parts whether the bytes come from local disk or MinIO (answer-invariance §3). So this measurement on the local backend is the number the MinIO gate reports.",
-      "config": { "dim": 64, "k": 15, "rerank": 40 },
+      "_source": "crates/prism-cli/tests/storage.rs::cold_path_request_counts_are_measured_and_bounded (permanent, storage CI job) \u2014 prints the numbers below; the S11 MinIO gate exercises the same path against a real remote.",
+      "_backend_independent": "object_requests and retrieved_bytes are a function of the query and the data, NOT the backend: cold_read_vectors fetches the same rows from the same parts whether the bytes come from local disk or MinIO (answer-invariance \u00a73). So this measurement on the local backend is the number the MinIO gate reports.",
+      "config": {
+        "dim": 64,
+        "k": 15,
+        "rerank": 40
+      },
       "object_requests": 1,
       "retrieved_bytes": 10240,
       "eligible_parts": 4,

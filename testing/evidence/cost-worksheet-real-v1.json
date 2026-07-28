@@ -1,0 +1,71 @@
+{
+  "_what": "MEASURED 768d cost worksheet (S13 dir 3, issue #3). Two-tier on-object byte footprint at the SHIPPED config, measured on the real-v1 corpus, scaled to per-billion events. Backend-conditional (bytes are backend-invariant; request/egress priced by the operator). The projection is retained alongside for comparison.",
+  "backend": "local-object-store",
+  "backend_conditional": true,
+  "corpus": "real-v1 (all-mpnet 768d, agent-telemetry text)",
+  "measured_bytes_per_row": {
+    "by_column": {
+      "attributes.data": 4.0,
+      "attributes.offsets": 8.04,
+      "body.data": 77.186,
+      "body.offsets": 8.04,
+      "centroid": 4.0,
+      "cost": 8.0,
+      "error": 1.0,
+      "event_id.data": 7.0,
+      "event_id.offsets": 8.04,
+      "event_name.data": 8.253,
+      "event_name.offsets": 8.04,
+      "event_time": 8.0,
+      "idempotency_key.data": 0.0,
+      "idempotency_key.offsets": 8.04,
+      "observed_time": 8.0,
+      "pq_codes": 96.0,
+      "rerank_vectors": 3072.0,
+      "span_id.data": 0.0,
+      "span_id.offsets": 8.04,
+      "tenant_id.data": 4.0,
+      "tenant_id.offsets": 8.04,
+      "trace_id.data": 0.0,
+      "trace_id.offsets": 8.04
+    },
+    "cold_exact_vectors": 3072.0,
+    "hot_pq_codes": 96.0,
+    "scalars_and_text": 193.759,
+    "total": 3361.759
+  },
+  "note": "The cold tier (exact vectors) dominates at ~3 KB/vec — ~3 TB per billion events — and is why PrismDB tiers it cold and scans the hot PQ codes at bandwidth. This is the number the README quotes, now MEASURED at 768d, not projected.",
+  "per_billion_events_GB": {
+    "cold": 3072.0,
+    "hot": 96.0,
+    "scalars_and_text": 193.759,
+    "total": 3361.759
+  },
+  "per_million_events_GB": {
+    "cold": 3.072,
+    "hot": 0.096,
+    "scalars_and_text": 0.193759,
+    "total": 3.361759
+  },
+  "projection_comparison": {
+    "measured_vs_projected": {
+      "cold_matches": true,
+      "hot_ratio_measured_over_projected": 12.0,
+      "note": "The projection assumed pq_m=8 (the test config's PQ granularity); the SHIPPED 768d config uses pq_m=96 (768/96 = 8-dim subquantizers), so the measured hot tier is ~12x the projected. The COLD tier (exact float32 vectors) matches the projection exactly (768*4 = 3072 B/vec) — the projection got the dominant term right. The scalars_and_text term is now MEASURED on realistic agent-telemetry text, not assumed."
+    },
+    "projected_at_768d_pq_m8": {
+      "cold": 3072,
+      "hot": 8,
+      "scalars_approx": 284,
+      "source": "cost-worksheet.json projected_at_768d"
+    }
+  },
+  "rows": 3000,
+  "shipped_config": {
+    "block_size": 16384,
+    "dim": 768,
+    "kmeans_restarts": 8,
+    "nlist": 64,
+    "pq_m": 96
+  }
+}
