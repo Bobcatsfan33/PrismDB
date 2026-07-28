@@ -1,0 +1,76 @@
+{
+  "composed_cost_issue8": {
+    "broad_tau_0_2": {
+      "bytes": 2941228,
+      "hits": 230,
+      "ms": 279.821709
+    },
+    "broad_tau_is_most_expensive": true,
+    "narrow_tau_0_6": {
+      "bytes": 2759782,
+      "hits": 15,
+      "ms": 77.915333
+    },
+    "topic": {
+      "bytes": 2681593,
+      "hits": 10,
+      "ms": 67.504541
+    }
+  },
+  "constants": {
+    "block_size": 16384,
+    "candidates": 50,
+    "dim": 768,
+    "kmeans_restarts": 8,
+    "nlist": 64,
+    "nprobe": 11,
+    "pq_m": 96,
+    "rerank": 50
+  },
+  "corpus_version": "real-v1",
+  "delta_decomposition": {
+    "block2k_p50_ms": 51.019834,
+    "block_term_ms": 22.049290999999997,
+    "honest_p50_ms": 73.069125,
+    "note": "768d term is inherent to the corpus (12x wider exact-vector column); it is the dominant term for any byte-touching metric and cannot be isolated without a 64d real corpus.",
+    "nprobe6_p50_ms": 62.592375000000004,
+    "nprobe_term_ms": 10.476749999999996
+  },
+  "headline_worst_isa": {
+    "isa": "scalar",
+    "p50_ms": 72.490709,
+    "p95_ms": 114.33125,
+    "p99_ms": 157.132709,
+    "scan_rows_per_sec": 8822.36540686019
+  },
+  "ingest_rows_per_sec": 80.03053422685781,
+  "per_isa": [
+    {
+      "isa": "scalar",
+      "p50_ms": 72.490709,
+      "p95_ms": 114.33125,
+      "p99_ms": 157.132709,
+      "scan_rows_per_sec": 8822.36540686019
+    },
+    {
+      "isa": "neon",
+      "p50_ms": 70.215209,
+      "p95_ms": 96.512959,
+      "p99_ms": 132.92304199999998,
+      "scan_rows_per_sec": 9389.936685719727
+    }
+  ],
+  "recall": {
+    "honest_mean": 0.9913333058357239,
+    "honest_nprobe": 11,
+    "honest_p1": 0.800000011920929,
+    "honest_scan_fraction": 0.19145333333333336,
+    "naive_nprobe1_boundary_zeros": 4,
+    "naive_nprobe6_p1": 0.6000000238418579
+  },
+  "storage_bytes_per_row": {
+    "pq_codes": 96.0,
+    "rerank_vectors": 3072.0,
+    "vec_over_pq_ratio": 32.0
+  }
+}

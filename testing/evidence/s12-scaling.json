@@ -61,5 +61,27 @@
     "superseded_by": "D-081 + S13 dir-2 re-derivation",
     "re_baseline": "testing/evidence/RE-BASELINE.md",
     "note": "Predates D-081; measured on the hash corpus (explicit nprobe=16). The scaling lower bound is re-run at the re-derived constants on real-v1 before S16 \u2014 see testing/evidence/RE-BASELINE.md. Not deleted (paired-series discipline)."
+  },
+  "reconfirmed_at_s13_constants": {
+    "when": "S13 dir-2 re-baseline pass (restarts=8, nprobe=11, block 16KiB)",
+    "scan_heavy_1_2_4_ms": [
+      743.3,
+      644.3,
+      938.8
+    ],
+    "scan_heavy_speedup": 0.79,
+    "scan_light_1_2_4_ms": [
+      268.0,
+      380.7,
+      149.4
+    ],
+    "scan_light_speedup": 1.79,
+    "group_by_1_2_4_ms": [
+      2459.5,
+      2434.9,
+      3478.6
+    ],
+    "group_by_speedup": 0.71,
+    "note": "Re-confirmed <=1.6x (noisy) at the re-derived constants. UNCHANGED verdict \u2014 the in-process single-host scaling lower bound is config-structural (D-080), geometry/constant-INDEPENDENT (it measures coordinator fan-out overhead, not the recall constants). commit-RTT is backend-specific and geometry-independent; the original receipt's numbers stand (this pass's commit-RTT half was skipped \u2014 the :9000 server available was the non-conformant MinIO build)."
   }
 }
