@@ -372,7 +372,11 @@ impl Engine {
                 dim,
                 g.model_artifacts.as_ref(),
             )?;
-            let qv = embedder.embed(&q.text)?;
+            let qv = embedder.embed_scoped(prism_types::EmbeddingInput {
+                tenant_id: q.tenant.as_deref(),
+                purpose: prism_types::EmbeddingPurpose::Query,
+                text: &q.text,
+            })?;
             let adc = g.pq.adc_table(&qv)?;
             let scored = g.coarse.rank(&qv);
             let ranked: Vec<u32> = scored.iter().map(|(id, _)| *id).collect();
@@ -1512,7 +1516,11 @@ impl Engine {
                 dim,
                 g.model_artifacts.as_ref(),
             )?;
-            let qv = embedder.embed(&q.text)?;
+            let qv = embedder.embed_scoped(prism_types::EmbeddingInput {
+                tenant_id: q.tenant.as_deref(),
+                purpose: prism_types::EmbeddingPurpose::Query,
+                text: &q.text,
+            })?;
 
             let rows = r.read_all()?;
             for i in 0..rows.events.len() {

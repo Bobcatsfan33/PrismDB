@@ -19,7 +19,7 @@ use prism_part::partition::{PartRef, PartitionKey};
 use prism_quantizer::{CoarseCodebook, PqCodebook};
 use prism_types::error::Result;
 use prism_types::event::{DeadLetter, Event};
-use prism_types::Embedder;
+use prism_types::{Embedder, EmbeddingInput, EmbeddingPurpose};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::OpenOptions;
@@ -71,7 +71,7 @@ impl Engine {
     /// Ingest a batch (S0 loader path): no WAL record, so the applied-progress marker is inherited
     /// unchanged from the parent snapshot.
     pub fn ingest(&self, events: Vec<Event>, now_ms: i64) -> Result<IngestReport> {
-        self.ingest_inner(events, now_ms, None)
+        self.ingest_inner(events, now_ms, None, true)
     }
 
     /// Ingest a batch **as the publication of a WAL record** ([D-077](../../../docs/DECISIONS.md)):
@@ -83,7 +83,7 @@ impl Engine {
         now_ms: i64,
         record_id: u64,
     ) -> Result<IngestReport> {
-        self.ingest_inner(events, now_ms, Some(record_id))
+        self.ingest_inner(events, now_ms, Some(record_id), false)
     }
 
     fn ingest_inner(
@@ -91,6 +91,7 @@ impl Engine {
         events: Vec<Event>,
         now_ms: i64,
         applied_wal_record: Option<u64>,
+        preflight_model: bool,
     ) -> Result<IngestReport> {
         let snap = self.snapshot()?;
         let dim = self.store.config.dim;
@@ -110,6 +111,14 @@ impl Engine {
                 continue;
             }
             admitted.push(e);
+        }
+        if preflight_model {
+            let (allowed, denied) = self.model_preflight_ingest_for_snapshot(&snap, admitted)?;
+            admitted = allowed;
+            dead.extend(denied);
+            if admitted.is_empty() {
+                return self.finish_empty(&snap, dead, now_ms);
+            }
         }
 
         // --- 2. resolve or bootstrap the generation, then embed under it ---
@@ -159,6 +168,69 @@ impl Engine {
             now_ms,
             applied_wal_record,
         )
+    }
+
+    pub(crate) fn model_preflight_ingest(
+        &self,
+        events: Vec<Event>,
+    ) -> Result<(Vec<Event>, Vec<DeadLetter>)> {
+        let snap = self.snapshot()?;
+        self.model_preflight_ingest_for_snapshot(&snap, events)
+    }
+
+    fn model_preflight_ingest_for_snapshot(
+        &self,
+        snap: &prism_part::catalog::Snapshot,
+        events: Vec<Event>,
+    ) -> Result<(Vec<Event>, Vec<DeadLetter>)> {
+        if events.is_empty() {
+            return Ok((Vec::new(), Vec::new()));
+        }
+        let dim = self.store.config.dim;
+        let (model_id, model_version) = match &snap.active_generation {
+            Some(generation_id) => {
+                let generation = self.catalog().get_generation(generation_id)?;
+                (generation.model_id, generation.model_version)
+            }
+            None => {
+                let embedder = self.plane.default_embedder(dim)?;
+                (
+                    embedder.model_id().to_string(),
+                    embedder.model_version().to_string(),
+                )
+            }
+        };
+        let inputs: Vec<EmbeddingInput<'_>> = events
+            .iter()
+            .map(|event| EmbeddingInput {
+                tenant_id: Some(&event.tenant_id),
+                purpose: EmbeddingPurpose::Ingest,
+                text: &event.body,
+            })
+            .collect();
+        let decisions = self.plane.preflight(&model_id, &model_version, &inputs);
+        if decisions.len() != events.len() {
+            return Err(prism_types::PrismError::Invariant(format!(
+                "model policy returned {} preflight decisions for {} events",
+                decisions.len(),
+                events.len()
+            )));
+        }
+        let mut allowed = Vec::new();
+        let mut denied = Vec::new();
+        for (event, decision) in events.into_iter().zip(decisions) {
+            match decision {
+                Ok(()) => allowed.push(event),
+                Err(prism_types::PrismError::Policy(detail)) => denied.push(DeadLetter {
+                    reason: prism_types::RejectReason::ModelPolicyDenied.to_string(),
+                    detail,
+                    stage: "model_policy".to_string(),
+                    event,
+                }),
+                Err(error) => return Err(error),
+            }
+        }
+        Ok((allowed, denied))
     }
 
     /// Train a bootstrap generation from a batch — the shared trainer the single-store bootstrap and
@@ -432,8 +504,15 @@ type Embedded = (Vec<Event>, Vec<Vec<f32>>);
 
 /// Embed a batch, splitting it into what survived and what must be dead-lettered.
 fn embed_all(embedder: &dyn Embedder, events: Vec<Event>) -> (Embedded, Vec<DeadLetter>) {
-    let texts: Vec<&str> = events.iter().map(|event| event.body.as_str()).collect();
-    let results = embedder.embed_batch(&texts);
+    let inputs: Vec<EmbeddingInput<'_>> = events
+        .iter()
+        .map(|event| EmbeddingInput {
+            tenant_id: Some(&event.tenant_id),
+            purpose: EmbeddingPurpose::Ingest,
+            text: &event.body,
+        })
+        .collect();
+    let results = embedder.embed_batch_scoped(&inputs);
     if results.len() != events.len() {
         let detail = format!(
             "embedder returned {} results for {} events; refusing the entire batch",
@@ -461,12 +540,19 @@ fn embed_all(embedder: &dyn Embedder, events: Vec<Event>) -> (Embedded, Vec<Dead
                 kept_events.push(e);
                 kept_vecs.push(v);
             }
-            Err(err) => dead.push(DeadLetter {
-                reason: prism_types::RejectReason::EmbeddingFailed.to_string(),
-                detail: err.to_string(),
-                stage: "embedding".to_string(),
-                event: e,
-            }),
+            Err(err) => {
+                let reason = if matches!(&err, prism_types::PrismError::Policy(_)) {
+                    prism_types::RejectReason::ModelPolicyDenied
+                } else {
+                    prism_types::RejectReason::EmbeddingFailed
+                };
+                dead.push(DeadLetter {
+                    reason: reason.to_string(),
+                    detail: err.to_string(),
+                    stage: "embedding".to_string(),
+                    event: e,
+                });
+            }
         }
     }
     ((kept_events, kept_vecs), dead)
@@ -505,6 +591,36 @@ mod tests {
         }
     }
 
+    struct PolicyDenyEmbedder;
+
+    impl Embedder for PolicyDenyEmbedder {
+        fn model_id(&self) -> &str {
+            "governed-test-model"
+        }
+
+        fn model_version(&self) -> &str {
+            "1"
+        }
+
+        fn dim(&self) -> usize {
+            8
+        }
+
+        fn embed(&self, _text: &str) -> Result<Vec<f32>> {
+            unreachable!("scoped path must run")
+        }
+
+        fn embed_batch_scoped(
+            &self,
+            inputs: &[prism_types::EmbeddingInput<'_>],
+        ) -> Vec<Result<Vec<f32>>> {
+            inputs
+                .iter()
+                .map(|_| Err(PrismError::Policy("test denial".into())))
+                .collect()
+        }
+    }
+
     #[test]
     fn a_batch_cardinality_violation_dead_letters_every_event() {
         let events = crate::corpus::generate(crate::corpus::Kind::Uniform, 4, 17);
@@ -515,5 +631,17 @@ mod tests {
         assert!(dead
             .iter()
             .all(|letter| letter.detail.contains("0 results for 4 events")));
+    }
+
+    #[test]
+    fn a_policy_denial_has_a_stable_dead_letter_reason() {
+        let events = crate::corpus::generate(crate::corpus::Kind::Uniform, 2, 19);
+        let ((kept, vectors), dead) = embed_all(&PolicyDenyEmbedder, events);
+        assert!(kept.is_empty());
+        assert!(vectors.is_empty());
+        assert_eq!(dead.len(), 2);
+        assert!(dead
+            .iter()
+            .all(|letter| letter.reason == "model_policy_denied"));
     }
 }

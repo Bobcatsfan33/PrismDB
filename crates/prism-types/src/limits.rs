@@ -139,6 +139,7 @@ pub enum RejectReason {
 
     // --- capacity ---
     QuotaExceeded,
+    ModelPolicyDenied,
 
     // --- the semantic columns could not be produced ---
     EmbeddingFailed,
@@ -162,6 +163,7 @@ impl RejectReason {
             RejectReason::EventTimeInFuture => "event_time_in_future",
             RejectReason::IdempotencyConflict => "idempotency_conflict",
             RejectReason::QuotaExceeded => "quota_exceeded",
+            RejectReason::ModelPolicyDenied => "model_policy_denied",
             RejectReason::EmbeddingFailed => "embedding_failed",
         }
     }

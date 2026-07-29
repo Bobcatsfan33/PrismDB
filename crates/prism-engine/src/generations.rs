@@ -209,9 +209,22 @@ impl Engine {
         let mut vectors = Vec::with_capacity(events.len());
         let mut kept = Vec::with_capacity(events.len());
         for e in events {
-            if let Ok(v) = embedder.embed(&e.body) {
-                vectors.push(v);
-                kept.push(e);
+            match embedder.embed_scoped(prism_types::EmbeddingInput {
+                tenant_id: Some(&e.tenant_id),
+                purpose: prism_types::EmbeddingPurpose::Migration,
+                text: &e.body,
+            }) {
+                Ok(v) => {
+                    vectors.push(v);
+                    kept.push(e);
+                }
+                Err(error) => {
+                    return Err(PrismError::Invalid(format!(
+                        "generation training refused event `{}` for tenant `{}`: {error}; \
+                         no partial training corpus is permitted",
+                        e.event_id, e.tenant_id
+                    )));
+                }
             }
         }
 
@@ -647,7 +660,11 @@ impl Engine {
                 let reader = prism_part::part::PartReader::open(&self.store.part_dir(id))?;
                 let all = reader.read_all()?;
                 for e in all.events {
-                    match embedder.embed(&e.body) {
+                    match embedder.embed_scoped(prism_types::EmbeddingInput {
+                        tenant_id: Some(&e.tenant_id),
+                        purpose: prism_types::EmbeddingPurpose::Migration,
+                        text: &e.body,
+                    }) {
                         Ok(v) => {
                             let centroid = g.coarse.assign(&v).0;
                             let code = g.pq.encode(&v)?;

@@ -954,7 +954,11 @@ pub fn sweep_fp16(
 
     for exp in &golden.expectations {
         queries += 1;
-        let qv = embedder.embed(&exp.query.text)?;
+        let qv = embedder.embed_scoped(prism_types::EmbeddingInput {
+            tenant_id: exp.query.tenant.as_deref(),
+            purpose: prism_types::EmbeddingPurpose::Evaluation,
+            text: &exp.query.text,
+        })?;
         let k = prism_types::query::DEFAULT_RERANK;
 
         // Score every stored vector both ways: fp32-exact and fp16 (stored vector round-tripped).

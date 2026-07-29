@@ -10,10 +10,12 @@ output-validation, crash, and reload safety. The second adds a runnable,
 dependency-free identity gateway in front of a colocated Text Embeddings
 Inference (TEI) process. The gateway independently hashes mounted artifacts,
 admits only loopback backends and authorized Unix peers, performs a real
-startup warmup, and normalizes/validates every backend vector. Per-tenant model
-policy, redaction, rate limits, cost accounting, query caching, drift/OOD
-calibration, release-image attestations, and the long-running API deployment
-that owns sidecar scaling remain open S13/S14 work.
+startup warmup, and normalizes/validates every backend vector. The third adds
+exact per-tenant model/purpose grants, pre-ACK local usage budgets, and a
+durable no-text ledger below every inference door. Versioned redaction,
+fleet-wide quota/chargeback, query caching, drift/OOD calibration,
+release-image attestations, and the long-running API deployment that owns
+sidecar scaling remain open S13/S14 work.
 
 ## Immutable identity
 
@@ -46,6 +48,8 @@ Both variables are required together:
 export PRISM_MODEL_REGISTRY=/etc/prism/model-registry.json
 export PRISM_MODEL_SOCKET=/run/prism/model.sock
 export PRISM_MODEL_TIMEOUT_MS=5000
+export PRISM_MODEL_POLICY=/etc/prism/model-policy.json
+export PRISM_MODEL_AUDIT_LOG=/var/log/prism/model-usage.jsonl
 ```
 
 The registry is bounded to 1 MiB and 128 models. Digests must be lowercase,
@@ -162,7 +166,14 @@ or catalog snapshot is published.
 - TEI health plus a real warmup gate readiness, and malformed backend vectors
   preserve output cardinality while failing every affected item closed;
 - partial CLI configuration fails before store creation, while complete
-  configuration performs a real identity-checked startup warmup;
+configuration performs a real identity-checked startup warmup;
+- a production model configuration without the paired tenant policy and usage
+  ledger fails before store creation;
+- tenant/model/version/purpose denial happens before an ingest WAL ACK and has
+  the stable `model_policy_denied` reason;
+- direct and SQL queries share the same exact-purpose authorization;
+- model usage audit records identity, purpose, bytes, and outcome but never
+  input text, and an unwritable ledger fails inference closed;
 - an honest model creates a generation carrying exact artifact hashes;
 - a wrong-model reload cannot answer against that generation;
 - a model crash during ingest dead-letters the complete batch and leaves the

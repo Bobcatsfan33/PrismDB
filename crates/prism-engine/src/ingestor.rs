@@ -202,6 +202,14 @@ impl Ingestor {
             }
         }
 
+        // Model authorization and its local GPU usage reservation happen
+        // before the durable ACK. Recovery does not consume the rate budget a
+        // second time; the governed embedder still rechecks the current exact
+        // grant before it spends GPU work.
+        let (model_allowed, model_denied) = self.engine.model_preflight_ingest(accepted)?;
+        accepted = model_allowed;
+        dead.extend(model_denied);
+
         // Dead letters are durable *before* anything is acked. An operator must
         // never be able to see what got in without being able to see what did not.
         self.engine.write_dead_letters(&dead)?;

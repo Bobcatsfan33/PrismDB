@@ -50,6 +50,55 @@ fn write_registry(dir: &std::path::Path) -> std::path::PathBuf {
     path
 }
 
+fn write_policy(dir: &std::path::Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let model = &registry().models[0];
+    let path = dir.join("model-policy.json");
+    std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "default_action": "deny",
+            "tenants": [{
+                "tenant_id": "acme",
+                "grants": [{
+                    "model_id": model.model_id,
+                    "model_version": model.model_version,
+                    "purposes": ["ingest", "query", "migration", "evaluation"]
+                }],
+                "max_inputs_per_minute": 1000,
+                "max_input_bytes_per_minute": 1048576
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    path
+}
+
+fn serve_one_warmup(listener: UnixListener) {
+    let (mut stream, _) = listener.accept().unwrap();
+    let mut request_line = String::new();
+    BufReader::new(stream.try_clone().unwrap())
+        .read_line(&mut request_line)
+        .unwrap();
+    let request: InferenceRequest = serde_json::from_str(&request_line).unwrap();
+    assert_eq!(request.protocol_version, 1);
+    assert_eq!(request.texts, ["PrismDB model-plane warmup"]);
+    let response = InferenceResponse {
+        protocol_version: 1,
+        model_id: request.model_id,
+        model_version: request.model_version,
+        artifacts: request.artifacts,
+        outputs: vec![InferenceItem::Ok {
+            vector: vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        }],
+    };
+    serde_json::to_writer(&mut stream, &response).unwrap();
+    stream.write_all(b"\n").unwrap();
+}
+
 #[test]
 fn partial_model_configuration_fails_before_creating_a_store() {
     let dir = work_dir("partial");
@@ -89,29 +138,11 @@ fn configured_init_performs_a_real_identity_checked_warmup() {
     let dir = work_dir("warmup");
     let store = dir.join("store");
     let registry_path = write_registry(&dir);
+    let policy_path = write_policy(&dir);
+    let audit_path = dir.join("model-usage.jsonl");
     let socket = dir.join("model.sock");
     let listener = UnixListener::bind(&socket).unwrap();
-    let server = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut request_line = String::new();
-        BufReader::new(stream.try_clone().unwrap())
-            .read_line(&mut request_line)
-            .unwrap();
-        let request: InferenceRequest = serde_json::from_str(&request_line).unwrap();
-        assert_eq!(request.protocol_version, 1);
-        assert_eq!(request.texts, ["PrismDB model-plane warmup"]);
-        let response = InferenceResponse {
-            protocol_version: 1,
-            model_id: request.model_id,
-            model_version: request.model_version,
-            artifacts: request.artifacts,
-            outputs: vec![InferenceItem::Ok {
-                vector: vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-            }],
-        };
-        serde_json::to_writer(&mut stream, &response).unwrap();
-        stream.write_all(b"\n").unwrap();
-    });
+    let server = std::thread::spawn(move || serve_one_warmup(listener));
 
     let output = Command::new(prism())
         .args([
@@ -128,6 +159,9 @@ fn configured_init_performs_a_real_identity_checked_warmup() {
         .env("PRISM_MODEL_REGISTRY", &registry_path)
         .env("PRISM_MODEL_SOCKET", &socket)
         .env("PRISM_MODEL_TIMEOUT_MS", "2000")
+        .env("PRISM_MODEL_POLICY", &policy_path)
+        .env("PRISM_MODEL_AUDIT_LOG", &audit_path)
+        .env_remove("PRISM_ALLOW_UNGOVERNED_MODEL")
         .env_remove("PRISM_S3_ENDPOINT")
         .output()
         .expect("run prism");
@@ -139,5 +173,49 @@ fn configured_init_performs_a_real_identity_checked_warmup() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(store.exists());
+    assert!(audit_path.exists());
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn production_model_without_tenant_governance_fails_before_store_creation() {
+    let dir = work_dir("governance");
+    let store = dir.join("store");
+    let registry_path = write_registry(&dir);
+    let socket = dir.join("model.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let server = std::thread::spawn(move || serve_one_warmup(listener));
+
+    let output = Command::new(prism())
+        .args([
+            "init",
+            "--path",
+            store.to_str().unwrap(),
+            "--dim",
+            "8",
+            "--nlist",
+            "4",
+            "--pq-m",
+            "2",
+        ])
+        .env("PRISM_MODEL_REGISTRY", &registry_path)
+        .env("PRISM_MODEL_SOCKET", &socket)
+        .env("PRISM_MODEL_TIMEOUT_MS", "2000")
+        .env_remove("PRISM_MODEL_POLICY")
+        .env_remove("PRISM_MODEL_AUDIT_LOG")
+        .env_remove("PRISM_ALLOW_UNGOVERNED_MODEL")
+        .env_remove("PRISM_S3_ENDPOINT")
+        .output()
+        .expect("run prism");
+
+    server.join().unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("production model inference requires PRISM_MODEL_POLICY"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!store.exists(), "failed governance left a partial store");
     std::fs::remove_dir_all(dir).ok();
 }

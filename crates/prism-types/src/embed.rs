@@ -73,6 +73,39 @@ impl ModelArtifacts {
     }
 }
 
+/// Why text is crossing the model boundary.
+///
+/// Production policy authorizes a tenant for an exact model *and* purpose.
+/// Query access does not imply permission to re-embed retained bodies, and an
+/// ingest grant does not imply permission to run arbitrary evaluation traffic.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EmbeddingPurpose {
+    Ingest,
+    Query,
+    Migration,
+    Evaluation,
+}
+
+impl EmbeddingPurpose {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EmbeddingPurpose::Ingest => "ingest",
+            EmbeddingPurpose::Query => "query",
+            EmbeddingPurpose::Migration => "migration",
+            EmbeddingPurpose::Evaluation => "evaluation",
+        }
+    }
+}
+
+/// Tenant and purpose context that accompanies production inference.
+#[derive(Clone, Copy, Debug)]
+pub struct EmbeddingInput<'a> {
+    pub tenant_id: Option<&'a str>,
+    pub purpose: EmbeddingPurpose,
+    pub text: &'a str,
+}
+
 /// Everything the engine is allowed to know about an embedding model.
 ///
 /// `model_id` + `model_version` are hashed into the generation record, so a
@@ -100,6 +133,21 @@ pub trait Embedder: Send + Sync {
     /// Returns exactly one result per input, in input order.
     fn embed_batch(&self, texts: &[&str]) -> Vec<Result<Vec<f32>>> {
         texts.iter().map(|t| self.embed(t)).collect()
+    }
+
+    /// Embed with the authorization context production policy needs.
+    ///
+    /// Development embedders preserve their historical behavior. A governed
+    /// wrapper overrides this method and fails closed when tenant context or an
+    /// exact tenant/model/purpose grant is absent.
+    fn embed_scoped(&self, input: EmbeddingInput<'_>) -> Result<Vec<f32>> {
+        self.embed(input.text)
+    }
+
+    /// Batch form that preserves the model plane's bounded batching behavior.
+    fn embed_batch_scoped(&self, inputs: &[EmbeddingInput<'_>]) -> Vec<Result<Vec<f32>>> {
+        let texts: Vec<&str> = inputs.iter().map(|input| input.text).collect();
+        self.embed_batch(&texts)
     }
 }
 

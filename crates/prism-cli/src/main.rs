@@ -275,7 +275,40 @@ fn model_plane_from_env(dim: usize) -> Result<Option<Arc<dyn prism_engine::Model
                 // are startup failures, before any store mutation.
                 plane.default_embedder(dim)?;
                 plane.warmup()?;
-                Ok(Some(plane))
+                let base: Arc<dyn prism_engine::ModelPlane> = plane;
+                let policy_path = std::env::var("PRISM_MODEL_POLICY").ok();
+                let audit_path = std::env::var("PRISM_MODEL_AUDIT_LOG").ok();
+                match (policy_path, audit_path) {
+                    (Some(policy_path), Some(audit_path)) => {
+                        let policy =
+                            prism_engine::ModelPolicy::load(std::path::Path::new(&policy_path))?;
+                        let enforcer = Arc::new(prism_engine::ModelPolicyEnforcer::new(
+                            policy,
+                            std::path::Path::new(&audit_path),
+                        )?);
+                        Ok(Some(Arc::new(prism_engine::GovernedModelPlane::new(
+                            base, enforcer,
+                        ))))
+                    }
+                    (Some(_), None) | (None, Some(_)) => Err(PrismError::Invalid(
+                        "PRISM_MODEL_POLICY and PRISM_MODEL_AUDIT_LOG must be configured together"
+                            .into(),
+                    )),
+                    (None, None)
+                        if std::env::var("PRISM_ALLOW_UNGOVERNED_MODEL")
+                            .map(|value| value.eq_ignore_ascii_case("true"))
+                            .unwrap_or(false) =>
+                    {
+                        Ok(Some(base))
+                    }
+                    (None, None) => Err(PrismError::Invalid(
+                        "production model inference requires PRISM_MODEL_POLICY and \
+                         PRISM_MODEL_AUDIT_LOG; only the conspicuous \
+                         PRISM_ALLOW_UNGOVERNED_MODEL=true development override bypasses \
+                         tenant governance"
+                            .into(),
+                    )),
+                }
             }
         }
     }

@@ -570,8 +570,22 @@ impl Engine {
             return Err(PrismError::Invalid("nothing to re-embed: no rows".into()));
         }
 
-        let texts: Vec<&str> = events.iter().map(|event| event.body.as_str()).collect();
-        let results = embedder.embed_batch(&texts);
+        let inputs: Vec<prism_types::EmbeddingInput<'_>> = events
+            .iter()
+            .map(|event| prism_types::EmbeddingInput {
+                tenant_id: Some(&event.tenant_id),
+                purpose: prism_types::EmbeddingPurpose::Migration,
+                text: &event.body,
+            })
+            .collect();
+        let results = embedder.embed_batch_scoped(&inputs);
+        if results.len() != events.len() {
+            return Err(PrismError::Invariant(format!(
+                "re-embed model returned {} results for {} rows; refusing a migration with holes",
+                results.len(),
+                events.len()
+            )));
+        }
         let mut vectors: Vec<Vec<f32>> = Vec::with_capacity(events.len());
         let mut kept: Vec<Event> = Vec::with_capacity(events.len());
         for (e, result) in events.into_iter().zip(results) {
