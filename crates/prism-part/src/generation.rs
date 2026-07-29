@@ -15,6 +15,7 @@
 use prism_quantizer::{CoarseCodebook, PqCodebook};
 use prism_types::error::{PrismError, Result};
 use prism_types::hash::content_id;
+use prism_types::ModelArtifacts;
 use serde::{Deserialize, Serialize};
 
 /// Where a generation is in its lifecycle (S5).
@@ -58,6 +59,10 @@ pub struct Generation {
     pub generation_id: String,
     pub model_id: String,
     pub model_version: String,
+    /// Exact weights/tokenizer/preprocessing provenance for a production model.
+    /// Absent only for legacy and deterministic development embedders.
+    #[serde(default)]
+    pub model_artifacts: Option<ModelArtifacts>,
     pub dim: usize,
     pub coarse: CoarseCodebook,
     pub pq: PqCodebook,
@@ -86,6 +91,19 @@ impl Generation {
 struct GenerationBody<'a> {
     model_id: &'a str,
     model_version: &'a str,
+    dim: usize,
+    coarse: &'a CoarseCodebook,
+    pq: &'a PqCodebook,
+}
+
+/// Registered production generations include the artifact tuple in their
+/// content address. The legacy body above remains byte-for-byte unchanged so
+/// existing hash-model generations and compatibility fixtures keep their IDs.
+#[derive(Serialize)]
+struct RegisteredGenerationBody<'a> {
+    model_id: &'a str,
+    model_version: &'a str,
+    model_artifacts: &'a ModelArtifacts,
     dim: usize,
     coarse: &'a CoarseCodebook,
     pq: &'a PqCodebook,
@@ -120,6 +138,59 @@ impl Generation {
             generation_id: content_id(&bytes),
             model_id: model_id.to_string(),
             model_version: model_version.to_string(),
+            model_artifacts: None,
+            dim,
+            coarse,
+            pq,
+            trained_from: trained_from.to_string(),
+            training: None,
+        })
+    }
+
+    /// Construct a generation backed by a registry-pinned production model.
+    ///
+    /// `model_version` is not a mutable tag: it must be the canonical revision
+    /// of all three artifacts. This keeps the existing `model_id:model_version`
+    /// space identifier exact while making model reloads with changed bytes a
+    /// different space by construction.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_registered(
+        model_id: &str,
+        model_version: &str,
+        model_artifacts: ModelArtifacts,
+        dim: usize,
+        coarse: CoarseCodebook,
+        pq: PqCodebook,
+        trained_from: &str,
+    ) -> Result<Self> {
+        model_artifacts.validate()?;
+        let revision = model_artifacts.revision();
+        if model_version != revision {
+            return Err(PrismError::Invariant(format!(
+                "registered model version `{model_version}` is not the artifact revision \
+                 `{revision}`; mutable aliases cannot identify an embedding space"
+            )));
+        }
+        if coarse.dim != dim || pq.dim != dim {
+            return Err(PrismError::Invariant(format!(
+                "generation dim {dim} disagrees with coarse dim {} / pq dim {}",
+                coarse.dim, pq.dim
+            )));
+        }
+        let body = RegisteredGenerationBody {
+            model_id,
+            model_version,
+            model_artifacts: &model_artifacts,
+            dim,
+            coarse: &coarse,
+            pq: &pq,
+        };
+        let bytes = serde_json::to_vec(&body)?;
+        Ok(Generation {
+            generation_id: content_id(&bytes),
+            model_id: model_id.to_string(),
+            model_version: model_version.to_string(),
+            model_artifacts: Some(model_artifacts),
             dim,
             coarse,
             pq,
@@ -145,14 +216,39 @@ impl Generation {
     /// hash to its own id has been tampered with or corrupted, and every byte
     /// that depends on it is now suspect.
     pub fn verify_content_address(&self) -> Result<()> {
-        let body = GenerationBody {
-            model_id: &self.model_id,
-            model_version: &self.model_version,
-            dim: self.dim,
-            coarse: &self.coarse,
-            pq: &self.pq,
+        let bytes = match &self.model_artifacts {
+            Some(artifacts) => {
+                artifacts.validate().map_err(|error| {
+                    PrismError::Corrupt(format!(
+                        "generation {} has invalid model artifact provenance: {error}",
+                        self.generation_id
+                    ))
+                })?;
+                let revision = artifacts.revision();
+                if self.model_version != revision {
+                    return Err(PrismError::Corrupt(format!(
+                        "generation {} names model version `{}` but its artifacts revise to \
+                         `{revision}`",
+                        self.generation_id, self.model_version
+                    )));
+                }
+                serde_json::to_vec(&RegisteredGenerationBody {
+                    model_id: &self.model_id,
+                    model_version: &self.model_version,
+                    model_artifacts: artifacts,
+                    dim: self.dim,
+                    coarse: &self.coarse,
+                    pq: &self.pq,
+                })?
+            }
+            None => serde_json::to_vec(&GenerationBody {
+                model_id: &self.model_id,
+                model_version: &self.model_version,
+                dim: self.dim,
+                coarse: &self.coarse,
+                pq: &self.pq,
+            })?,
         };
-        let bytes = serde_json::to_vec(&body)?;
         let actual = content_id(&bytes);
         if actual != self.generation_id {
             return Err(PrismError::Corrupt(format!(
@@ -224,5 +320,53 @@ mod tests {
         let pq = PqCodebook::train(&v, 50, dim, 2, 1).unwrap();
         let err = Generation::new("m", "1", 16, coarse, pq, "test").unwrap_err();
         assert!(matches!(err, PrismError::Invariant(_)));
+    }
+
+    #[test]
+    fn registered_artifacts_are_content_addressed_and_tamper_evident() {
+        let dim = 8;
+        let v = corpus(50, dim, 3);
+        let coarse = CoarseCodebook::train(&v, 50, dim, 3, 1).unwrap();
+        let pq = PqCodebook::train(&v, 50, dim, 2, 1).unwrap();
+        let artifacts =
+            ModelArtifacts::new("a".repeat(64), "b".repeat(64), "c".repeat(64)).unwrap();
+        let version = artifacts.revision();
+        let mut generation = Generation::new_registered(
+            "registered-model",
+            &version,
+            artifacts,
+            dim,
+            coarse,
+            pq,
+            "test",
+        )
+        .unwrap();
+        generation.verify_content_address().unwrap();
+        generation.model_artifacts.as_mut().unwrap().model_sha256 = "d".repeat(64);
+        assert!(matches!(
+            generation.verify_content_address(),
+            Err(PrismError::Corrupt(_))
+        ));
+    }
+
+    #[test]
+    fn registered_model_rejects_mutable_version_alias() {
+        let dim = 8;
+        let v = corpus(50, dim, 3);
+        let coarse = CoarseCodebook::train(&v, 50, dim, 3, 1).unwrap();
+        let pq = PqCodebook::train(&v, 50, dim, 2, 1).unwrap();
+        let artifacts =
+            ModelArtifacts::new("a".repeat(64), "b".repeat(64), "c".repeat(64)).unwrap();
+        let error = Generation::new_registered(
+            "registered-model",
+            "latest",
+            artifacts,
+            dim,
+            coarse,
+            pq,
+            "test",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("mutable aliases"));
     }
 }

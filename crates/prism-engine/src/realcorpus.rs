@@ -149,7 +149,13 @@ impl ModelPlane for ReplayModelPlane {
         model_id: &str,
         model_version: &str,
         dim: usize,
+        expected_artifacts: Option<&prism_types::ModelArtifacts>,
     ) -> Result<Arc<dyn Embedder>> {
+        if expected_artifacts.is_some() {
+            return Err(PrismError::Invariant(
+                "the frozen replay fixture cannot serve a registered production generation".into(),
+            ));
+        }
         if model_id != MODEL_ID {
             return Err(PrismError::Invalid(format!(
                 "this fixture plane serves `{MODEL_ID}`, not `{model_id}` (invariant 9: a part's \
@@ -167,11 +173,11 @@ impl ModelPlane for ReplayModelPlane {
         }))
     }
 
-    fn default_embedder(&self, _dim: usize) -> Arc<dyn Embedder> {
-        Arc::new(ReplayEmbedder {
+    fn default_embedder(&self, _dim: usize) -> Result<Arc<dyn Embedder>> {
+        Ok(Arc::new(ReplayEmbedder {
             embeddings: self.embeddings.clone(),
             version: MODEL_VERSION.to_string(),
-        })
+        }))
     }
 }
 

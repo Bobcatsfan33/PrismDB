@@ -1,0 +1,16 @@
+{
+  "default_model_id": "replace-with-approved-model-id",
+  "default_model_version": "b5f4f9bcd7631a0cbb72e9a434602fd651edef027ac0dd595d36768ee01b7483",
+  "models": [
+    {
+      "model_id": "replace-with-approved-model-id",
+      "model_version": "b5f4f9bcd7631a0cbb72e9a434602fd651edef027ac0dd595d36768ee01b7483",
+      "dim": 768,
+      "artifacts": {
+        "model_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "tokenizer_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "preprocessing_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      }
+    }
+  ]
+}

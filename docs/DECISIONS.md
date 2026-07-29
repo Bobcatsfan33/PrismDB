@@ -909,3 +909,40 @@ Two options, both defensible:
 - **The cascade, re-derived on the restarts=8 codebook.** `DEFAULT_NPROBE` **14 → 11** (the honest tail is a *cheaper* ~19% scan, because the better codebook is better-balanced in the IVF sense); ε re-confirmed (p999 0.280 → 0.275, so ε=0.30 still bounds it, unchanged); `ADAPTIVE_MARGIN` and the widths re-derived on the new codebook. Every restarts=5 real-v1 number is retained as `config_superseded` *within* the real-v1 series (paired discipline — a superseded number is data, never deleted).
 - **Charter C-8 — the ledger gains a dependency graph.** Each constant now records its `upstream` constants in `registry.json` (`RegistryEntry::upstream`). Sweeps execute in topological order, and a change to an upstream constant marks the downstream receipts stale — the same bidirectional binding C-1 enforces between ledger and code, now enforced *between constants*. `tests/tuning.rs::the_dependency_graph_is_consistent_and_geometry_flows_downstream` gates it: referential integrity, no self-edges, geometry-sensitivity flows downstream, and every geometry-sensitive constant declares `KMEANS_RESTARTS` upstream.
 - **Re-baseline once, at the end, on the final set.** The [re-baselining obligation](../testing/evidence/RE-BASELINE.md) runs against the final self-consistent constants — restarts=8 / nprobe=11 — never the intermediate restarts=5 numbers.
+
+## D-084 — A production embedding space is the exact weights + tokenizer + preprocessing tuple, never a mutable tag
+
+**S13 production-plane increment 1.** `model_id:model_version` already names
+the score space that parts and generations pin. That is safe only if
+`model_version` is immutable. A registry alias such as `latest`, or a service
+that reloads weights while retaining a human version string, would let two
+different vector spaces wear the same label. Their cosine scores would look
+valid and be wrong.
+
+- **The version is derived, not assigned.** Production registration requires
+  SHA-256 digests for the weights, tokenizer, and complete preprocessing
+  pipeline. Their canonical tuple is SHA-256 hashed again; the full result is
+  the only accepted `model_version`. Mutable aliases are refused.
+- **The generation carries the receipt.** The three source digests are stored
+  in the generation and included in its content address. Existing deterministic
+  hash-model generations keep their legacy byte-for-byte content address;
+  registered production generations use the extended body. A production plane
+  will not resolve a generation without exact artifact provenance.
+- **Trust does not cross the process boundary by assertion.** The separately
+  supervised service receives the exact tuple on every request and must echo it
+  on every response. PrismDB validates protocol version, identity, batch
+  cardinality, dimension, finiteness, and a tight unit-norm contract before a
+  vector reaches the writer or query path. A crash, wrong reload, or malformed
+  output is a named failure, never a fallback to another model.
+- **Batching is below the storage invariant.** Ingest sends a bounded batch in
+  one transport call, but preserves one result per event. Per-item failures are
+  dead-lettered. A transport failure dead-letters the batch; if no item
+  survives, the existing snapshot and part set remain unchanged. The gate
+  proves both crash and wrong-reload cases against a real engine store.
+- **The process boundary is a Unix socket.** The protocol is bounded
+  newline-delimited JSON with read/write deadlines. The deployment manager
+  owns socket permissions and process supervision. This deliberately avoids
+  putting CUDA or model weights in the database address space; the deployable
+  GPU service and its autoscaling/health implementation remain the next S13
+  increment, along with tenant policy, redaction, rate/cost controls, cache,
+  and calibrated drift/OOD alarms.
