@@ -13,9 +13,11 @@ admits only loopback backends and authorized Unix peers, performs a real
 startup warmup, and normalizes/validates every backend vector. The third adds
 exact per-tenant model/purpose grants, pre-ACK local usage budgets, and a
 durable no-text ledger below every inference door. Versioned redaction,
-fleet-wide quota/chargeback, query caching, drift/OOD calibration,
-release-image attestations, and the long-running API deployment that owns
-sidecar scaling remain open S13/S14 work.
+fleet-wide quota/chargeback, query caching, drift/OOD calibration, and the
+long-running API deployment that owns sidecar scaling remain open S13/S14
+work. The gateway image now has a blocking vulnerability gate, SBOM, keyless
+signature, and build provenance; see
+[`RELEASE-ASSURANCE.md`](RELEASE-ASSURANCE.md).
 
 ## Immutable identity
 
@@ -96,10 +98,13 @@ text is never logged. The exec health probe traverses the same peer-authorized
 socket but does not spend GPU work.
 
 The gateway container has no Python package dependencies and runs as
-UID/GID 65532. A production release must supply its Python base image by
-digest, pin the TEI image by digest, mount the model and configuration
-read-only, use a memory-backed size-limited socket volume, remove all Linux
-capabilities, enable a read-only root filesystem, and deny runtime egress.
+UID/GID 65532. Its release workflow supplies the Python base image by digest,
+blocks fixable High/Critical findings, emits and attests an SPDX SBOM, signs the
+published digest keylessly, and publishes build provenance. A deployment must
+independently verify that evidence, pin the TEI image by digest, mount the model
+and configuration read-only, use a memory-backed size-limited socket volume,
+remove all Linux capabilities, enable a read-only root filesystem, and deny
+runtime egress.
 The exact operational recipe remains coupled to the S14 long-running PrismDB
 API workload; pretending a one-shot CLI is an autoscaled server would create a
 deployment artifact with no product behind it.

@@ -1023,3 +1023,34 @@ search, SQL, ingestion, generation work, and evidence tooling.
   moves to a gateway protocol whose complete profile is content-addressed
   inside `preprocessing_sha256`; until that lands, PrismDB does not claim
   in-repository redact-before-embedding.
+
+## D-087 — Release identity is a verified digest, not a tag
+
+**S13 production-plane increment 4.** A model gateway is deployable only if a
+customer can independently bind its running bytes to reviewed source and a
+known dependency inventory. A mutable image tag or an unsigned SBOM is not
+that evidence.
+
+- **Every build starts from the same immutable base.** The Dockerfile default
+  and release workflow carry the same Python version plus multi-architecture
+  index digest. CI checks they remain identical and records that value as an
+  OCI base label. Updating the human-readable tag without its digest, or one
+  copy without the other, fails the image gate.
+- **The release-equivalent image is tested as deployed.** Pull requests and
+  `main` run the command with no network, no capabilities, a read-only root
+  filesystem, `no-new-privileges`, a bounded `noexec` temporary mount, and the
+  exact unprivileged identity. This is a runtime-posture gate, not only a
+  Dockerfile review.
+- **Inventory and vulnerability results precede promotion.** Syft emits SPDX
+  JSON and Trivy blocks every fixable High or Critical OS/library finding. A
+  future exception requires an owner, exploitability analysis, compensating
+  control, and expiry; a bare scanner ignore is not an exception process.
+- **Tags request a build; digests identify it.** A `model-service-v*` tag
+  publishes an amd64/arm64 OCI index to GHCR. The index digest is keylessly
+  signed, its SPDX SBOM is separately attested, and GitHub build provenance is
+  pushed for the same subject. The workflow immediately verifies its own
+  signature and SBOM identity before retaining the release receipt.
+- **Verification and authorization are separate.** Admission reproduces the
+  expected repository/workflow/tag identity and issuer checks, then allows
+  only an explicitly promoted digest. A correct signature proves origin; it
+  does not authorize every correctly built development version.

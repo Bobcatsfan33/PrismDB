@@ -35,9 +35,10 @@ preserving protocol cardinality. Its container is dependency-free and
 non-root; the release build requires an approved digest-pinned base.
 
 This closes the missing executable inference boundary, but it does **not**
-close S13: a release image still needs SBOM/signature/provenance publication
-and a real GPU runner; tenant model authorization, redact-before-embedding,
-rate/cost controls, cache, and calibrated drift/OOD remain. Kubernetes
+close S13: a real GPU runner, redact-before-embedding, fleet-wide cost
+controls, cache, and calibrated drift/OOD remain. Tenant model authorization
+and local usage controls landed in increment 3; release image assurance landed
+in increment 4. Kubernetes
 autoscaling belongs to the long-running S14 API workload that will own these
 native sidecars; the current PrismDB executable is a CLI, and is not described
 as a server.
@@ -59,6 +60,23 @@ review found that mutable tenant rules outside `preprocessing_sha256` would
 silently change an embedding space and make crash replay policy-dependent.
 Redaction must therefore land as a content-addressed gateway-protocol feature,
 not a string replacement bolted onto the engine.
+
+### S13 increment 4 — signed, attestable model-service release
+
+[`RELEASE-ASSURANCE.md`](RELEASE-ASSURANCE.md) and
+`.github/workflows/model-service-release.yml` turn the gateway container into
+a verifiable release subject. The Dockerfile and workflow share one
+digest-pinned base; CI proves that identity, exercises the image under the
+production no-network/read-only/non-root posture, emits SPDX, retains
+machine-readable vulnerability evidence, and blocks fixable High/Critical
+findings.
+
+A `model-service-v*` tag publishes one amd64/arm64 OCI index digest to GHCR,
+keylessly signs it, attests its SPDX SBOM, publishes GitHub build provenance,
+and self-verifies the workflow identity before emitting a release receipt.
+Deployment still must enforce that identity and an explicitly approved digest.
+This closes gateway supply-chain publication; it does not close the separate
+TEI/model-image approval, GPU load gate, or S14 API deployment.
 
 ---
 

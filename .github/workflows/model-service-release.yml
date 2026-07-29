@@ -1,0 +1,233 @@
+name: model service release assurance
+
+on:
+  pull_request:
+    paths:
+      - "services/model-service/**"
+      - ".github/workflows/model-service-release.yml"
+      - "docs/RELEASE-ASSURANCE.md"
+  push:
+    branches: [main]
+    tags:
+      - "model-service-v*"
+  workflow_dispatch:
+
+concurrency:
+  group: model-service-release-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+env:
+  PYTHON_IMAGE: python:3.12.13-slim-bookworm@sha256:d50fb7611f86d04a3b0471b46d7557818d88983fc3136726336b2a4c657aa30b
+  LOCAL_IMAGE: prism-model-service:verification
+  TRIVY_VERSION: v0.72.0
+
+jobs:
+  verify-image:
+    name: image policy, SBOM, and vulnerability gate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+
+      - name: build the release-equivalent image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+        with:
+          context: services/model-service
+          load: true
+          push: false
+          tags: ${{ env.LOCAL_IMAGE }}
+          build-args: |
+            PYTHON_IMAGE=${{ env.PYTHON_IMAGE }}
+
+      - name: verify immutable base and unprivileged identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          DEFAULT_BASE="$(sed -n 's/^ARG PYTHON_IMAGE=//p' services/model-service/Dockerfile | head -n 1)"
+          test "${DEFAULT_BASE}" = "${PYTHON_IMAGE}"
+          test "$(docker image inspect "${LOCAL_IMAGE}" --format '{{ index .Config.Labels "org.opencontainers.image.base.name" }}')" = "${PYTHON_IMAGE}"
+          test "$(docker image inspect "${LOCAL_IMAGE}" --format '{{.Config.User}}')" = "65532:65532"
+
+      - name: smoke test the production runtime posture
+        run: >-
+          docker run --rm
+          --read-only
+          --network none
+          --cap-drop ALL
+          --security-opt no-new-privileges
+          --tmpfs /tmp:rw,noexec,nosuid,size=16m
+          "${LOCAL_IMAGE}" --help
+
+      - name: generate SPDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610
+        with:
+          image: ${{ env.LOCAL_IMAGE }}
+          format: spdx-json
+          output-file: prism-model-service.spdx.json
+          syft-version: v1.50.0
+          upload-artifact: false
+
+      - name: write machine-readable vulnerability evidence
+        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8
+        with:
+          image-ref: ${{ env.LOCAL_IMAGE }}
+          version: ${{ env.TRIVY_VERSION }}
+          format: json
+          output: prism-model-service.trivy.json
+          scanners: vuln
+          vuln-type: os,library
+          ignore-unfixed: true
+          severity: HIGH,CRITICAL
+          exit-code: 0
+
+      - name: retain pull-request assurance evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: model-service-assurance-${{ github.run_id }}
+          path: |
+            prism-model-service.spdx.json
+            prism-model-service.trivy.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: block fixable high and critical vulnerabilities
+        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8
+        with:
+          image-ref: ${{ env.LOCAL_IMAGE }}
+          version: ${{ env.TRIVY_VERSION }}
+          format: table
+          scanners: vuln
+          vuln-type: os,library
+          ignore-unfixed: true
+          severity: HIGH,CRITICAL
+          exit-code: 1
+
+  publish:
+    name: publish, sign, and attest
+    if: startsWith(github.ref, 'refs/tags/model-service-v')
+    needs: verify-image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: compute canonical image name
+        shell: bash
+        run: |
+          echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/prism-model-service" >> "${GITHUB_ENV}"
+
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: metadata
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=match,pattern=model-service-v(.*),group=1
+            type=sha,format=long,prefix=sha-
+
+      - id: build
+        name: build and publish the verified source
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+        with:
+          context: services/model-service
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          build-args: |
+            PYTHON_IMAGE=${{ env.PYTHON_IMAGE }}
+          provenance: mode=max
+
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac
+
+      - name: keylessly sign the image digest
+        run: cosign sign --yes "${IMAGE}@${{ steps.build.outputs.digest }}"
+
+      - name: generate release SPDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610
+        with:
+          image: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+          registry-username: ${{ github.actor }}
+          registry-password: ${{ secrets.GITHUB_TOKEN }}
+          format: spdx-json
+          output-file: prism-model-service.spdx.json
+          syft-version: v1.50.0
+          upload-artifact: false
+
+      - name: keylessly attest the SBOM
+        run: >-
+          cosign attest --yes
+          --predicate prism-model-service.spdx.json
+          --type spdxjson
+          "${IMAGE}@${{ steps.build.outputs.digest }}"
+
+      - name: publish GitHub build provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: verify the just-published signature and SBOM attestation
+        shell: bash
+        run: |
+          set -euo pipefail
+          IDENTITY="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/model-service-release.yml@${GITHUB_REF}"
+          cosign verify \
+            --certificate-identity "${IDENTITY}" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "${IMAGE}@${{ steps.build.outputs.digest }}"
+          cosign verify-attestation \
+            --certificate-identity "${IDENTITY}" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            --type spdxjson \
+            "${IMAGE}@${{ steps.build.outputs.digest }}"
+
+      - name: write release evidence receipt
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        shell: bash
+        run: |
+          jq -n \
+            --arg schema_version "1" \
+            --arg image "${IMAGE}" \
+            --arg image_digest "${IMAGE_DIGEST}" \
+            --arg base_image "${PYTHON_IMAGE}" \
+            --arg source_repository "https://github.com/${GITHUB_REPOSITORY}" \
+            --arg source_revision "${GITHUB_SHA}" \
+            --arg release_tag "${GITHUB_REF_NAME}" \
+            '{
+              schema_version: ($schema_version | tonumber),
+              image: $image,
+              image_digest: $image_digest,
+              base_image: $base_image,
+              source_repository: $source_repository,
+              source_revision: $source_revision,
+              release_tag: $release_tag
+            }' > prism-model-service.release.json
+
+      - name: retain release evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: model-service-release-${{ github.ref_name }}
+          path: |
+            prism-model-service.spdx.json
+            prism-model-service.release.json
+          if-no-files-found: error
+          retention-days: 90
