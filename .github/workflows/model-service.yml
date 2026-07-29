@@ -1,0 +1,61 @@
+name: model service
+
+on:
+  pull_request:
+    paths:
+      - "services/model-service/**"
+      - ".github/workflows/model-service.yml"
+  push:
+    branches: [main]
+    paths:
+      - "services/model-service/**"
+      - ".github/workflows/model-service.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: lint and format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12"
+      - run: python -m pip install ruff==0.16.0
+      - run: ruff check services/model-service
+      - run: ruff format --check services/model-service
+
+  test:
+    name: protocol, artifact, and failure gates
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: ${{ matrix.python }}
+      - name: compile
+        run: python -m compileall -q services/model-service
+      - name: test
+        working-directory: services/model-service
+        run: PYTHONPATH=. python -m unittest discover -s tests -v
+
+  container:
+    name: non-root dependency-free container
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: build
+        run: docker build -t prism-model-service:test services/model-service
+      - name: entrypoint is runnable
+        run: docker run --rm prism-model-service:test --help
+      - name: image runs as the declared unprivileged identity
+        run: |
+          test "$(docker image inspect prism-model-service:test \
+            --format '{{.Config.User}}')" = "65532:65532"

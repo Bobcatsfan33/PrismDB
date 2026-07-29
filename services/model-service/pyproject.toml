@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools==80.9.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "prism-model-service"
+version = "0.1.0"
+description = "Fail-closed identity gateway for PrismDB embedding inference"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+dependencies = []
+
+[project.scripts]
+prism-model-service = "prism_model_service.__main__:main"
+
+[tool.setuptools]
+packages = ["prism_model_service"]

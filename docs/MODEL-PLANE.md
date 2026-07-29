@@ -5,10 +5,15 @@ local Unix socket. The database process never loads model weights or a GPU
 runtime. A CUDA fault, model-process crash, or model reload therefore cannot
 write into the storage engine's address space.
 
-This is the first S13 production-plane increment. It closes model identity,
-batch transport, output-validation, crash, and reload safety. Per-tenant model
+The first S13 increment closed model identity, batch transport,
+output-validation, crash, and reload safety. The second adds a runnable,
+dependency-free identity gateway in front of a colocated Text Embeddings
+Inference (TEI) process. The gateway independently hashes mounted artifacts,
+admits only loopback backends and authorized Unix peers, performs a real
+startup warmup, and normalizes/validates every backend vector. Per-tenant model
 policy, redaction, rate limits, cost accounting, query caching, drift/OOD
-calibration, and the deployable GPU service remain open S13 work.
+calibration, release-image attestations, and the long-running API deployment
+that owns sidecar scaling remain open S13/S14 work.
 
 ## Immutable identity
 
@@ -59,6 +64,41 @@ configuration is requested.
 The socket file must be created with an owner/group and mode that permit only
 the PrismDB process identity and the model-service identity. The deployment
 manager owns those filesystem permissions and process supervision.
+
+## Deployable identity gateway
+
+[`services/model-service`](../services/model-service) implements the server
+side of this protocol. It deliberately does not import or load model code.
+Instead, it fronts one colocated TEI process per immutable model over an
+explicit loopback URL. TEI owns CUDA, model batching, metrics, and its own
+crash lifecycle; the gateway owns PrismDB identity and trust.
+
+Before binding the Unix socket, the gateway:
+
+- validates the same bounded registry as the Rust client;
+- requires exactly one deployment for every registered model, including
+  historical generations;
+- content-addresses explicitly enumerated weights, tokenizer, and
+  preprocessing files (no directory guessing, symlinks, traversal, or
+  duplicate paths);
+- requires the preprocessing manifest to name the exact supported TEI,
+  truncation, normalization, input-bound, and prompt contract;
+- permits only an explicit loopback HTTP backend;
+- checks backend health and performs a real dimension/finiteness/norm warmup.
+
+Each accepted Unix connection is authorized by Linux `SO_PEERCRED`, bounded by
+a fixed worker count, and held to the client deadline and byte limits. Input
+text is never logged. The exec health probe traverses the same peer-authorized
+socket but does not spend GPU work.
+
+The gateway container has no Python package dependencies and runs as
+UID/GID 65532. A production release must supply its Python base image by
+digest, pin the TEI image by digest, mount the model and configuration
+read-only, use a memory-backed size-limited socket volume, remove all Linux
+capabilities, enable a read-only root filesystem, and deny runtime egress.
+The exact operational recipe remains coupled to the S14 long-running PrismDB
+API workload; pretending a one-shot CLI is an autoscaled server would create a
+deployment artifact with no product behind it.
 
 ## Wire contract
 
@@ -116,6 +156,11 @@ or catalog snapshot is published.
 - wrong identity, wrong dimension, non-finite, and wrong-norm output fail
   closed;
 - the Unix-socket protocol round-trips under its bounds;
+- mounted artifact bytes are verified before the gateway becomes ready;
+- non-loopback backends, symlinked artifacts, and unauthorized peer UIDs are
+  refused;
+- TEI health plus a real warmup gate readiness, and malformed backend vectors
+  preserve output cardinality while failing every affected item closed;
 - partial CLI configuration fails before store creation, while complete
   configuration performs a real identity-checked startup warmup;
 - an honest model creates a generation carrying exact artifact hashes;
