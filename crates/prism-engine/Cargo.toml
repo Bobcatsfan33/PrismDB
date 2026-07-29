@@ -19,3 +19,4 @@ prism-part = { workspace = true }
 prism-sql = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+native-tls = { workspace = true }

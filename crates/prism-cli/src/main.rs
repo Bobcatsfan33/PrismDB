@@ -156,31 +156,68 @@ fn path_of(a: &Args) -> Result<PathBuf> {
 /// ownership epochs — lives on S3/MinIO, so a `prism` process is a real shard over shared object
 /// storage (the substrate the durability-chaos gates run on). A cache state is a physical layout and
 /// may not change an answer ([storage §3](../../../docs/STORAGE-CONTRACT.md)), so this only relocates
-/// bytes, never results. `PRISM_S3_BUCKET` names the bucket — one per shard, since catalog keys are
-/// not store-scoped.
-fn cold_from_env() -> Option<Arc<prism_engine::storage::CachedObjectStore>> {
-    let endpoint = std::env::var("PRISM_S3_ENDPOINT").ok()?;
+/// bytes, never results. `PRISM_S3_ENDPOINT` is `host:port` (normally port 443 in production);
+/// `PRISM_S3_BUCKET` names the bucket — one per shard, since catalog keys are not store-scoped.
+/// Production requires explicit AWS credentials. Only the conspicuous, loopback-only
+/// `PRISM_ALLOW_INSECURE_S3=true` development path may use the MinIO defaults.
+fn cold_from_env() -> Result<Option<Arc<prism_engine::storage::CachedObjectStore>>> {
+    let Ok(endpoint) = std::env::var("PRISM_S3_ENDPOINT") else {
+        return Ok(None);
+    };
+    let allow_insecure = std::env::var("PRISM_ALLOW_INSECURE_S3")
+        .map(|value| value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let credentials = if allow_insecure {
+        prism_engine::storage::sigv4::Credentials {
+            access_key: std::env::var("AWS_ACCESS_KEY_ID").unwrap_or_else(|_| "minioadmin".into()),
+            secret_key: std::env::var("AWS_SECRET_ACCESS_KEY")
+                .unwrap_or_else(|_| "minioadmin".into()),
+            session_token: std::env::var("AWS_SESSION_TOKEN")
+                .ok()
+                .filter(|value| !value.trim().is_empty()),
+        }
+    } else {
+        let required = |name: &str| {
+            std::env::var(name)
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    PrismError::Invalid(format!(
+                        "production S3 requires a non-empty {name}; implicit development credentials are forbidden"
+                    ))
+                })
+        };
+        prism_engine::storage::sigv4::Credentials {
+            access_key: required("AWS_ACCESS_KEY_ID")?,
+            secret_key: required("AWS_SECRET_ACCESS_KEY")?,
+            session_token: std::env::var("AWS_SESSION_TOKEN")
+                .ok()
+                .filter(|value| !value.trim().is_empty()),
+        }
+    };
     let cfg = prism_engine::storage::s3::S3Config {
         endpoint,
         region: std::env::var("PRISM_S3_REGION").unwrap_or_else(|_| "us-east-1".into()),
         bucket: std::env::var("PRISM_S3_BUCKET").unwrap_or_else(|_| "prism".into()),
-        credentials: prism_engine::storage::sigv4::Credentials {
-            access_key: std::env::var("AWS_ACCESS_KEY_ID").unwrap_or_else(|_| "minioadmin".into()),
-            secret_key: std::env::var("AWS_SECRET_ACCESS_KEY")
-                .unwrap_or_else(|_| "minioadmin".into()),
-        },
+        credentials,
         fixed_amz_date: None,
     };
-    let backend = prism_engine::storage::s3::S3ObjectStore::new(cfg);
-    Some(Arc::new(prism_engine::storage::CachedObjectStore::new(
-        Arc::new(backend),
-        prism_engine::storage::CACHE_QUOTA_BYTES,
+    let backend = if allow_insecure {
+        prism_engine::storage::s3::S3ObjectStore::new_local(cfg)?
+    } else {
+        prism_engine::storage::s3::S3ObjectStore::new_production(cfg)?
+    };
+    Ok(Some(Arc::new(
+        prism_engine::storage::CachedObjectStore::new(
+            Arc::new(backend),
+            prism_engine::storage::CACHE_QUOTA_BYTES,
+        ),
     )))
 }
 
 fn open(a: &Args) -> Result<Engine> {
     let engine = Engine::open(&path_of(a)?)?;
-    Ok(match cold_from_env() {
+    Ok(match cold_from_env()? {
         Some(cold) => engine.with_cold(cold),
         None => engine,
     })
@@ -200,6 +237,10 @@ fn cmd_init(a: &Args) -> Result<()> {
         "dedicated",
         "promote",
     ])?;
+    // Validate the configured remote posture before creating any local state. Without this, `init`
+    // could appear successful with a plaintext production endpoint and defer the refusal until the
+    // first ingest, which is an unsafe and operationally confusing partial boot.
+    let _cold = cold_from_env()?;
     let config = StoreConfig {
         format_version: STORE_VERSION,
         dim: a.parse_opt("dim", 64usize)?,

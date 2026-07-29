@@ -22,6 +22,9 @@ fn minio() -> Option<S3Config> {
             access_key: std::env::var("AWS_ACCESS_KEY_ID").unwrap_or_else(|_| "minioadmin".into()),
             secret_key: std::env::var("AWS_SECRET_ACCESS_KEY")
                 .unwrap_or_else(|_| "minioadmin".into()),
+            session_token: std::env::var("AWS_SESSION_TOKEN")
+                .ok()
+                .filter(|value| !value.trim().is_empty()),
         },
         fixed_amz_date: None,
     })

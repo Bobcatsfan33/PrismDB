@@ -83,9 +83,7 @@ fn real_golden(engine: &Engine, corpus: &RealCorpus) -> oracle::Golden {
 #[ignore]
 fn rederive_block_size_on_real_v1() {
     let corpus = RealCorpus::load_default().unwrap();
-    let candidates: [u32; 9] = [
-        512, 1024, 2048, 4096, 8192, 16384, 65536, 262144, 1048576,
-    ];
+    let candidates: [u32; 9] = [512, 1024, 2048, 4096, 8192, 16384, 65536, 262144, 1048576];
     let rows = corpus.events.len();
 
     // (block_size, manifest_bytes, bytes_read)

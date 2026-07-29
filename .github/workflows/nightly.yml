@@ -40,7 +40,7 @@ jobs:
       - run: cargo test --release -p prism-part --test fuzz -- --nocapture
 
   block-size-provenance:
-    name: the default block size still holds on a fresh sweep
+    name: the retained hash-v1 block-size receipt still reproduces
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -48,10 +48,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release
-      # Re-derive BLOCK_SIZE from scratch (a real store built at each candidate size,
-      # the real golden query set run against it) and confirm the committed receipt
-      # still reproduces. Charter C-1: a default that quietly stops being justified by
-      # its own evidence is exactly the magic constant the charter forbids.
+      # This CLI command uses the deterministic 64d hash-v1 fixture. Compare it with
+      # the retained hash-v1 series, not the shipped real-v1/768d value. Mixing those
+      # corpora made this gate permanently red after the S13 re-derivation.
       - name: re-derive and compare
         run: |
           set -euxo pipefail
@@ -60,14 +59,17 @@ jobs:
           import json
           fresh = json.load(open("/tmp/bs.json"))
           committed = json.load(open("testing/evidence/block-size.json"))
-          print(f"fresh sweep chose {fresh['chosen_block_size']}, "
-                f"committed receipt says {committed['chosen_block_size']}")
-          assert fresh["chosen_block_size"] == committed["chosen_block_size"],               "the committed block-size provenance no longer reproduces; re-derive it"
-          print("the default is still justified by its own evidence.")
+          assert committed["shipped_series"] == "real-v1"
+          expected = committed["series"]["hash-v1"]["chosen_block_size"]
+          print(f"fresh hash-v1 sweep chose {fresh['chosen_block_size']}, "
+                f"retained hash-v1 receipt says {expected}")
+          assert fresh["chosen_block_size"] == expected, \
+              "the retained hash-v1 block-size receipt no longer reproduces"
+          print("the retained hash-v1 series still reproduces.")
           PY
 
   width-provenance:
-    name: the default candidate/rerank widths still hold on a fresh sweep
+    name: the retained hash-v1 width receipt still reproduces
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -83,14 +85,16 @@ jobs:
           import json
           fresh = json.load(open("/tmp/w.json"))
           committed = json.load(open("testing/evidence/widths.json"))
+          assert committed["shipped_series"] == "real-v1"
+          retained = committed["series"]["hash-v1"]
           for k in ("chosen_candidates", "chosen_rerank"):
-              print(f"{k}: fresh={fresh[k]} committed={committed[k]}")
-              assert fresh[k] == committed[k], f"{k} no longer reproduces; re-derive it"
-          print("the widths are still justified by their own evidence.")
+              print(f"{k}: fresh hash-v1={fresh[k]} retained hash-v1={retained[k]}")
+              assert fresh[k] == retained[k], f"retained hash-v1 {k} no longer reproduces"
+          print("the retained hash-v1 width series still reproduces.")
           PY
 
   nprobe-provenance:
-    name: the default nprobe still holds on a fresh sweep
+    name: the retained hash-v1 nprobe receipt still reproduces
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -98,9 +102,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release
-      # Re-derive the default from scratch and confirm the committed receipt is
-      # still the right answer. A default that quietly stops being justified by
-      # its own evidence is exactly the "magic constant" the charter forbids.
+      # The CLI fixture below is hash-v1. The shipped default was re-derived on
+      # real-v1; this job verifies the retained paired series without comparing
+      # values from different corpora.
       - name: re-derive and compare
         run: |
           set -euxo pipefail
@@ -113,9 +117,11 @@ jobs:
           import json
           fresh = json.load(open("/tmp/prov.json"))
           committed = json.load(open("testing/evidence/nprobe.json"))
-          print(f"fresh sweep chose nprobe={fresh['chosen_nprobe']}, "
-                f"committed receipt says {committed['chosen_nprobe']}")
-          assert fresh["chosen_nprobe"] == committed["chosen_nprobe"], \
-              "the committed nprobe provenance no longer reproduces; re-derive it"
-          print("the default is still justified by its own evidence.")
+          assert committed["shipped_series"] == "real-v1"
+          expected = committed["series"]["hash-v1"]["chosen_nprobe"]
+          print(f"fresh hash-v1 sweep chose nprobe={fresh['chosen_nprobe']}, "
+                f"retained hash-v1 receipt says {expected}")
+          assert fresh["chosen_nprobe"] == expected, \
+              "the retained hash-v1 nprobe receipt no longer reproduces"
+          print("the retained hash-v1 nprobe series still reproduces.")
           PY
