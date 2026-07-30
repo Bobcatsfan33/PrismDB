@@ -140,9 +140,12 @@ impl Engine {
             }
         };
 
-        let embedder = self
-            .plane
-            .embedder(&generation.model_id, &generation.model_version, dim)?;
+        let embedder = self.plane.embedder(
+            &generation.model_id,
+            &generation.model_version,
+            dim,
+            generation.model_artifacts.as_ref(),
+        )?;
         let (kept, failed) = embed_all(&*embedder, admitted);
         dead.extend(failed);
 
@@ -171,7 +174,7 @@ impl Engine {
         admitted: Vec<Event>,
     ) -> Result<(Option<Trained>, Vec<DeadLetter>)> {
         let dim = self.store.config.dim;
-        let embedder = self.plane.default_embedder(dim);
+        let embedder = self.plane.default_embedder(dim)?;
         let (kept, dead) = embed_all(&*embedder, admitted);
         let (events, vectors) = kept;
         if vectors.is_empty() {
@@ -201,17 +204,29 @@ impl Engine {
             self.store.config.seed,
             self.store.config.kmeans_restarts,
         )?;
-        let generation = Generation::new(
-            embedder.model_id(),
-            embedder.model_version(),
-            dim,
-            coarse,
-            pq,
-            &format!(
-                "bootstrap (PROVISIONAL): stratified sample of {n} vectors from the first ingest, \
-                 keyed on event_id"
-            ),
-        )?
+        let trained_from = format!(
+            "bootstrap (PROVISIONAL): stratified sample of {n} vectors from the first ingest, \
+             keyed on event_id"
+        );
+        let generation = match embedder.artifacts() {
+            Some(artifacts) => Generation::new_registered(
+                embedder.model_id(),
+                embedder.model_version(),
+                artifacts.clone(),
+                dim,
+                coarse,
+                pq,
+                &trained_from,
+            )?,
+            None => Generation::new(
+                embedder.model_id(),
+                embedder.model_version(),
+                dim,
+                coarse,
+                pq,
+                &trained_from,
+            )?,
+        }
         .with_training(crate::generations::provenance(&prov));
         Ok((
             Some(Trained {
@@ -417,12 +432,31 @@ type Embedded = (Vec<Event>, Vec<Vec<f32>>);
 
 /// Embed a batch, splitting it into what survived and what must be dead-lettered.
 fn embed_all(embedder: &dyn Embedder, events: Vec<Event>) -> (Embedded, Vec<DeadLetter>) {
+    let texts: Vec<&str> = events.iter().map(|event| event.body.as_str()).collect();
+    let results = embedder.embed_batch(&texts);
+    if results.len() != events.len() {
+        let detail = format!(
+            "embedder returned {} results for {} events; refusing the entire batch",
+            results.len(),
+            events.len()
+        );
+        let dead = events
+            .into_iter()
+            .map(|event| DeadLetter {
+                reason: prism_types::RejectReason::EmbeddingFailed.to_string(),
+                detail: detail.clone(),
+                stage: "embedding".to_string(),
+                event,
+            })
+            .collect();
+        return ((Vec::new(), Vec::new()), dead);
+    }
     let mut kept_events = Vec::with_capacity(events.len());
     let mut kept_vecs = Vec::with_capacity(events.len());
     let mut dead = Vec::new();
 
-    for e in events {
-        match embedder.embed(&e.body) {
+    for (e, result) in events.into_iter().zip(results) {
+        match result {
             Ok(v) => {
                 kept_events.push(e);
                 kept_vecs.push(v);
@@ -441,3 +475,45 @@ fn embed_all(embedder: &dyn Embedder, events: Vec<Event>) -> (Embedded, Vec<Dead
 // The sampler's own tests moved to `crate::sample` along with the sampler. The three that used
 // to live here tested a reservoir keyed on *position*, which is exactly the thing charter C-4
 // forbids -- they asserted the old behaviour was deterministic, and it was, and that was the bug.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use prism_types::error::{PrismError, Result};
+
+    struct ShortBatchEmbedder;
+
+    impl Embedder for ShortBatchEmbedder {
+        fn model_id(&self) -> &str {
+            "broken-test-model"
+        }
+
+        fn model_version(&self) -> &str {
+            "1"
+        }
+
+        fn dim(&self) -> usize {
+            8
+        }
+
+        fn embed(&self, _text: &str) -> Result<Vec<f32>> {
+            Err(PrismError::Invariant("single path should not run".into()))
+        }
+
+        fn embed_batch(&self, _texts: &[&str]) -> Vec<Result<Vec<f32>>> {
+            Vec::new()
+        }
+    }
+
+    #[test]
+    fn a_batch_cardinality_violation_dead_letters_every_event() {
+        let events = crate::corpus::generate(crate::corpus::Kind::Uniform, 4, 17);
+        let ((kept, vectors), dead) = embed_all(&ShortBatchEmbedder, events);
+        assert!(kept.is_empty());
+        assert!(vectors.is_empty());
+        assert_eq!(dead.len(), 4);
+        assert!(dead
+            .iter()
+            .all(|letter| letter.detail.contains("0 results for 4 events")));
+    }
+}

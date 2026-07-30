@@ -7,11 +7,71 @@
 //! plane arrives in S13 behind this same trait.
 
 use crate::error::{PrismError, Result};
+use crate::hash::{hex, sha256};
 use crate::vector::validate_and_normalize;
+use serde::{Deserialize, Serialize};
 
 /// Text beyond this is truncated *for embedding only* (on a char boundary).
 /// The full body is still stored. See docs/DECISIONS.md, D-005.
 pub const MAX_EMBED_INPUT_BYTES: usize = 32 * 1024;
+
+/// Exact immutable artifacts that define a production embedding space.
+///
+/// Human model names and mutable tags are not enough provenance for stored
+/// vectors. The three digests cover the weights, tokenizer, and complete
+/// preprocessing pipeline. Their canonical digest is the only valid
+/// `model_version` for a registered production model, so two artifact sets can
+/// never share a score space merely because an operator reused a tag.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelArtifacts {
+    pub model_sha256: String,
+    pub tokenizer_sha256: String,
+    pub preprocessing_sha256: String,
+}
+
+impl ModelArtifacts {
+    pub fn new(
+        model_sha256: impl Into<String>,
+        tokenizer_sha256: impl Into<String>,
+        preprocessing_sha256: impl Into<String>,
+    ) -> Result<Self> {
+        let artifacts = Self {
+            model_sha256: model_sha256.into(),
+            tokenizer_sha256: tokenizer_sha256.into(),
+            preprocessing_sha256: preprocessing_sha256.into(),
+        };
+        artifacts.validate()?;
+        Ok(artifacts)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        for (name, digest) in [
+            ("model_sha256", &self.model_sha256),
+            ("tokenizer_sha256", &self.tokenizer_sha256),
+            ("preprocessing_sha256", &self.preprocessing_sha256),
+        ] {
+            if digest.len() != 64
+                || !digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                return Err(PrismError::Invalid(format!(
+                    "{name} must be a lowercase 64-character SHA-256 digest"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Full SHA-256 over an unambiguous canonical artifact tuple.
+    pub fn revision(&self) -> String {
+        let canonical = format!(
+            "model={}\ntokenizer={}\npreprocessing={}\n",
+            self.model_sha256, self.tokenizer_sha256, self.preprocessing_sha256
+        );
+        hex(&sha256(canonical.as_bytes()))
+    }
+}
 
 /// Everything the engine is allowed to know about an embedding model.
 ///
@@ -23,11 +83,21 @@ pub trait Embedder: Send + Sync {
     fn model_version(&self) -> &str;
     fn dim(&self) -> usize;
 
+    /// Exact production artifacts, when this is a registered external model.
+    ///
+    /// The deterministic development embedder predates the production model
+    /// registry and returns `None`. A separately served model must return
+    /// `Some`, and its `model_version` must equal `artifacts.revision()`.
+    fn artifacts(&self) -> Option<&ModelArtifacts> {
+        None
+    }
+
     /// Returns a *normalized* vector, or an error. An error here means the
     /// event is dead-lettered: we never store an event without the semantic
     /// columns it asked for (Part III §10).
     fn embed(&self, text: &str) -> Result<Vec<f32>>;
 
+    /// Returns exactly one result per input, in input order.
     fn embed_batch(&self, texts: &[&str]) -> Vec<Result<Vec<f32>>> {
         texts.iter().map(|t| self.embed(t)).collect()
     }
@@ -204,5 +274,20 @@ mod tests {
         let a = HashEmbedder::new(64);
         let b = HashEmbedder::with_version(64, "2");
         assert_ne!(a.model_version(), b.model_version());
+    }
+
+    #[test]
+    fn artifact_revision_binds_every_immutable_input() {
+        let a = ModelArtifacts::new("a".repeat(64), "b".repeat(64), "c".repeat(64)).unwrap();
+        let b = ModelArtifacts::new("a".repeat(64), "b".repeat(64), "d".repeat(64)).unwrap();
+        assert_eq!(a.revision().len(), 64);
+        assert_ne!(a.revision(), b.revision());
+    }
+
+    #[test]
+    fn artifact_digests_are_strictly_canonical() {
+        assert!(ModelArtifacts::new("A".repeat(64), "b".repeat(64), "c".repeat(64)).is_err());
+        assert!(ModelArtifacts::new("a".repeat(63), "b".repeat(64), "c".repeat(64)).is_err());
+        assert!(ModelArtifacts::new("g".repeat(64), "b".repeat(64), "c".repeat(64)).is_err());
     }
 }

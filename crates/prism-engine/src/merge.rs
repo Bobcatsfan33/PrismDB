@@ -556,7 +556,9 @@ impl Engine {
         let old_gen = self.catalog().get_generation(&old_gen_id)?;
 
         let dim = self.store.config.dim;
-        let embedder = self.plane.embedder("hash-embedder", new_version, dim)?;
+        let embedder = self
+            .plane
+            .candidate_embedder(&old_gen.model_id, new_version, dim)?;
 
         // 1. Re-embed every row under the new model.
         let readers = self.open_parts(&snap)?;
@@ -568,10 +570,12 @@ impl Engine {
             return Err(PrismError::Invalid("nothing to re-embed: no rows".into()));
         }
 
+        let texts: Vec<&str> = events.iter().map(|event| event.body.as_str()).collect();
+        let results = embedder.embed_batch(&texts);
         let mut vectors: Vec<Vec<f32>> = Vec::with_capacity(events.len());
         let mut kept: Vec<Event> = Vec::with_capacity(events.len());
-        for e in events {
-            match embedder.embed(&e.body) {
+        for (e, result) in events.into_iter().zip(results) {
+            match result {
                 Ok(v) => {
                     vectors.push(v);
                     kept.push(e);
@@ -619,14 +623,27 @@ impl Engine {
             self.store.config.seed,
             self.store.config.kmeans_restarts,
         )?;
-        let new_gen = Generation::new(
-            embedder.model_id(),
-            embedder.model_version(),
-            dim,
-            coarse,
-            pq,
-            &format!("re-embed from generation {old_gen_id}: reservoir sample of {n} vectors"),
-        )?;
+        let trained_from =
+            format!("re-embed from generation {old_gen_id}: reservoir sample of {n} vectors");
+        let new_gen = match embedder.artifacts() {
+            Some(artifacts) => Generation::new_registered(
+                embedder.model_id(),
+                embedder.model_version(),
+                artifacts.clone(),
+                dim,
+                coarse,
+                pq,
+                &trained_from,
+            )?,
+            None => Generation::new(
+                embedder.model_id(),
+                embedder.model_version(),
+                dim,
+                coarse,
+                pq,
+                &trained_from,
+            )?,
+        };
 
         if new_gen.generation_id == old_gen_id {
             return Err(PrismError::Invalid(

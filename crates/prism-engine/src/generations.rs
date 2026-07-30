@@ -147,18 +147,45 @@ impl Engine {
         let snap = self.snapshot()?;
         let dim = self.store.config.dim;
 
-        let model_version =
-            match model_version {
-                Some(v) => v.to_string(),
-                None => match &snap.active_generation {
-                    Some(a) => self.catalog().get_generation(a)?.model_version,
-                    None => return Err(PrismError::Invalid(
+        let active = match &snap.active_generation {
+            Some(id) => Some(self.catalog().get_generation(id)?),
+            None => None,
+        };
+        let model_version = match model_version {
+            Some(version) => version.to_string(),
+            None => active
+                .as_ref()
+                .map(|generation| generation.model_version.clone())
+                .ok_or_else(|| {
+                    PrismError::Invalid(
                         "the store has no active generation to retrain from; name a model version"
                             .into(),
-                    )),
-                },
-            };
-        let embedder = self.plane.embedder("hash-embedder", &model_version, dim)?;
+                    )
+                })?,
+        };
+        let embedder = match active.as_ref() {
+            Some(generation) if generation.model_version == model_version => self.plane.embedder(
+                &generation.model_id,
+                &generation.model_version,
+                dim,
+                generation.model_artifacts.as_ref(),
+            )?,
+            Some(generation) => {
+                self.plane
+                    .candidate_embedder(&generation.model_id, &model_version, dim)?
+            }
+            None => {
+                let embedder = self.plane.default_embedder(dim)?;
+                if embedder.model_version() != model_version {
+                    return Err(PrismError::Invalid(format!(
+                        "requested model version `{model_version}` is not the model plane default \
+                         `{}` for an empty store",
+                        embedder.model_version()
+                    )));
+                }
+                embedder
+            }
+        };
 
         // Re-embed the sampled rows under the NEW model. A codebook for a new space must be
         // trained on vectors from that space; training it on the old space's vectors would
@@ -213,19 +240,30 @@ impl Engine {
             self.store.config.seed,
             self.store.config.kmeans_restarts,
         )?;
-        let g = Generation::new(
-            embedder.model_id(),
-            embedder.model_version(),
-            dim,
-            coarse,
-            pq,
-            &format!(
-                "stratified sample of {n} rows across {} partitions of snapshot {}, keyed on \
-                 event_id",
-                prov.strata.len(),
-                snap.snapshot_id
-            ),
-        )?
+        let trained_from = format!(
+            "stratified sample of {n} rows across {} partitions of snapshot {}, keyed on event_id",
+            prov.strata.len(),
+            snap.snapshot_id
+        );
+        let g = match embedder.artifacts() {
+            Some(artifacts) => Generation::new_registered(
+                embedder.model_id(),
+                embedder.model_version(),
+                artifacts.clone(),
+                dim,
+                coarse,
+                pq,
+                &trained_from,
+            )?,
+            None => Generation::new(
+                embedder.model_id(),
+                embedder.model_version(),
+                dim,
+                coarse,
+                pq,
+                &trained_from,
+            )?,
+        }
         .with_training(provenance(&prov));
 
         if snap.active_generation.as_deref() == Some(g.generation_id.as_str()) {
@@ -539,7 +577,12 @@ impl Engine {
         now_ms: i64,
     ) -> Result<MigrateReport> {
         let dim = self.store.config.dim;
-        let embedder = self.plane.embedder(&g.model_id, &g.model_version, dim)?;
+        let embedder = self.plane.embedder(
+            &g.model_id,
+            &g.model_version,
+            dim,
+            g.model_artifacts.as_ref(),
+        )?;
 
         let from_gen = snap
             .active_generation

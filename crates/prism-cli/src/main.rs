@@ -11,7 +11,7 @@ use prism_engine::bench::{self, BenchOpts};
 use prism_engine::corpus::{self, Kind};
 use prism_engine::engine::now_ms;
 use prism_engine::model::HashModelPlane;
-use prism_engine::{oracle, tsv, Engine};
+use prism_engine::{oracle, tsv, Engine, ModelPlane};
 use prism_part::store::{Store, StoreConfig, STORE_VERSION};
 use prism_types::error::{PrismError, Result};
 use prism_types::Query;
@@ -216,11 +216,69 @@ fn cold_from_env() -> Result<Option<Arc<prism_engine::storage::CachedObjectStore
 }
 
 fn open(a: &Args) -> Result<Engine> {
-    let engine = Engine::open(&path_of(a)?)?;
+    let mut engine = Engine::open(&path_of(a)?)?;
+    if let Some(plane) = model_plane_from_env(engine.store.config.dim)? {
+        engine = engine.with_plane(plane);
+    }
     Ok(match cold_from_env()? {
         Some(cold) => engine.with_cold(cold),
         None => engine,
     })
+}
+
+/// Resolve the separately supervised production model service, or retain the
+/// deterministic development embedder when neither variable is set. Partial
+/// configuration is refused: silently falling back after an operator intended
+/// to use the production model would create the wrong embedding space.
+fn model_plane_from_env(dim: usize) -> Result<Option<Arc<dyn prism_engine::ModelPlane>>> {
+    let registry_path = std::env::var("PRISM_MODEL_REGISTRY").ok();
+    let socket_path = std::env::var("PRISM_MODEL_SOCKET").ok();
+    match (registry_path, socket_path) {
+        (None, None) => Ok(None),
+        (Some(_), None) | (None, Some(_)) => Err(PrismError::Invalid(
+            "PRISM_MODEL_REGISTRY and PRISM_MODEL_SOCKET must be configured together".into(),
+        )),
+        (Some(registry_path), Some(socket_path)) => {
+            #[cfg(not(unix))]
+            {
+                let _ = (dim, registry_path, socket_path);
+                Err(PrismError::Invalid(
+                    "the production model-plane sidecar currently requires a Unix socket".into(),
+                ))
+            }
+            #[cfg(unix)]
+            {
+                let timeout_ms = std::env::var("PRISM_MODEL_TIMEOUT_MS")
+                    .ok()
+                    .map(|value| {
+                        value.parse::<u64>().map_err(|_| {
+                            PrismError::Invalid("PRISM_MODEL_TIMEOUT_MS must be an integer".into())
+                        })
+                    })
+                    .transpose()?
+                    .unwrap_or(5_000);
+                if !(10..=60_000).contains(&timeout_ms) {
+                    return Err(PrismError::Invalid(
+                        "PRISM_MODEL_TIMEOUT_MS must be between 10 and 60000".into(),
+                    ));
+                }
+                let registry =
+                    prism_engine::ModelRegistry::load(std::path::Path::new(&registry_path))?;
+                let transport = Arc::new(prism_engine::UnixInferenceTransport::new(
+                    socket_path,
+                    std::time::Duration::from_millis(timeout_ms),
+                ));
+                let plane = Arc::new(prism_engine::ProductionModelPlane::new(
+                    registry, transport,
+                )?);
+                // Dimension mismatch and an unavailable, stale, or wrong model
+                // are startup failures, before any store mutation.
+                plane.default_embedder(dim)?;
+                plane.warmup()?;
+                Ok(Some(plane))
+            }
+        }
+    }
 }
 
 fn cmd_init(a: &Args) -> Result<()> {
@@ -278,6 +336,9 @@ fn cmd_init(a: &Args) -> Result<()> {
             .unwrap_or_default(),
     };
     let root = path_of(a)?;
+    // Probe model configuration before creating the store, just as the S3
+    // posture is validated above.
+    let _plane = model_plane_from_env(config.dim)?;
     Engine::init(&root, config.clone())?;
     emit(&serde_json::json!({
         "initialized": root.display().to_string(),

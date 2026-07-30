@@ -366,7 +366,12 @@ impl Engine {
         let mut ctxs: BTreeMap<String, SpaceContext> = BTreeMap::new();
         for gid in &gen_ids {
             let g = self.catalog().get_generation(gid)?;
-            let embedder = self.plane.embedder(&g.model_id, &g.model_version, dim)?;
+            let embedder = self.plane.embedder(
+                &g.model_id,
+                &g.model_version,
+                dim,
+                g.model_artifacts.as_ref(),
+            )?;
             let qv = embedder.embed(&q.text)?;
             let adc = g.pq.adc_table(&qv)?;
             let scored = g.coarse.rank(&qv);
@@ -1501,7 +1506,12 @@ impl Engine {
                 continue;
             }
             let g = self.catalog().get_generation(&r.manifest.generation_id)?;
-            let embedder = self.plane.embedder(&g.model_id, &g.model_version, dim)?;
+            let embedder = self.plane.embedder(
+                &g.model_id,
+                &g.model_version,
+                dim,
+                g.model_artifacts.as_ref(),
+            )?;
             let qv = embedder.embed(&q.text)?;
 
             let rows = r.read_all()?;

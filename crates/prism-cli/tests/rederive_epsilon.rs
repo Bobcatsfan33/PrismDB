@@ -72,7 +72,7 @@ fn rederive_threshold_epsilon_on_real_v1() {
 
     // The queries are the REAL corpus queries (a realistic query distribution), embedded via the
     // committed vectors. For each, the quantization error against every row is |adc − true l2²|.
-    let embedder = plane.default_embedder(768);
+    let embedder = plane.default_embedder(768).unwrap();
     let mut errors: Vec<f32> = Vec::new();
     for q in &corpus.queries {
         let qv = embedder.embed(&q.text).unwrap();

@@ -41,4 +41,9 @@ pub use engine::Engine;
 pub use ingest::IngestReport;
 pub use ingestor::{IngestReport2, Ingestor};
 pub use merge::{MergeReport, ReembedReport};
-pub use model::{HashModelPlane, ModelPlane};
+#[cfg(unix)]
+pub use model::UnixInferenceTransport;
+pub use model::{
+    HashModelPlane, InferenceItem, InferenceRequest, InferenceResponse, InferenceTransport,
+    ModelPlane, ModelRegistry, ProductionModelPlane, RegisteredModel,
+};

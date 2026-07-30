@@ -926,7 +926,12 @@ pub fn sweep_fp16(
         PrismError::Invalid("no active generation to measure fp16 against".into())
     })?;
     let g = engine.catalog().get_generation(&gid)?;
-    let embedder = engine.plane.embedder(&g.model_id, &g.model_version, dim)?;
+    let embedder = engine.plane.embedder(
+        &g.model_id,
+        &g.model_version,
+        dim,
+        g.model_artifacts.as_ref(),
+    )?;
 
     // Every stored (event_id, exact vector), read once. The fp16 comparison is the exact oracle
     // with fp16 vectors: brute-force, faithful, no approximation of the approximation.
