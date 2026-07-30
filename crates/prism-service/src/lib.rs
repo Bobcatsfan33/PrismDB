@@ -114,7 +114,7 @@ impl ClientPolicy {
         }
         if self.tenants.iter().any(|tenant| !valid_name(tenant, 128)) {
             return Err(invalid(format!(
-                "identity `{}` has an invalid tenant; wildcards and unsafe names are refused",
+                "identity `{}` has an invalid tenant; wildcards and untrusted names are refused",
                 self.identity_id
             )));
         }
