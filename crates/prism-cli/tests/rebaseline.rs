@@ -136,7 +136,9 @@ fn rebaseline_real_v1_at_honest_constants() {
         .unwrap()
         .with_plane(corpus.plane());
     let t0 = Instant::now();
-    engine.ingest(corpus.events.clone(), 1_760_000_000_000).unwrap();
+    engine
+        .ingest(corpus.events.clone(), 1_760_000_000_000)
+        .unwrap();
     let ingest_rows_per_sec = corpus.events.len() as f64 / t0.elapsed().as_secs_f64();
     let golden = real_golden(&engine, &corpus);
 
@@ -165,20 +167,37 @@ fn rebaseline_real_v1_at_honest_constants() {
         let (lat, scan_rps) = measure(&engine, &golden, DEFAULT_NPROBE);
         kernel::clear_isa_ceiling();
         let (p50, p95, p99) = (pct(&lat, 0.50), pct(&lat, 0.95), pct(&lat, 0.99));
-        eprintln!("{:<10}   {p50:>6.3}   {p95:>6.3}   {p99:>6.3}   {scan_rps:>11.0}", isa.name());
+        eprintln!(
+            "{:<10}   {p50:>6.3}   {p95:>6.3}   {p99:>6.3}   {scan_rps:>11.0}",
+            isa.name()
+        );
         per_isa.push(serde_json::json!({"isa":isa.name(),"p50_ms":p50,"p95_ms":p95,"p99_ms":p99,"scan_rows_per_sec":scan_rps}));
     }
     // Worst-ISA headline (slowest p50).
     let worst = per_isa
         .iter()
-        .max_by(|a, b| a["p50_ms"].as_f64().unwrap().total_cmp(&b["p50_ms"].as_f64().unwrap()))
+        .max_by(|a, b| {
+            a["p50_ms"]
+                .as_f64()
+                .unwrap()
+                .total_cmp(&b["p50_ms"].as_f64().unwrap())
+        })
         .unwrap()
         .clone();
 
     // --- recall: honest nprobe=11 vs the naive nprobe=6 a reader would pick, on the SAME corpus ---
-    let honest = oracle::measure_recall(&engine, &golden, DEFAULT_NPROBE, DEFAULT_CANDIDATES, DEFAULT_RERANK).unwrap();
-    let naive = oracle::measure_recall(&engine, &golden, 6, DEFAULT_CANDIDATES, DEFAULT_RERANK).unwrap();
-    let naive1 = oracle::measure_recall(&engine, &golden, 1, DEFAULT_CANDIDATES, DEFAULT_RERANK).unwrap();
+    let honest = oracle::measure_recall(
+        &engine,
+        &golden,
+        DEFAULT_NPROBE,
+        DEFAULT_CANDIDATES,
+        DEFAULT_RERANK,
+    )
+    .unwrap();
+    let naive =
+        oracle::measure_recall(&engine, &golden, 6, DEFAULT_CANDIDATES, DEFAULT_RERANK).unwrap();
+    let naive1 =
+        oracle::measure_recall(&engine, &golden, 1, DEFAULT_CANDIDATES, DEFAULT_RERANK).unwrap();
     eprintln!(
         "\nRECALL honest nprobe={DEFAULT_NPROBE}: p1={:.3} mean={:.3} scan={:.4} | naive nprobe=6: p1={:.3} (below 0.8 floor) | nprobe=1: {} boundary zeros",
         honest.p1_recall, honest.mean_recall, honest.mean_scan_fraction, naive.p1_recall,
@@ -192,8 +211,12 @@ fn rebaseline_real_v1_at_honest_constants() {
     kernel::clear_isa_ceiling();
     // Block term: a second store at the old 2 KiB block, same honest nprobe.
     let root2 = tmp();
-    let engine2 = Engine::init(&root2, config(2 * 1024)).unwrap().with_plane(corpus.plane());
-    engine2.ingest(corpus.events.clone(), 1_760_000_000_000).unwrap();
+    let engine2 = Engine::init(&root2, config(2 * 1024))
+        .unwrap()
+        .with_plane(corpus.plane());
+    engine2
+        .ingest(corpus.events.clone(), 1_760_000_000_000)
+        .unwrap();
     let golden2 = real_golden(&engine2, &corpus);
     kernel::set_isa_ceiling(kernel::available()[0]);
     let block2k_p50 = pct(&measure(&engine2, &golden2, DEFAULT_NPROBE).0, 0.50);
@@ -204,7 +227,11 @@ fn rebaseline_real_v1_at_honest_constants() {
     );
 
     // --- composed broad-τ threshold cost (issue #8): does broad-τ threshold beat topic top-k? ---
-    let topic0 = golden.expectations.iter().find(|e| e.query.kind == oracle::KIND_TOPIC).unwrap();
+    let topic0 = golden
+        .expectations
+        .iter()
+        .find(|e| e.query.kind == oracle::KIND_TOPIC)
+        .unwrap();
     let mk = |threshold: Option<f32>, tau: f32| {
         let mut q = topic0.query.to_query();
         q.nprobe = DEFAULT_NPROBE;
@@ -215,7 +242,9 @@ fn rebaseline_real_v1_at_honest_constants() {
         q
     };
     let cost = |q: &Query| -> (f64, usize, usize) {
-        for _ in 0..2 { engine.search(q).unwrap(); }
+        for _ in 0..2 {
+            engine.search(q).unwrap();
+        }
         let mut best = f64::MAX;
         let (mut hits, mut bytes) = (0, 0);
         for _ in 0..5 {
@@ -227,7 +256,14 @@ fn rebaseline_real_v1_at_honest_constants() {
         }
         (best, hits, bytes)
     };
-    let (topic_ms, topic_hits, topic_bytes) = cost(&{ let mut q = topic0.query.to_query(); q.nprobe = DEFAULT_NPROBE; q.candidates = DEFAULT_CANDIDATES; q.rerank = DEFAULT_RERANK; q.k = K; q });
+    let (topic_ms, topic_hits, topic_bytes) = cost(&{
+        let mut q = topic0.query.to_query();
+        q.nprobe = DEFAULT_NPROBE;
+        q.candidates = DEFAULT_CANDIDATES;
+        q.rerank = DEFAULT_RERANK;
+        q.k = K;
+        q
+    });
     let (broad_ms, broad_hits, broad_bytes) = cost(&mk(Some(0.2), 0.2));
     let (narrow_ms, narrow_hits, narrow_bytes) = cost(&mk(Some(0.6), 0.6));
     eprintln!(
@@ -245,13 +281,23 @@ fn rebaseline_real_v1_at_honest_constants() {
         "delta_decomposition":{"honest_p50_ms":honest_p50,"nprobe6_p50_ms":nprobe6_p50,"nprobe_term_ms":honest_p50-nprobe6_p50,"block2k_p50_ms":block2k_p50,"block_term_ms":honest_p50-block2k_p50,"note":"768d term is inherent to the corpus (12x wider exact-vector column); it is the dominant term for any byte-touching metric and cannot be isolated without a 64d real corpus."},
         "composed_cost_issue8":{"topic":{"ms":topic_ms,"hits":topic_hits,"bytes":topic_bytes},"broad_tau_0_2":{"ms":broad_ms,"hits":broad_hits,"bytes":broad_bytes},"narrow_tau_0_6":{"ms":narrow_ms,"hits":narrow_hits,"bytes":narrow_bytes},"broad_tau_is_most_expensive":broad_most_expensive},
     });
-    std::fs::write("../../testing/evidence/rebaseline-real-v1.json", serde_json::to_string_pretty(&receipt).unwrap()).unwrap();
+    std::fs::write(
+        "../../testing/evidence/rebaseline-real-v1.json",
+        serde_json::to_string_pretty(&receipt).unwrap(),
+    )
+    .unwrap();
     eprintln!("\nwrote testing/evidence/rebaseline-real-v1.json");
     eprintln!("==================================================================\n");
 
     // Sanity gates: honest holds the floor, naive does not (the correctness half of the headline).
-    assert!(honest.p1_recall >= 0.8, "honest nprobe must hold the tail floor");
-    assert!(naive.p1_recall < 0.8, "the naive nprobe=6 must visibly fail the floor on this geometry — that is the point");
+    assert!(
+        honest.p1_recall >= 0.8,
+        "honest nprobe must hold the tail floor"
+    );
+    assert!(
+        naive.p1_recall < 0.8,
+        "the naive nprobe=6 must visibly fail the floor on this geometry — that is the point"
+    );
     let _ = std::fs::remove_dir_all(&root);
     let _ = std::fs::remove_dir_all(&root2);
 }

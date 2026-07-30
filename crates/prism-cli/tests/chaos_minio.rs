@@ -49,6 +49,9 @@ fn base_cfg() -> Option<S3Config> {
             access_key: std::env::var("AWS_ACCESS_KEY_ID").unwrap_or_else(|_| "minioadmin".into()),
             secret_key: std::env::var("AWS_SECRET_ACCESS_KEY")
                 .unwrap_or_else(|_| "minioadmin".into()),
+            session_token: std::env::var("AWS_SESSION_TOKEN")
+                .ok()
+                .filter(|value| !value.trim().is_empty()),
         },
         fixed_amz_date: None,
     })
@@ -119,6 +122,7 @@ impl Shard {
             .env("PRISM_S3_BUCKET", &self.cfg.bucket)
             .env("AWS_ACCESS_KEY_ID", &self.cfg.credentials.access_key)
             .env("AWS_SECRET_ACCESS_KEY", &self.cfg.credentials.secret_key)
+            .env("PRISM_ALLOW_INSECURE_S3", "true")
             .env_remove("PRISM_FAULT");
         if let Some(f) = fault {
             cmd.env("PRISM_FAULT", f);
@@ -165,6 +169,7 @@ impl Shard {
         .env("PRISM_S3_BUCKET", &self.cfg.bucket)
         .env("AWS_ACCESS_KEY_ID", &self.cfg.credentials.access_key)
         .env("AWS_SECRET_ACCESS_KEY", &self.cfg.credentials.secret_key)
+        .env("PRISM_ALLOW_INSECURE_S3", "true")
         .env_remove("PRISM_FAULT")
         .env_remove("PRISM_FAULT_ENOSPC");
         if let Some(p) = enospc {

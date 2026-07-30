@@ -43,7 +43,9 @@ fn measured_768d_cost_worksheet() {
     let engine = Engine::init(&root, config())
         .unwrap()
         .with_plane(corpus.plane());
-    engine.ingest(corpus.events.clone(), 1_760_000_000_000).unwrap();
+    engine
+        .ingest(corpus.events.clone(), 1_760_000_000_000)
+        .unwrap();
     let snap = engine.snapshot().unwrap();
     let readers = engine.open_parts(&snap).unwrap();
 
@@ -72,7 +74,9 @@ fn measured_768d_cost_worksheet() {
     // Scale a per-row byte figure to GB per N events.
     let gb = |bytes_per_row: f64, n: f64| bytes_per_row * n / 1e9;
 
-    eprintln!("\n===== MEASURED 768d COST WORKSHEET (real-v1, pq_m=96, restarts=8, block 16KiB) =====");
+    eprintln!(
+        "\n===== MEASURED 768d COST WORKSHEET (real-v1, pq_m=96, restarts=8, block 16KiB) ====="
+    );
     eprintln!("rows={rows}");
     eprintln!("column bytes/row:");
     for (k, v) in &by_col {
@@ -83,7 +87,10 @@ fn measured_768d_cost_worksheet() {
     );
     eprintln!(
         "per BILLION events: hot={:.0}GB cold={:.0}GB other={:.0}GB total={:.0}GB",
-        gb(pq, 1e9), gb(vec, 1e9), gb(other, 1e9), gb(total, 1e9)
+        gb(pq, 1e9),
+        gb(vec, 1e9),
+        gb(other, 1e9),
+        gb(total, 1e9)
     );
 
     // The projection this is testing (from cost-worksheet.json projected_at_768d, at pq_m=8):
@@ -114,12 +121,22 @@ fn measured_768d_cost_worksheet() {
         },
         "note": "The cold tier (exact vectors) dominates at ~3 KB/vec — ~3 TB per billion events — and is why PrismDB tiers it cold and scans the hot PQ codes at bandwidth. This is the number the README quotes, now MEASURED at 768d, not projected."
     });
-    std::fs::write("../../testing/evidence/cost-worksheet-real-v1.json", serde_json::to_string_pretty(&receipt).unwrap()).unwrap();
+    std::fs::write(
+        "../../testing/evidence/cost-worksheet-real-v1.json",
+        serde_json::to_string_pretty(&receipt).unwrap(),
+    )
+    .unwrap();
     eprintln!("wrote testing/evidence/cost-worksheet-real-v1.json");
     eprintln!("==================================================================\n");
 
     // Sanity: the cold tier is the exact float32 vectors (dim*4), and it dominates.
-    assert!((vec - 3072.0).abs() < 1.0, "cold tier must be dim*4 = 3072 B/vec, measured {vec}");
-    assert!(vec > pq, "the cold exact-vector tier must dominate the hot PQ tier");
+    assert!(
+        (vec - 3072.0).abs() < 1.0,
+        "cold tier must be dim*4 = 3072 B/vec, measured {vec}"
+    );
+    assert!(
+        vec > pq,
+        "the cold exact-vector tier must dominate the hot PQ tier"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }

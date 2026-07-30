@@ -8,12 +8,13 @@
 
 use prism_types::hash::{hex, hmac_sha256, sha256};
 
-/// AWS credentials for signing. No session token in this sprint (one backend, one region — scope
-/// guard §8); the field is where it lands when temporary credentials arrive.
+/// AWS credentials for signing, including the optional token carried by temporary STS or workload
+/// identity credentials.
 #[derive(Clone)]
 pub struct Credentials {
     pub access_key: String,
     pub secret_key: String,
+    pub session_token: Option<String>,
 }
 
 /// One header to sign: `(lowercase-name, value)`.
@@ -127,6 +128,7 @@ mod tests {
         let creds = Credentials {
             access_key: "AKIDEXAMPLE".into(),
             secret_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".into(),
+            session_token: None,
         };
         let headers = vec![
             ("host".to_string(), "example.amazonaws.com".to_string()),

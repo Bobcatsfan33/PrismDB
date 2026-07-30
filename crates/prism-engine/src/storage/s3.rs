@@ -1,8 +1,9 @@
 //! A minimal hand-rolled S3 client (S11) — [D-065](../../../../docs/DECISIONS.md).
 //!
-//! HTTP/1.1 over a raw `TcpStream`, SigV4-signed with [`super::sigv4`], the `GET`-Range / `PUT` /
-//! conditional-`PUT` / `HEAD` / `DELETE` / list subset the engine needs. **Plain HTTP** — CI's
-//! MinIO speaks it, and TLS-over-WAN is the one deferred dependency ([D-065](../../../../docs/DECISIONS.md)).
+//! HTTP/1.1 over a bounded `TcpStream`, SigV4-signed with [`super::sigv4`], the `GET`-Range / `PUT` /
+//! conditional-`PUT` / `HEAD` / `DELETE` / list subset the engine needs. Production sockets are
+//! wrapped in platform-native, certificate-validating TLS 1.2+; plain HTTP is loopback-only for
+//! local MinIO tests ([D-065](../../../../docs/DECISIONS.md)).
 //!
 //! The wire-format-independent pieces — request construction, response parsing, list-XML scanning —
 //! are pure functions, unit-tested locally against real HTTP bytes. The socket I/O and the S3
@@ -12,14 +13,23 @@
 use super::object::{MultipartUpload, ObjectMeta, ObjectStore};
 use super::sigv4::{self, Credentials};
 use super::MULTIPART_THRESHOLD_BYTES;
+use native_tls::{Protocol, TlsConnector};
 use prism_types::error::{PrismError, Result};
 use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::net::{IpAddr, TcpStream, ToSocketAddrs};
+use std::str::FromStr;
+use std::time::Duration;
+
+/// Default bound for establishing an S3 socket.
+pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+/// Default bound for each S3 socket read or write.
+pub const DEFAULT_IO_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Where the store lives and who it is. One backend, one region (scope guard §8).
 #[derive(Clone)]
 pub struct S3Config {
-    /// `host:port` of the endpoint (e.g. `127.0.0.1:9000` for CI MinIO).
+    /// `host:port` of the endpoint (e.g. `s3.us-east-1.amazonaws.com:443` in production or
+    /// `127.0.0.1:9000` for CI MinIO).
     pub endpoint: String,
     pub region: String,
     pub bucket: String,
@@ -327,6 +337,12 @@ pub fn build_request(
         ("x-amz-content-sha256".to_string(), payload_sha.clone()),
         ("x-amz-date".to_string(), amz_date.to_string()),
     ];
+    if let Some(session_token) = &cfg.credentials.session_token {
+        headers.push((
+            "x-amz-security-token".to_string(),
+            session_token.to_string(),
+        ));
+    }
     for (n, v) in extra_headers {
         headers.push((n.to_ascii_lowercase(), v.clone()));
     }
@@ -361,7 +377,7 @@ pub fn build_request(
 /// Read one HTTP response from a stream, length-delimited. Reads headers, then the body by
 /// `Content-Length` / `Transfer-Encoding: chunked` / to-EOF — correct on a kept-alive connection,
 /// where `read_to_end` would block. A HEAD response (`is_head`) carries `Content-Length` but no body.
-fn read_http(stream: &mut TcpStream, is_head: bool) -> Result<HttpResponse> {
+fn read_http(stream: &mut impl Read, is_head: bool) -> Result<HttpResponse> {
     let mut buf: Vec<u8> = Vec::new();
     let mut tmp = [0u8; 8192];
     // 1) headers.
@@ -454,11 +470,78 @@ fn read_http(stream: &mut TcpStream, is_head: bool) -> Result<HttpResponse> {
 /// A real S3 object store over the hand-rolled client.
 pub struct S3ObjectStore {
     cfg: S3Config,
+    connect_timeout: Duration,
+    io_timeout: Duration,
+    tls: Option<TlsConnector>,
 }
 
 impl S3ObjectStore {
+    /// Construct the plaintext client for an explicitly local/test deployment.
+    ///
+    /// This transport does not protect object contents, metadata, or SigV4 headers from passive
+    /// observation. Production callers must use [`S3ObjectStore::new_production`].
     pub fn new(cfg: S3Config) -> Self {
-        S3ObjectStore { cfg }
+        S3ObjectStore {
+            cfg,
+            connect_timeout: DEFAULT_CONNECT_TIMEOUT,
+            io_timeout: DEFAULT_IO_TIMEOUT,
+            tls: None,
+        }
+    }
+
+    /// Override bounded socket deadlines.
+    ///
+    /// Zero is refused because it has platform-dependent semantics and can accidentally restore an
+    /// unbounded operation. Each read and write receives the I/O deadline independently.
+    pub fn with_timeouts(
+        mut self,
+        connect_timeout: Duration,
+        io_timeout: Duration,
+    ) -> Result<Self> {
+        if connect_timeout.is_zero() || io_timeout.is_zero() {
+            return Err(PrismError::Invalid(
+                "S3 connect and I/O timeouts must both be greater than zero".into(),
+            ));
+        }
+        self.connect_timeout = connect_timeout;
+        self.io_timeout = io_timeout;
+        Ok(self)
+    }
+
+    /// Construct the plaintext client only when its endpoint is loopback.
+    ///
+    /// This is the constructor for the CLI's explicit local-MinIO override. A private-network or
+    /// public hostname is still remote and is refused; the override cannot become a general-purpose
+    /// plaintext production mode.
+    pub fn new_local(cfg: S3Config) -> Result<Self> {
+        if !is_loopback_endpoint(&cfg.endpoint) {
+            return Err(PrismError::Invalid(format!(
+                "PRISM_ALLOW_INSECURE_S3 is loopback-only, but endpoint `{}` is remote. \
+                 Plaintext S3 may be used only with localhost, 127.0.0.0/8, or ::1; production \
+                 remotes require the D-065 TLS transport",
+                cfg.endpoint
+            )));
+        }
+        Ok(Self::new(cfg))
+    }
+
+    /// Construct a production S3 client with certificate-validating TLS 1.2 or newer.
+    ///
+    /// The connector uses the platform trust store, verifies the endpoint hostname, and never
+    /// falls back to plaintext after a handshake or certificate failure.
+    pub fn new_production(cfg: S3Config) -> Result<Self> {
+        endpoint_host(&cfg.endpoint)?;
+        let mut builder = TlsConnector::builder();
+        builder.min_protocol_version(Some(Protocol::Tlsv12));
+        let tls = builder.build().map_err(|error| {
+            PrismError::Invalid(format!("could not initialize production TLS: {error}"))
+        })?;
+        Ok(S3ObjectStore {
+            cfg,
+            connect_timeout: DEFAULT_CONNECT_TIMEOUT,
+            io_timeout: DEFAULT_IO_TIMEOUT,
+            tls: Some(tls),
+        })
     }
 
     fn dates(&self) -> (String, String) {
@@ -475,6 +558,58 @@ impl S3ObjectStore {
             self.cfg.bucket,
             sigv4::uri_encode(key, true).trim_start_matches('/')
         )
+    }
+
+    fn connect(&self) -> Result<TcpStream> {
+        let addresses = self
+            .cfg
+            .endpoint
+            .to_socket_addrs()
+            .map_err(|error| {
+                PrismError::Io(format!(
+                    "remote unavailable: resolve {}: {error}",
+                    self.cfg.endpoint
+                ))
+            })?
+            .collect::<Vec<_>>();
+        if addresses.is_empty() {
+            return Err(PrismError::Io(format!(
+                "remote unavailable: endpoint {} resolved to no addresses",
+                self.cfg.endpoint
+            )));
+        }
+
+        let mut last_error = None;
+        for address in addresses {
+            match TcpStream::connect_timeout(&address, self.connect_timeout) {
+                Ok(stream) => {
+                    stream
+                        .set_read_timeout(Some(self.io_timeout))
+                        .map_err(|error| {
+                            PrismError::Io(format!(
+                                "remote unavailable: configure read timeout: {error}"
+                            ))
+                        })?;
+                    stream
+                        .set_write_timeout(Some(self.io_timeout))
+                        .map_err(|error| {
+                            PrismError::Io(format!(
+                                "remote unavailable: configure write timeout: {error}"
+                            ))
+                        })?;
+                    return Ok(stream);
+                }
+                Err(error) => last_error = Some(error),
+            }
+        }
+        Err(PrismError::Io(format!(
+            "remote unavailable: connect {} within {:?}: {}",
+            self.cfg.endpoint,
+            self.connect_timeout,
+            last_error
+                .map(|error| error.to_string())
+                .unwrap_or_else(|| "no address attempted".into())
+        )))
     }
 
     /// Send a signed request over a fresh connection and parse the response.
@@ -495,19 +630,20 @@ impl S3ObjectStore {
             &amz,
             &stamp,
         );
-        let mut stream = TcpStream::connect(&self.cfg.endpoint).map_err(|e| {
-            PrismError::Io(format!(
-                "remote unavailable: connect {}: {e}",
-                self.cfg.endpoint
-            ))
-        })?;
-        stream
-            .write_all(&bytes)
-            .map_err(|e| PrismError::Io(format!("remote unavailable: write: {e}")))?;
-        // Read length-delimited (not read_to_end, which hangs on a kept-alive connection). A HEAD
-        // response carries Content-Length but NO body by the HTTP spec, so it must not be treated as
-        // a truncation.
-        let parsed = read_http(&mut stream, method == "HEAD")?;
+        let stream = self.connect()?;
+        let parsed = if let Some(connector) = &self.tls {
+            let hostname = endpoint_host(&self.cfg.endpoint)?;
+            let mut stream = connector.connect(&hostname, stream).map_err(|error| {
+                PrismError::Io(format!(
+                    "remote unavailable: TLS handshake or certificate validation for \
+                     {hostname} failed: {error}"
+                ))
+            })?;
+            Self::exchange(&mut stream, &bytes, method == "HEAD")?
+        } else {
+            let mut stream = stream;
+            Self::exchange(&mut stream, &bytes, method == "HEAD")?
+        };
         // Clock skew: S3 answers a badly-skewed request with 403 RequestTimeTooSkewed. Name it so a
         // caller resyncs and retries within bounds rather than treating it as an auth failure.
         if parsed.status == 403
@@ -520,6 +656,20 @@ impl S3ObjectStore {
             ));
         }
         Ok(parsed)
+    }
+
+    fn exchange(
+        stream: &mut (impl Read + Write),
+        request: &[u8],
+        is_head: bool,
+    ) -> Result<HttpResponse> {
+        stream
+            .write_all(request)
+            .map_err(|e| PrismError::Io(format!("remote unavailable: write: {e}")))?;
+        // Read length-delimited (not read_to_end, which hangs on a kept-alive connection). A HEAD
+        // response carries Content-Length but NO body by the HTTP spec, so it must not be treated as
+        // a truncation.
+        read_http(stream, is_head)
     }
 
     // --- multipart upload (initiate / part / complete / abort) — plain SigV4, one part per chunk.
@@ -635,6 +785,44 @@ impl S3ObjectStore {
         }
         self.complete_multipart(key, &upload_id, &parts)
     }
+}
+
+fn is_loopback_endpoint(endpoint: &str) -> bool {
+    let Some((host, port)) = endpoint.rsplit_once(':') else {
+        return false;
+    };
+    if port.parse::<u16>().is_err() {
+        return false;
+    }
+    let host = host
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(host);
+    host.eq_ignore_ascii_case("localhost")
+        || IpAddr::from_str(host)
+            .map(|address| address.is_loopback())
+            .unwrap_or(false)
+}
+
+fn endpoint_host(endpoint: &str) -> Result<String> {
+    let (host, port) = endpoint.rsplit_once(':').ok_or_else(|| {
+        PrismError::Invalid(format!(
+            "S3 endpoint `{endpoint}` must be host:port (production TLS normally uses port 443)"
+        ))
+    })?;
+    if port.parse::<u16>().is_err() {
+        return Err(PrismError::Invalid(format!(
+            "S3 endpoint `{endpoint}` has an invalid port"
+        )));
+    }
+    let host = host
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(host);
+    if host.is_empty() {
+        return Err(PrismError::Invalid("S3 endpoint hostname is empty".into()));
+    }
+    Ok(host.to_string())
 }
 
 impl ObjectStore for S3ObjectStore {
@@ -831,9 +1019,107 @@ mod tests {
             credentials: Credentials {
                 access_key: "AKIDEXAMPLE".into(),
                 secret_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".into(),
+                session_token: None,
             },
             fixed_amz_date: Some("20150830T123600Z".into()),
         }
+    }
+
+    #[test]
+    fn production_transport_constructs_only_with_tls() {
+        let mut config = cfg();
+        config.endpoint = "s3.us-east-1.amazonaws.com:443".into();
+        let store = S3ObjectStore::new_production(config).unwrap();
+        assert!(store.tls.is_some());
+
+        let mut malformed = cfg();
+        malformed.endpoint = "s3.amazonaws.com".into();
+        let error = match S3ObjectStore::new_production(malformed) {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("production accepted an endpoint without an explicit port"),
+        };
+        assert!(error.contains("host:port"), "{error}");
+    }
+
+    #[test]
+    fn production_tls_never_falls_back_to_plaintext() {
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("localhost:{}", listener.local_addr().unwrap().port());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
+        });
+
+        let mut config = cfg();
+        config.endpoint = endpoint;
+        let store = S3ObjectStore::new_production(config).unwrap();
+        let error = store.head("must-use-tls").unwrap_err().to_string();
+        server.join().unwrap();
+
+        assert!(
+            error.contains("TLS handshake or certificate validation"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn plaintext_local_constructor_refuses_remote_endpoints() {
+        let mut local = cfg();
+        local.endpoint = "127.0.0.1:9000".into();
+        assert!(S3ObjectStore::new_local(local).is_ok());
+
+        let mut remote = cfg();
+        remote.endpoint = "minio.corp.example:9000".into();
+        let error = match S3ObjectStore::new_local(remote) {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("a remote endpoint bypassed the loopback-only override"),
+        };
+        assert!(error.contains("loopback-only"), "{error}");
+        assert!(error.contains("production remotes require"), "{error}");
+    }
+
+    #[test]
+    fn socket_reads_are_bounded_when_the_remote_never_responds() {
+        use std::net::TcpListener;
+        use std::time::Instant;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = listener.local_addr().unwrap().to_string();
+        let server = std::thread::spawn(move || {
+            let (_stream, _) = listener.accept().unwrap();
+            std::thread::sleep(Duration::from_millis(150));
+        });
+
+        let mut config = cfg();
+        config.endpoint = endpoint;
+        let store = S3ObjectStore::new_local(config)
+            .unwrap()
+            .with_timeouts(Duration::from_millis(50), Duration::from_millis(30))
+            .unwrap();
+        let started = Instant::now();
+        let error = store.head("never-responds").unwrap_err().to_string();
+        let elapsed = started.elapsed();
+        server.join().unwrap();
+
+        assert!(error.contains("remote unavailable: read"), "{error}");
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "read exceeded its deadline: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn zero_socket_timeouts_are_refused() {
+        let error =
+            match S3ObjectStore::new(cfg()).with_timeouts(Duration::ZERO, Duration::from_secs(1)) {
+                Err(error) => error.to_string(),
+                Ok(_) => panic!("zero timeout was accepted"),
+            };
+        assert!(error.contains("greater than zero"), "{error}");
     }
 
     #[test]
@@ -915,6 +1201,32 @@ mod tests {
         assert!(s.contains("x-amz-date: 20150830T123600Z\r\n"));
         assert!(s.contains("authorization: AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/s3/aws4_request"));
         assert!(s.contains("connection: close\r\n\r\n"));
+    }
+
+    #[test]
+    fn temporary_credentials_sign_and_send_the_security_token() {
+        let mut config = cfg();
+        config.credentials.session_token = Some("temporary-session-token".into());
+        let bytes = build_request(
+            &config,
+            "GET",
+            "/prism/parts/p/rerank.vec",
+            &[],
+            b"",
+            "20150830T123600Z",
+            "20150830",
+        );
+        let request = String::from_utf8(bytes).unwrap();
+        assert!(
+            request.contains("x-amz-security-token: temporary-session-token\r\n"),
+            "{request}"
+        );
+        assert!(
+            request.contains(
+                "SignedHeaders=host;x-amz-content-sha256;x-amz-date;x-amz-security-token"
+            ),
+            "{request}"
+        );
     }
 
     #[test]
