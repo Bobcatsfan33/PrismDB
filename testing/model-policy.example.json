@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "default_action": "deny",
+  "tenants": [
+    {
+      "tenant_id": "replace-with-tenant-id",
+      "grants": [
+        {
+          "model_id": "replace-with-approved-model-id",
+          "model_version": "b5f4f9bcd7631a0cbb72e9a434602fd651edef027ac0dd595d36768ee01b7483",
+          "purposes": ["ingest", "query", "migration", "evaluation"]
+        }
+      ],
+      "max_inputs_per_minute": 10000,
+      "max_input_bytes_per_minute": 67108864
+    }
+  ]
+}

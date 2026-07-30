@@ -19,7 +19,9 @@ pub mod rng;
 pub mod vector;
 
 pub use attributes::{AttrValue, Attributes};
-pub use embed::{Embedder, HashEmbedder, ModelArtifacts, MAX_EMBED_INPUT_BYTES};
+pub use embed::{
+    Embedder, EmbeddingInput, EmbeddingPurpose, HashEmbedder, ModelArtifacts, MAX_EMBED_INPUT_BYTES,
+};
 pub use error::{PrismError, Result};
 pub use event::{DeadLetter, Event, MAX_BODY_BYTES};
 pub use limits::{Quota, RejectReason};

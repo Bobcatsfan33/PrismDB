@@ -42,6 +42,24 @@ autoscaling belongs to the long-running S14 API workload that will own these
 native sidecars; the current PrismDB executable is a CLI, and is not described
 as a server.
 
+### S13 increment 3 — tenant model authorization and auditable usage
+
+[`MODEL-GOVERNANCE.md`](MODEL-GOVERNANCE.md) is now executable policy:
+production configuration defaults to deny and requires exact
+tenant/model/version/purpose grants plus a protected durable usage ledger.
+Ingest authorization and local GPU input/byte reservation happen before the
+WAL ACK; denial is the stable `model_policy_denied` dead-letter reason and
+never reaches model execution or a part. Query, migration, and evaluation use
+the same scoped embedding API. The synchronized ledger records identity,
+purpose, bytes, and outcome, never text; audit failure fails inference closed.
+
+The rate window is deliberately a per-process GPU safety bound, not a
+fleet-wide billing system. Redaction also remains open: the implementation
+review found that mutable tenant rules outside `preprocessing_sha256` would
+silently change an embedding space and make crash replay policy-dependent.
+Redaction must therefore land as a content-addressed gateway-protocol feature,
+not a string replacement bolted onto the engine.
+
 ---
 
 ## S0 — complete

@@ -29,6 +29,17 @@ const MAX_REQUEST_BYTES: usize = 32 * 1024 * 1024;
 const MAX_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
 
 pub trait ModelPlane: Send + Sync {
+    /// Authorize and reserve usage before an ingest crosses its durable ACK
+    /// point. The default development plane has no external policy.
+    fn preflight(
+        &self,
+        _model_id: &str,
+        _model_version: &str,
+        inputs: &[prism_types::EmbeddingInput<'_>],
+    ) -> Vec<Result<()>> {
+        inputs.iter().map(|_| Ok(())).collect()
+    }
+
     /// Resolve the exact model a generation was written under.
     fn embedder(
         &self,

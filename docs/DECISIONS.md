@@ -985,3 +985,41 @@ verification, identity, and the Unix protocol.
   containerized gateway and explicit operations contract; the API workload,
   sidecar lifecycle, GPU load gate, signed image/SBOM/provenance, and HPA/PDB
   become the next deployment increment rather than a misleading YAML file.
+
+## D-086 — Model authorization is exact and pre-ACK; redaction must be part of the hashed space
+
+**S13 production-plane increment 3.** Production model access is default-deny
+on the exact tuple `(tenant, model id, artifact-derived version, purpose)`.
+The purposes are ingest, query, migration, and evaluation; none implies
+another. The scoped embedding call is now the one seam used below direct
+search, SQL, ingestion, generation work, and evidence tooling.
+
+- **Ingest denial precedes the promise.** Tenant authorization and the local
+  model input/byte reservation run after schema/idempotency admission but
+  before the WAL append+fsync ACK. A denial is durably visible as
+  `model_policy_denied`, but the event never enters the admission log, spends
+  GPU work, creates a generation, or reaches a part.
+- **The budget is honest about its scope.** It is a fixed one-minute,
+  per-process safety bound over `(tenant, model id, version)`. WAL replay does
+  not consume it a second time. It protects a local process/GPU; it is not
+  described as fleet-wide quota or billing because replicas do not share it
+  and restart resets it.
+- **Usage evidence contains no payload.** Every inference outcome and denial
+  records timestamp, tenant, purpose, exact model identity, input-byte count,
+  and outcome in a mode-0600 append-only JSONL file. The batch synchronizes
+  that file before vectors become usable. Text and vectors never enter it, and
+  inability to write/sync the ledger fails inference closed.
+- **Governance configuration is protected state.** The bounded policy denies
+  unknown fields and implicit allow, uses only full digest versions, and must
+  be a non-symlink regular file with no group/other permissions. Production
+  registry/socket configuration without the paired policy and audit path
+  fails before store creation. An explicitly named ungoverned override exists
+  for development only.
+- **Redaction was rejected in the first design review.** A tenant-specific
+  replacement rule changes model input bytes. If that mutable rule is outside
+  the artifact tuple, the same `model_version` names different vectors; if it
+  changes between WAL ACK and replay, the same event can be embedded
+  differently after a crash. Both violate invariant 9. Redaction therefore
+  moves to a gateway protocol whose complete profile is content-addressed
+  inside `preprocessing_sha256`; until that lands, PrismDB does not claim
+  in-repository redact-before-embedding.

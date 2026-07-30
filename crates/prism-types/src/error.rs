@@ -14,6 +14,8 @@ pub enum PrismError {
     Corrupt(String),
     /// Data rejected at the admission boundary (Part III §10).
     Invalid(String),
+    /// Tenant/model/purpose authorization or model-usage policy refused work.
+    Policy(String),
     /// The requested object is not in the catalog.
     NotFound(String),
     /// A JSON manifest / snapshot / generation record would not parse.
@@ -33,6 +35,7 @@ impl fmt::Display for PrismError {
             PrismError::Io(m) => write!(f, "io error: {m}"),
             PrismError::Corrupt(m) => write!(f, "corrupt data: {m}"),
             PrismError::Invalid(m) => write!(f, "invalid input: {m}"),
+            PrismError::Policy(m) => write!(f, "model policy denied: {m}"),
             PrismError::NotFound(m) => write!(f, "not found: {m}"),
             PrismError::Decode(m) => write!(f, "decode error: {m}"),
             PrismError::Invariant(m) => write!(f, "invariant violation: {m}"),

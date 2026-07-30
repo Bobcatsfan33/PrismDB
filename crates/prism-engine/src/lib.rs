@@ -19,6 +19,7 @@ pub mod ingest;
 pub mod ingestor;
 pub mod merge;
 pub mod model;
+pub mod model_policy;
 pub mod novelty;
 pub mod oracle;
 pub mod otlp;
@@ -47,3 +48,4 @@ pub use model::{
     HashModelPlane, InferenceItem, InferenceRequest, InferenceResponse, InferenceTransport,
     ModelPlane, ModelRegistry, ProductionModelPlane, RegisteredModel,
 };
+pub use model_policy::{GovernedModelPlane, ModelPolicy, ModelPolicyEnforcer};
