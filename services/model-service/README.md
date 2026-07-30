@@ -74,17 +74,22 @@ only by the colocated containers.
 
 ## Container
 
-The gateway image has no package dependencies and runs as UID/GID 65532.
-Developer builds may use the Dockerfile default. Release builds must supply an
-approved base image by immutable digest and record the resulting image digest
-in the deployment bill of materials:
+The gateway image has no package dependencies and runs as UID/GID 65532. The
+Dockerfile default is itself pinned to an approved multi-architecture base
+digest. Release builds pass the same digest explicitly and record both base and
+resulting image digests in the deployment bill of materials:
 
 ```bash
 docker build \
-  --build-arg PYTHON_IMAGE=python:3.12.11-slim-bookworm@sha256:<approved-digest> \
+  --build-arg PYTHON_IMAGE=python:3.12.13-slim-bookworm@sha256:<approved-digest> \
   -t registry.example/prism-model-service:<release> \
   services/model-service
 ```
+
+[`docs/RELEASE-ASSURANCE.md`](../../docs/RELEASE-ASSURANCE.md) defines the
+blocking vulnerability gate, SBOM, keyless signature, build provenance,
+promotion tag, and independent digest-verification procedure. Production
+deployments consume the verified digest, never the example tag.
 
 TEI is a separate, pinned container because it owns the GPU/CUDA crash
 lifecycle. Its model path, pooling, prompt, truncation, batch-token limits,
