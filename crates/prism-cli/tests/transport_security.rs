@@ -149,3 +149,38 @@ fn shard_server_refuses_an_ephemeral_production_port() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("port 0 is test-only"), "{stderr}");
 }
+
+#[test]
+fn remote_coordinator_has_no_plaintext_or_anonymous_mode() {
+    let topology = store_path("coordinator-topology");
+    std::fs::write(
+        &topology,
+        r#"{
+          "version": 1,
+          "shards": [{
+            "shard_id": 0,
+            "address": "127.0.0.1:7443",
+            "server_name": "shard.test"
+          }]
+        }"#,
+    )
+    .unwrap();
+    let output = Command::new(prism())
+        .args([
+            "coordinator-search",
+            "--topology",
+            topology.to_str().expect("UTF-8 path"),
+            "--query",
+            "payment service",
+        ])
+        .output()
+        .expect("run prism");
+
+    assert!(
+        !output.status.success(),
+        "remote coordinator booted without a client identity"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("missing required flag --cert"), "{stderr}");
+    std::fs::remove_file(topology).unwrap();
+}

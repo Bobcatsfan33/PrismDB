@@ -1,17 +1,21 @@
 # Coordinator-to-shard transport
 
-PrismDB's first real node boundary is a read-only shard RPC service. It carries
-the three operations the two-round distributed query already uses:
+PrismDB's first real node boundary is a read-only shard RPC service and remote
+coordinator. The coordinator routes tenant-scoped reads to the owning shard and
+carries the three operations used by a cross-tenant two-round query:
 
 1. candidate discovery against an explicitly pinned snapshot;
 2. exact reranking of the coordinator-selected rows; and
 3. materialization of the final survivors.
 
-It also exposes health and snapshot discovery. It does **not** expose ingest,
-catalog publication, ownership acquisition, or recovery. Those mutations remain
-local until the admission log is remote-durable, because allowing another node
-to take over without the acknowledged-but-unpublished records would weaken the
-ack contract.
+It also exposes health, exact catalog snapshot discovery/validation, and a
+complete read against a pinned snapshot. Protocol v2 binds every
+  coordinator-supplied snapshot to the shard's immutable catalog bytes before it
+  is used, and every rerank/materialize part handle must belong to that pinned
+  snapshot. It does **not** expose ingest, catalog publication, ownership
+acquisition, or recovery. Those mutations remain local until the admission log
+is remote-durable, because allowing another node to take over without the
+acknowledged-but-unpublished records would weaken the ack contract.
 
 ## Security and resource contract
 
@@ -26,6 +30,12 @@ ack contract.
   and rejected from metadata before allocation.
 - Every request names its protocol version, unique request ID, and intended
   shard. A shard refuses a request addressed to another shard.
+- Coordinator topology is a versioned, deny-unknown-fields JSON file capped at
+  1 MiB and must be a regular non-symlink. Shard IDs must be the contiguous
+  range `0..N` and the coordinator caps a topology at 256 shards.
+- Startup health checks every endpoint concurrently and refuses mixed immutable
+  store configuration: format, dimensions, quantizer, seed, partition routing,
+  and promoted columns must agree.
 - Frames are four-byte big-endian length-prefixed JSON and are rejected before
   allocation above 16 MiB. Rerank/materialize selections are capped at 10,000
   rows. Socket deadlines are mandatory and bounded to 10 ms–60 s.
@@ -59,19 +69,69 @@ rotate leaf identities, prove every peer is using the new chain, then remove the
 old CA. Revocation, issuance, and rotation evidence belong in the customer's PKI
 system of record.
 
+## Run the remote read coordinator
+
+Create a topology containing only authenticated endpoint identity:
+
+```json
+{
+  "version": 1,
+  "shards": [
+    {
+      "shard_id": 0,
+      "address": "prism-shard-0.internal:7443",
+      "server_name": "prism-shard-0.internal"
+    },
+    {
+      "shard_id": 1,
+      "address": "prism-shard-1.internal:7443",
+      "server_name": "prism-shard-1.internal"
+    }
+  ]
+}
+```
+
+Then query through the coordinator identity:
+
+```text
+prism coordinator-search \
+  --topology /etc/prism/topology.json \
+  --cert /run/prism-tls/coordinator-chain.pem \
+  --key /run/prism-tls/coordinator-key.pem \
+  --shard-ca /run/prism-tls/shard-ca.pem \
+  --query "payment service timeout" \
+  --tenant tenant-a
+```
+
+Omit `--tenant` for the global two-round merge. The coordinator pins one
+catalog snapshot per reachable shard, validates it, merges the global candidate
+set under one fetch budget, reranks on owning shards, and materializes only
+survivors. The default response fails with the shard named on any partition.
+`--best-effort` is explicit per query and labels every dropped shard; if a shard
+disappears during final materialization, the coordinator removes all of that
+shard's scores and recomputes top-k so it cannot return a plausible but short
+answer. Partial semantic `GROUP BY` remains refused.
+
 ## Evidence and remaining wall
 
 The permanent gate proves:
 
-- a trusted coordinator completes health and all three query fragments;
+- a trusted coordinator completes health, catalog-bound snapshot operations,
+  full tenant reads, and all three cross-shard query fragments;
 - an untrusted coordinator certificate is rejected;
 - a valid certificate for the wrong shard DNS name is rejected;
 - a half-open peer hits the configured read deadline; and
-- an oversized frame is rejected from its four-byte prefix before allocation.
+- an oversized frame is rejected from its four-byte prefix before allocation;
+- a two-shard remote query is byte-identical to the in-process coordinator;
+- mixed store configurations, edited snapshot bytes, and part handles outside
+  the pinned snapshot are refused; and
+- real endpoint loss is fail-named by default, labelled only on explicit
+  best-effort, refuses partial grouping, and recomputes top-k when loss occurs
+  during materialization.
 
-This increment establishes the authenticated shard service and client. The
-existing `sharded::Cluster` still invokes local engines directly; wiring its
-fan-out through `TlsShardClient`, then driving real network partitions,
-asynchronous hedge timing, and 1→4 node scaling is the next query-HA increment.
+The authenticated multi-node read path is now wired. Remaining read-HA evidence
+is sustained 1→4 node scaling on independent hosts and timer-driven asynchronous
+hedging under latency/jitter, not an in-process or deterministic partition seam.
 Cross-node write failover remains a separate durability increment behind a
-remote-durable admission log.
+remote-durable admission log. This CLI is an operator/query surface, not S14's
+public authenticated API service.

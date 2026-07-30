@@ -157,6 +157,7 @@ impl<'a> Collector<'a> {
 }
 
 /// A candidate that survived into the rerank set and has an exact score.
+#[derive(Clone)]
 pub(crate) struct Scored {
     pub(crate) score: f32,
     pub(crate) part: usize,
@@ -970,7 +971,9 @@ impl Engine {
         // `physical_bytes_read` is read AFTER materialization, because materializing the survivor
         // bodies is itself disk the query moved — computing it before would undercount.
         let tombstones: BTreeSet<String> = snap.tombstones.iter().cloned().collect();
-        self.finalize(
+        Engine::finalize(
+            self.store.config.dim,
+            self.store.config.seed,
             &tombstones,
             &snap.snapshot_id,
             q,
@@ -1119,7 +1122,8 @@ impl Engine {
     /// both paths, so a single node and a cluster resolve ties, thresholds, and limits identically.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn finalize(
-        &self,
+        dim: usize,
+        seed: u64,
         tombstones: &BTreeSet<String>,
         snapshot_id: &str,
         q: &Query,
@@ -1132,8 +1136,6 @@ impl Engine {
         ) -> Result<BTreeMap<(usize, usize), (Event, u32)>>,
         physical_bytes_read: impl Fn() -> usize,
     ) -> Result<SearchResult> {
-        let dim = self.store.config.dim;
-
         // Descending score, ties broken on `event_id` (C-4) — never on (part, row): order must be a
         // function of the data, not the layout, so a merge that moves rows between parts (or shards)
         // cannot change it.
@@ -1192,7 +1194,7 @@ impl Engine {
             .collect();
         let clusters = match q.group_k {
             Some(gk) if gk > 0 && !scored.is_empty() => {
-                Some(group(&scored, &events, gk, dim, self.store.config.seed)?)
+                Some(group(&scored, &events, gk, dim, seed)?)
             }
             _ => None,
         };

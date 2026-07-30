@@ -28,6 +28,83 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+/// The read-only surface a coordinator needs from a shard. Both an in-process [`Engine`] and the
+/// authenticated network client implement this exact contract, so local and multi-node queries run
+/// one coordinator algorithm. Writes are deliberately absent: cross-node mutation cannot ship until
+/// the admission log is remote-durable without weakening the ACK contract.
+pub(crate) trait ReadShard: Sync {
+    fn validate_snapshot(&self, snapshot: &prism_part::catalog::Snapshot) -> Result<()>;
+    fn candidates(
+        &self,
+        snapshot: &prism_part::catalog::Snapshot,
+        query: &Query,
+    ) -> Result<Vec<crate::search::ShardCandidate>>;
+    fn rerank(
+        &self,
+        snapshot: &prism_part::catalog::Snapshot,
+        query: &Query,
+        selected: &[(String, usize)],
+    ) -> Result<Vec<crate::search::ShardScored>>;
+    fn materialize(
+        &self,
+        snapshot: &prism_part::catalog::Snapshot,
+        selected: &[(String, usize)],
+    ) -> Result<Vec<(Event, u32)>>;
+}
+
+impl ReadShard for Engine {
+    fn validate_snapshot(&self, snapshot: &prism_part::catalog::Snapshot) -> Result<()> {
+        for part_id in snapshot.part_ids() {
+            if !self.store.part_dir(&part_id).exists() {
+                return Err(PrismError::NotFound(format!(
+                    "snapshot `{}` names part `{part_id}`, which has been reclaimed",
+                    snapshot.snapshot_id
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn candidates(
+        &self,
+        snapshot: &prism_part::catalog::Snapshot,
+        query: &Query,
+    ) -> Result<Vec<crate::search::ShardCandidate>> {
+        self.search_candidates(snapshot, query)
+    }
+
+    fn rerank(
+        &self,
+        snapshot: &prism_part::catalog::Snapshot,
+        query: &Query,
+        selected: &[(String, usize)],
+    ) -> Result<Vec<crate::search::ShardScored>> {
+        let live: BTreeSet<String> = snapshot.part_ids().into_iter().collect();
+        if let Some((part_id, _)) = selected.iter().find(|(part_id, _)| !live.contains(part_id)) {
+            return Err(PrismError::Invalid(format!(
+                "selection names part `{part_id}`, which is not in pinned snapshot `{}`",
+                snapshot.snapshot_id
+            )));
+        }
+        self.search_rerank_selected(query, selected)
+    }
+
+    fn materialize(
+        &self,
+        snapshot: &prism_part::catalog::Snapshot,
+        selected: &[(String, usize)],
+    ) -> Result<Vec<(Event, u32)>> {
+        let live: BTreeSet<String> = snapshot.part_ids().into_iter().collect();
+        if let Some((part_id, _)) = selected.iter().find(|(part_id, _)| !live.contains(part_id)) {
+            return Err(PrismError::Invalid(format!(
+                "selection names part `{part_id}`, which is not in pinned snapshot `{}`",
+                snapshot.snapshot_id
+            )));
+        }
+        self.search_materialize(selected)
+    }
+}
+
 /// **Test-only** ([query §21](../../../docs/QUERY-CONTRACT.md)): shard indices the coordinator treats
 /// as unreachable, so the partial-failure path is exercised at the **coordinator boundary** without a
 /// real network partition. What this proves is coordinator *semantics* — fail-named by default,
@@ -72,6 +149,20 @@ fn resolve_unreachable(
              best_effort to accept a labelled partial answer."
         )))
     }
+}
+
+fn refuse_partial_group(query: &Query, missing: &[MissingShard]) -> Result<()> {
+    if !missing.is_empty() && query.group_k.is_some() {
+        let dropped: Vec<usize> = missing.iter().map(|entry| entry.shard).collect();
+        return Err(PrismError::Invalid(format!(
+            "a best-effort semantic GROUP BY dropped shard(s) {dropped:?}: a cluster distribution \
+             over an incomplete shard set is not comparable to a complete run (cluster mass and \
+             exemplars shift with the data present), so it is refused rather than returned as if \
+             whole (query §21). Re-run without best_effort to fail by name, or narrow to a \
+             reachable tenant."
+        )));
+    }
+    Ok(())
 }
 
 /// **Test-only** ([D-079](../../../docs/DECISIONS.md)): shard indices to hedge — re-issue their
@@ -388,7 +479,14 @@ impl Cluster {
         // read from for BOTH rounds — a publication landing mid-query cannot change the answer. A
         // cursor paginating this query carries exactly this vector.
         let vector = self.snapshot_vector_pinned()?;
-        self.search_cross_shard_at(&vector, q)
+        Self::coordinate_cross_shard(
+            &self.shards,
+            self.shards[0].store.config.dim,
+            self.shards[0].store.config.seed,
+            &vector,
+            q,
+            Vec::new(),
+        )
     }
 
     /// The snapshots the coordinator pins for a query: one per shard, captured at planning.
@@ -419,7 +517,14 @@ impl Cluster {
                 let owner = self.shard_index(t);
                 self.shards[owner].search_at(&vector[owner], q)
             }
-            None => self.search_cross_shard_at(vector, q),
+            None => Self::coordinate_cross_shard(
+                &self.shards,
+                self.shards[0].store.config.dim,
+                self.shards[0].store.config.seed,
+                vector,
+                q,
+                Vec::new(),
+            ),
         }
     }
 
@@ -514,12 +619,19 @@ impl Cluster {
     /// Round 1 scans each shard's pinned snapshot; round 2 rescores the immutable parts those
     /// snapshots named. Nothing published after `vector` was captured can change the answer — which is
     /// what makes a mid-query (or mid-pagination) publication invisible.
-    fn search_cross_shard_at(
-        &self,
+    pub(crate) fn coordinate_cross_shard<S: ReadShard>(
+        shards: &[S],
+        dim: usize,
+        seed: u64,
         vector: &[prism_part::catalog::Snapshot],
         q: &Query,
+        mut missing: Vec<MissingShard>,
     ) -> Result<SearchResult> {
-        let dim = self.shards[0].store.config.dim;
+        if shards.is_empty() || vector.len() != shards.len() {
+            return Err(PrismError::Invalid(
+                "the coordinator needs one pinned snapshot per shard".into(),
+            ));
+        }
         let snaps = vector;
         let snapshot_id = snaps
             .iter()
@@ -537,21 +649,28 @@ impl Cluster {
         // past it (or crashed) has them reclaimed by GC, and the resumed query is **expired**, a named
         // condition ([query §2/§19](../../../docs/QUERY-CONTRACT.md)) — never a short answer.
         for (si, snap) in snaps.iter().enumerate() {
-            for pid in snap.part_ids() {
-                if !self.shards[si].store.part_dir(&pid).exists() {
-                    return Err(PrismError::NotFound(format!(
-                        "the pinned snapshot vector is expired: shard {si}'s snapshot `{}` names \
-                         part `{pid}`, which has been reclaimed (GC past the reader-lease horizon). \
-                         Re-run the query to pin the current vector.",
+            if missing.iter().any(|entry| entry.shard == si) {
+                continue;
+            }
+            if let Err(error) = shards[si].validate_snapshot(snap) {
+                let reason = if matches!(&error, PrismError::NotFound(_)) {
+                    format!(
+                        "the pinned snapshot vector is expired: snapshot `{}` is no longer \
+                         readable: {error}",
                         snap.snapshot_id
-                    )));
-                }
+                    )
+                } else {
+                    format!(
+                        "pinned snapshot `{}` validation failed: {error}",
+                        snap.snapshot_id
+                    )
+                };
+                resolve_unreachable(si, &reason, q.best_effort, &mut missing)?;
             }
         }
 
         // The shards a best-effort query could not reach (query §21). A non-best-effort query never
         // reaches the end of this list — `resolve_unreachable` fails it, by name, at the first miss.
-        let mut missing: Vec<MissingShard> = Vec::new();
         // Hedging bookkeeping (D-079): total fragments in flight (the blast radius) and hedges issued.
         let mut inflight = 0usize;
         let mut hedges = 0usize;
@@ -564,20 +683,26 @@ impl Cluster {
         // borrows `self.shards`, `snaps`, and `q` without cloning; the per-shard results are processed
         // in shard order afterwards, so the merge is byte-identical to a sequential fan-out (the sort
         // erases arrival order regardless). A 1-shard cluster spawns one thread — negligible overhead.
+        let initially_missing: BTreeSet<usize> = missing.iter().map(|entry| entry.shard).collect();
         let round1: Vec<(usize, Result<Vec<crate::search::ShardCandidate>>)> =
             std::thread::scope(|scope| {
-                let handles: Vec<_> = self
-                    .shards
+                let handles: Vec<_> = shards
                     .iter()
                     .enumerate()
                     .map(|(si, shard)| {
+                        let was_missing = initially_missing.contains(&si);
                         scope.spawn(move || {
-                            let r = if shard_is_unreachable(si) {
+                            let r = if was_missing {
+                                Err(PrismError::NotFound(
+                                    "shard was unreachable while pinning the snapshot vector"
+                                        .into(),
+                                ))
+                            } else if shard_is_unreachable(si) {
                                 Err(PrismError::NotFound(
                                     "coordinator-boundary fault (injected)".into(),
                                 ))
                             } else {
-                                shard.search_candidates(&snaps[si], q)
+                                shard.candidates(&snaps[si], q)
                             };
                             (si, r)
                         })
@@ -596,7 +721,7 @@ impl Cluster {
                     // Hedge the fragment if the shard is slow — free, because a re-issue against the
                     // pinned snapshot is byte-identical (D-079).
                     maybe_hedge(si, &cands, &mut inflight, &mut hedges, || {
-                        self.shards[si].search_candidates(&snaps[si], q)
+                        shards[si].candidates(&snaps[si], q)
                     })?;
                     for cand in cands {
                         global.push((cand.dist, cand.event_id, si, cand.part_id, cand.row));
@@ -639,7 +764,6 @@ impl Cluster {
 
         // Fan out round 2 concurrently too — each owning shard exact-scores its own subset in parallel.
         let by_shard_vec: Vec<(usize, Vec<(String, usize)>)> = by_shard.into_iter().collect();
-        let shards = &self.shards;
         let round2: Vec<Result<Vec<crate::search::ShardScored>>> = std::thread::scope(|scope| {
             let handles: Vec<_> = by_shard_vec
                 .iter()
@@ -651,7 +775,7 @@ impl Cluster {
                                 "coordinator-boundary fault (injected)".into(),
                             ))
                         } else {
-                            shards[si].search_rerank_selected(q, sel)
+                            shards[si].rerank(&snaps[si], q, sel)
                         }
                     })
                 })
@@ -676,7 +800,7 @@ impl Cluster {
             // Hedge round 2 too — the exact-score fragment is likewise byte-identical against the
             // pinned snapshot (D-079).
             maybe_hedge(si, &scoreds, &mut inflight, &mut hedges, || {
-                self.shards[si].search_rerank_selected(q, sel)
+                shards[si].rerank(&snaps[si], q, sel)
             })?;
             for s in scoreds {
                 let gidx = handle.len();
@@ -697,45 +821,18 @@ impl Cluster {
         // A best-effort GROUP BY over an incomplete shard set is not comparable to a complete run —
         // cluster mass and exemplars shift with the data present — so returning it flagged invites an
         // analyst to read a partial distribution as a whole one. It is **refused by name** instead.
-        if !missing.is_empty() && q.group_k.is_some() {
-            let dropped: Vec<usize> = missing.iter().map(|m| m.shard).collect();
-            return Err(PrismError::Invalid(format!(
-                "a best-effort semantic GROUP BY dropped shard(s) {dropped:?}: a cluster distribution \
-                 over an incomplete shard set is not comparable to a complete run (cluster mass and \
-                 exemplars shift with the data present), so it is refused rather than returned as if \
-                 whole (query §21). Re-run without best_effort to fail by name, or narrow to a \
-                 reachable tenant."
+        refuse_partial_group(q, &missing)?;
+
+        let gen_ids: BTreeSet<String> = snaps
+            .iter()
+            .filter_map(|snapshot| snapshot.active_generation.clone())
+            .collect();
+        if gen_ids.len() > 1 {
+            return Err(PrismError::Invariant(format!(
+                "the pinned snapshot vector serves multiple active generations {gen_ids:?}; \
+                 every shard must install the same content-addressed generation before serving"
             )));
         }
-
-        // --- finalize: the SHARED implementation, with a materializer that routes to the shards ---
-        let materialize =
-            |needed: &BTreeSet<(usize, usize)>| -> Result<BTreeMap<(usize, usize), (Event, u32)>> {
-                // Group survivors by shard, keeping each survivor's global handle to map results back.
-                let mut by_shard_mat: BTreeMap<usize, Vec<(usize, String, usize)>> =
-                    BTreeMap::new();
-                for (gidx, row) in needed {
-                    let (si, pid, _) = &handle[*gidx];
-                    by_shard_mat
-                        .entry(*si)
-                        .or_default()
-                        .push((*gidx, pid.clone(), *row));
-                }
-                let mut out: BTreeMap<(usize, usize), (Event, u32)> = BTreeMap::new();
-                for (si, reqs) in &by_shard_mat {
-                    let sel: Vec<(String, usize)> = reqs
-                        .iter()
-                        .map(|(_, pid, row)| (pid.clone(), *row))
-                        .collect();
-                    let mats = self.shards[*si].search_materialize(&sel)?;
-                    for ((gidx, _, row), (ev, cen)) in reqs.iter().zip(mats) {
-                        out.insert((*gidx, *row), (ev, cen));
-                    }
-                }
-                Ok(out)
-            };
-
-        let gen_ids: BTreeSet<String> = self.installed_generation()?.into_iter().collect();
         let plan_choice = crate::plan::PlanChoice {
             strategy: crate::plan::Strategy::Interleaved,
             reason: "cluster coordinator (query §20)".into(),
@@ -750,17 +847,84 @@ impl Cluster {
             ..Default::default()
         };
 
-        let mut result = self.shards[0].finalize(
-            &tombstones,
-            &snapshot_id,
-            q,
-            scored,
-            &gen_ids,
-            &plan_choice,
-            c,
-            materialize,
-            || 0,
-        )?;
+        // --- finalize: the SHARED implementation, with a materializer that routes to the shards ---
+        //
+        // A shard can disappear after exact scoring but before survivor materialization. On the
+        // default path this is fail-named. On explicit best-effort, remove every score from that
+        // shard and finalize again so the global top-k backfills from reachable shards; returning a
+        // short top-k without that re-finalization would be a plausible wrong answer.
+        let mut remaining_scored = scored;
+        let mut result = loop {
+            let materialize_failure: Mutex<Option<(usize, String)>> = Mutex::new(None);
+            let materialize =
+                |needed: &BTreeSet<(usize, usize)>| -> Result<
+                    BTreeMap<(usize, usize), (Event, u32)>,
+                > {
+                    let mut by_shard_mat: BTreeMap<usize, Vec<(usize, String, usize)>> =
+                        BTreeMap::new();
+                    for (gidx, row) in needed {
+                        let (shard_id, part_id, _) = &handle[*gidx];
+                        by_shard_mat.entry(*shard_id).or_default().push((
+                            *gidx,
+                            part_id.clone(),
+                            *row,
+                        ));
+                    }
+                    let mut out: BTreeMap<(usize, usize), (Event, u32)> = BTreeMap::new();
+                    for (shard_id, requests) in &by_shard_mat {
+                        let selected: Vec<(String, usize)> = requests
+                            .iter()
+                            .map(|(_, part_id, row)| (part_id.clone(), *row))
+                            .collect();
+                        let materialized =
+                            match shards[*shard_id].materialize(&snaps[*shard_id], &selected) {
+                            Ok(materialized) => materialized,
+                            Err(error) => {
+                                *materialize_failure.lock().expect("materialize failure lock") =
+                                    Some((*shard_id, error.to_string()));
+                                return Err(PrismError::NotFound(format!(
+                                    "shard {shard_id} unreachable during survivor materialization: \
+                                     {error}"
+                                )));
+                            }
+                        };
+                        for ((global_index, _, row), (event, centroid)) in
+                            requests.iter().zip(materialized)
+                        {
+                            out.insert((*global_index, *row), (event, centroid));
+                        }
+                    }
+                    Ok(out)
+                };
+
+            match Engine::finalize(
+                dim,
+                seed,
+                &tombstones,
+                &snapshot_id,
+                q,
+                remaining_scored.clone(),
+                &gen_ids,
+                &plan_choice,
+                c.clone(),
+                materialize,
+                || 0,
+            ) {
+                Ok(result) => break result,
+                Err(error) => {
+                    let failure = materialize_failure
+                        .lock()
+                        .expect("materialize failure lock")
+                        .clone();
+                    let Some((shard_id, reason)) = failure else {
+                        return Err(error);
+                    };
+                    resolve_unreachable(shard_id, &reason, q.best_effort, &mut missing)?;
+                    refuse_partial_group(q, &missing)?;
+                    remaining_scored.retain(|score| handle[score.part].0 != shard_id);
+                }
+            }
+        };
         // Label the partial answer (query §21): the dropped shards and their count, mirrored into the
         // counters so a degraded answer is a monitored number. Only ever non-empty for a best-effort
         // query — a fail-named one errored above — so a partial answer is impossible to mistake for a

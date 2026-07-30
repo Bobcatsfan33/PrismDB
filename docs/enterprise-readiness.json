@@ -99,9 +99,14 @@
       "title": "Identity, authorization, and tenant isolation",
       "status": "partial",
       "frameworks": ["owasp-asvs-5.0.0", "csa-ccm-caiq-4.1", "csa-ai-caiq-1.0.2"],
-      "evidence": ["docs/QUERY-CONTRACT.md", "docs/SHARD-TRANSPORT.md", "docs/MODEL-PLANE.md"],
+      "evidence": [
+        "docs/QUERY-CONTRACT.md",
+        "docs/SHARD-TRANSPORT.md",
+        "docs/MODEL-PLANE.md",
+        "crates/prism-engine/src/shard_rpc.rs"
+      ],
       "gaps": [
-        "The read-only shard service uses mTLS, but the product has no complete production API identity boundary or write service."
+        "The read-only remote coordinator uses mTLS and verified shard identity, but the product has no complete public production API identity boundary or write service."
       ]
     },
     {
@@ -134,11 +139,12 @@
         ".github/workflows/ci.yml",
         ".github/workflows/nightly.yml",
         "docs/STORAGE-CONTRACT.md",
-        "docs/SHARD-TRANSPORT.md"
+        "docs/SHARD-TRANSPORT.md",
+        "crates/prism-engine/src/shard_rpc.rs"
       ],
       "gaps": [
         "No supported backup/restore product workflow or customer-scale RPO/RTO drill exists.",
-        "Remote durable WAL replication, network-partition evidence, and cross-node write failover remain open."
+        "Deterministic mTLS endpoint-loss behavior is gated, but independent-host latency/jitter/scaling evidence, remote durable WAL replication, and cross-node write failover remain open."
       ]
     },
     {
@@ -192,8 +198,8 @@
       "status": "open",
       "blocking": true,
       "ownerRole": "Engineering",
-      "acceptanceCriteria": "Supported network/API and write service, migration/version policy, signed database distribution, and production deployment manifests pass release gates.",
-      "evidence": []
+      "acceptanceCriteria": "The shipped read-only remote coordinator is extended with a supported public API and write service, migration/version policy, signed database distribution, and production deployment manifests that pass release gates.",
+      "evidence": ["docs/SHARD-TRANSPORT.md", "crates/prism-engine/src/shard_rpc.rs"]
     },
     {
       "id": "EXT-PENTEST",
