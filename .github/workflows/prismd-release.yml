@@ -1,0 +1,269 @@
+name: prismd release assurance
+
+on:
+  pull_request:
+    paths:
+      - "crates/prism-service/**"
+      - "crates/prism-engine/**"
+      - "crates/prism-types/**"
+      - "deploy/prismd/**"
+      - "deploy/helm/prismdb/**"
+      - ".dockerignore"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/prismd-release.yml"
+      - "docs/PUBLIC-READ-SERVICE.md"
+      - "docs/RELEASE-ASSURANCE.md"
+  push:
+    branches: [main]
+    tags:
+      - "prismd-v*"
+  workflow_dispatch:
+
+concurrency:
+  group: prismd-release-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+env:
+  RUST_IMAGE: rust:1.75.0-bookworm@sha256:87f3b2f93b82995443a1a558c234212dafe79cfdc3af956539610560369ddcd0
+  RUNTIME_IMAGE: gcr.io/distroless/cc-debian12:nonroot@sha256:fccdbb0a547c14e23fcf4ce8ad62ca5d43b4faae8d22cd292f490fef9946c96e
+  HELM_IMAGE: alpine/helm:3.18.4@sha256:e7ecbf4a200dea73d64bfb8cb0936829164945f2b4d02a0274093073ee8d264f
+  KUBECONFORM_IMAGE: ghcr.io/yannh/kubeconform:v0.7.0@sha256:85dbef6b4b312b99133decc9c6fc9495e9fc5f92293d4ff3b7e1b30f5611823c
+  LOCAL_IMAGE: prismd:verification
+  TRIVY_VERSION: v0.72.0
+
+jobs:
+  verify-image:
+    name: image, chart, SBOM, and vulnerability gate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+
+      - name: build the release-equivalent image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+        with:
+          context: .
+          file: deploy/prismd/Dockerfile
+          load: true
+          push: false
+          tags: ${{ env.LOCAL_IMAGE }}
+          build-args: |
+            RUST_IMAGE=${{ env.RUST_IMAGE }}
+            RUNTIME_IMAGE=${{ env.RUNTIME_IMAGE }}
+
+      - name: verify immutable bases and unprivileged identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect "${LOCAL_IMAGE}" --format '{{ index .Config.Labels "org.opencontainers.image.base.name" }}')" = "${RUNTIME_IMAGE}"
+          test "$(docker image inspect "${LOCAL_IMAGE}" --format '{{ index .Config.Labels "org.opencontainers.image.build.base.name" }}')" = "${RUST_IMAGE}"
+          test "$(docker image inspect "${LOCAL_IMAGE}" --format '{{.Config.User}}')" = "65532:65532"
+
+      - name: smoke test the production runtime posture
+        run: >-
+          docker run --rm
+          --read-only
+          --network none
+          --cap-drop ALL
+          --security-opt no-new-privileges
+          "${LOCAL_IMAGE}" version
+
+      - name: lint and render the deployment chart
+        shell: bash
+        run: |
+          set -euo pipefail
+          helm_cmd=(docker run --rm -v "${PWD}:/work" -w /work "${HELM_IMAGE}")
+          "${helm_cmd[@]}" lint deploy/helm/prismdb -f deploy/helm/prismdb/ci-values.yaml
+          "${helm_cmd[@]}" template prism deploy/helm/prismdb \
+            -f deploy/helm/prismdb/ci-values.yaml > /tmp/prismdb-rendered.yaml
+          grep -q 'readOnlyRootFilesystem: true' /tmp/prismdb-rendered.yaml
+          grep -q 'runAsNonRoot: true' /tmp/prismdb-rendered.yaml
+          grep -q 'kind: NetworkPolicy' /tmp/prismdb-rendered.yaml
+          grep -q 'kind: PodDisruptionBudget' /tmp/prismdb-rendered.yaml
+          docker run --rm \
+            -v /tmp/prismdb-rendered.yaml:/manifest.yaml:ro \
+            "${KUBECONFORM_IMAGE}" -strict -summary /manifest.yaml
+
+      - name: prove unsafe chart values fail closed
+        shell: bash
+        run: |
+          set -euo pipefail
+          helm_cmd=(docker run --rm -v "${PWD}:/work" -w /work "${HELM_IMAGE}")
+          if "${helm_cmd[@]}" lint deploy/helm/prismdb; then
+            echo "chart accepted an unpinned image and unrestricted network policy" >&2
+            exit 1
+          fi
+          if "${helm_cmd[@]}" lint deploy/helm/prismdb \
+            -f deploy/helm/prismdb/ci-values.yaml --set replicaCount=1; then
+            echo "chart accepted a single production replica" >&2
+            exit 1
+          fi
+
+      - name: generate SPDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610
+        with:
+          image: ${{ env.LOCAL_IMAGE }}
+          format: spdx-json
+          output-file: prismd.spdx.json
+          syft-version: v1.50.0
+          upload-artifact: false
+
+      - name: write machine-readable vulnerability evidence
+        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8
+        with:
+          image-ref: ${{ env.LOCAL_IMAGE }}
+          version: ${{ env.TRIVY_VERSION }}
+          format: json
+          output: prismd.trivy.json
+          scanners: vuln
+          vuln-type: os,library
+          ignore-unfixed: true
+          severity: HIGH,CRITICAL
+          exit-code: 0
+
+      - name: retain assurance evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: prismd-assurance-${{ github.run_id }}
+          path: |
+            prismd.spdx.json
+            prismd.trivy.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: block fixable high and critical vulnerabilities
+        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8
+        with:
+          image-ref: ${{ env.LOCAL_IMAGE }}
+          version: ${{ env.TRIVY_VERSION }}
+          format: table
+          scanners: vuln
+          vuln-type: os,library
+          ignore-unfixed: true
+          severity: HIGH,CRITICAL
+          exit-code: 1
+
+  publish:
+    name: publish, sign, and attest
+    if: startsWith(github.ref, 'refs/tags/prismd-v')
+    needs: verify-image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: compute canonical image name
+        shell: bash
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/prismd" >> "${GITHUB_ENV}"
+
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: metadata
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=match,pattern=prismd-v(.*),group=1
+            type=sha,format=long,prefix=sha-
+
+      - id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+        with:
+          context: .
+          file: deploy/prismd/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          build-args: |
+            RUST_IMAGE=${{ env.RUST_IMAGE }}
+            RUNTIME_IMAGE=${{ env.RUNTIME_IMAGE }}
+          provenance: mode=max
+
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac
+
+      - name: sign image digest
+        run: cosign sign --yes "${IMAGE}@${{ steps.build.outputs.digest }}"
+
+      - name: generate release SPDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610
+        with:
+          image: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+          registry-username: ${{ github.actor }}
+          registry-password: ${{ secrets.GITHUB_TOKEN }}
+          format: spdx-json
+          output-file: prismd.spdx.json
+          syft-version: v1.50.0
+          upload-artifact: false
+
+      - name: attest SBOM
+        run: >-
+          cosign attest --yes --predicate prismd.spdx.json --type spdxjson
+          "${IMAGE}@${{ steps.build.outputs.digest }}"
+
+      - name: publish GitHub build provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: verify the published signature and SBOM
+        shell: bash
+        run: |
+          set -euo pipefail
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/prismd-release.yml@${GITHUB_REF}"
+          cosign verify \
+            --certificate-identity "${identity}" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "${IMAGE}@${{ steps.build.outputs.digest }}"
+          cosign verify-attestation \
+            --certificate-identity "${identity}" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            --type spdxjson \
+            "${IMAGE}@${{ steps.build.outputs.digest }}"
+
+      - name: write release receipt
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        shell: bash
+        run: |
+          jq -n \
+            --arg image "${IMAGE}" \
+            --arg image_digest "${IMAGE_DIGEST}" \
+            --arg runtime_base "${RUNTIME_IMAGE}" \
+            --arg build_base "${RUST_IMAGE}" \
+            --arg source_revision "${GITHUB_SHA}" \
+            --arg release_tag "${GITHUB_REF_NAME}" \
+            '{
+              schema_version: 1,
+              image: $image,
+              image_digest: $image_digest,
+              runtime_base: $runtime_base,
+              build_base: $build_base,
+              source_revision: $source_revision,
+              release_tag: $release_tag
+            }' > prismd.release.json
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: prismd-release-${{ github.ref_name }}
+          path: |
+            prismd.spdx.json
+            prismd.release.json
+          if-no-files-found: error
+          retention-days: 90

@@ -1,0 +1,40 @@
+replicaCount: 2
+
+image:
+  repository: ghcr.io/bobcatsfan33/prismd
+  digest: ""
+  pullPolicy: IfNotPresent
+
+service:
+  port: 8443
+
+timeoutMs: 15000
+serverName: prismdb.internal
+
+secrets:
+  serverTls: prismdb-server-tls
+  shardTls: prismdb-shard-client-tls
+  authorizationPolicy: prismdb-authorization-policy
+  probeTls: prismdb-probe-tls
+
+topology:
+  version: 1
+  shards: []
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 256Mi
+  limits:
+    cpu: "2"
+    memory: 2Gi
+
+networkPolicy:
+  ingressNamespaceLabels: {}
+  ingressPodLabels: {}
+  shardNamespaceLabels: {}
+  shardPodLabels: {}
+  shardPort: 7443
+
+podDisruptionBudget:
+  minAvailable: 1

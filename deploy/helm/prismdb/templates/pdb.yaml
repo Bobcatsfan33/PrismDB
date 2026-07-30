@@ -1,0 +1,12 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "prismdb.fullname" . }}
+  labels:
+    {{- include "prismdb.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "prismdb.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}

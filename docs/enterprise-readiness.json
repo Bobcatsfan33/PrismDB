@@ -3,11 +3,11 @@
   "product": "PrismDB",
   "repository": "Bobcatsfan33/PrismDB",
   "assessment": {
-    "asOf": "2026-07-29",
+    "asOf": "2026-07-30",
     "reviewBy": "2026-10-29",
     "softwareReleaseCandidate": false,
     "deploymentDecision": "not-approved",
-    "decisionReason": "PrismDB is an executable reference core; production service, assurance, and deployment gates remain open."
+    "decisionReason": "PrismDB now has a supported authenticated read-service component, but write, encryption, recovery, independent operational evidence, and organizational deployment gates remain open."
   },
   "frameworks": [
     {
@@ -74,10 +74,17 @@
       "title": "Technical security verification",
       "status": "partial",
       "frameworks": ["owasp-asvs-5.0.0", "csa-ccm-caiq-4.1"],
-      "evidence": ["SECURITY.md", ".github/workflows/ci.yml", "docs/UNSAFE-INVENTORY.md"],
+      "evidence": [
+        "SECURITY.md",
+        ".github/workflows/ci.yml",
+        ".github/workflows/prismd-release.yml",
+        "docs/PUBLIC-READ-SERVICE.md",
+        "docs/UNSAFE-INVENTORY.md",
+        "crates/prism-service/src/lib.rs"
+      ],
       "gaps": [
         "No commissioned independent penetration test exists.",
-        "The future production API/listener has not yet undergone ASVS-scoped verification."
+        "The authenticated read listener has in-repository abuse and isolation gates but has not undergone independent ASVS-scoped verification."
       ]
     },
     {
@@ -88,10 +95,12 @@
       "evidence": [
         ".github/workflows/security.yml",
         ".github/workflows/model-service-release.yml",
+        ".github/workflows/prismd-release.yml",
+        "deploy/prismd/Dockerfile",
         "docs/RELEASE-ASSURANCE.md"
       ],
       "gaps": [
-        "Signed SBOM/provenance release assurance covers the model-service image, not a supported PrismDB database distribution."
+        "Signed SBOM/provenance release assurance covers the model service and public read service, not the still-absent write/shard-node database distribution."
       ]
     },
     {
@@ -102,11 +111,14 @@
       "evidence": [
         "docs/QUERY-CONTRACT.md",
         "docs/SHARD-TRANSPORT.md",
+        "docs/PUBLIC-READ-SERVICE.md",
+        "docs/openapi-public-read-v1.yaml",
         "docs/MODEL-PLANE.md",
-        "crates/prism-engine/src/shard_rpc.rs"
+        "crates/prism-engine/src/shard_rpc.rs",
+        "crates/prism-service/src/lib.rs"
       ],
       "gaps": [
-        "The read-only remote coordinator uses mTLS and verified shard identity, but the product has no complete public production API identity boundary or write service."
+        "The public read service has exact-certificate tenant grants, but no public write/ingest identity boundary or service exists."
       ]
     },
     {
@@ -114,10 +126,14 @@
       "title": "Transport, storage encryption, and key management",
       "status": "partial",
       "frameworks": ["owasp-asvs-5.0.0", "csa-ccm-caiq-4.1"],
-      "evidence": ["docs/SHARD-TRANSPORT.md", "docs/STORAGE-CONTRACT.md", "SECURITY.md"],
+      "evidence": [
+        "docs/SHARD-TRANSPORT.md",
+        "docs/PUBLIC-READ-SERVICE.md",
+        "docs/STORAGE-CONTRACT.md",
+        "SECURITY.md"
+      ],
       "gaps": [
-        "Per-tenant envelope encryption and production KMS/HSM lifecycle are not implemented.",
-        "TLS/authentication for the eventual public service remains open."
+        "Per-tenant envelope encryption and production KMS/HSM lifecycle are not implemented."
       ]
     },
     {
@@ -152,9 +168,16 @@
       "title": "Operational observability and SLO evidence",
       "status": "partial",
       "frameworks": ["csa-ccm-caiq-4.1", "csa-ai-caiq-1.0.2"],
-      "evidence": ["baselines.json", "docs/PROGRESS.md", ".github/workflows/nightly.yml"],
+      "evidence": [
+        "baselines.json",
+        "docs/PROGRESS.md",
+        "docs/PUBLIC-READ-SERVICE.md",
+        "crates/prism-service/src/lib.rs",
+        ".github/workflows/nightly.yml"
+      ],
       "gaps": [
-        "No production service metrics/tracing contract, alert catalog, SLOs, or long-running API workload evidence exists."
+        "The read service exports fixed-cardinality metrics and minimum alert guidance, but no approved SLO/error budget or representative long-running API workload evidence exists.",
+        "Distributed tracing and a retained production dashboard/alert validation remain open."
       ]
     },
     {
@@ -198,8 +221,16 @@
       "status": "open",
       "blocking": true,
       "ownerRole": "Engineering",
-      "acceptanceCriteria": "The shipped read-only remote coordinator is extended with a supported public API and write service, migration/version policy, signed database distribution, and production deployment manifests that pass release gates.",
-      "evidence": ["docs/SHARD-TRANSPORT.md", "crates/prism-engine/src/shard_rpc.rs"]
+      "acceptanceCriteria": "The shipped authenticated public read API is joined by a write service, migration/version policy, complete signed database distribution, and production deployment manifests that pass release gates.",
+      "evidence": [
+        "docs/SHARD-TRANSPORT.md",
+        "docs/PUBLIC-READ-SERVICE.md",
+        "docs/openapi-public-read-v1.yaml",
+        "crates/prism-engine/src/shard_rpc.rs",
+        "crates/prism-service/src/lib.rs",
+        "deploy/helm/prismdb/Chart.yaml",
+        ".github/workflows/prismd-release.yml"
+      ]
     },
     {
       "id": "EXT-PENTEST",

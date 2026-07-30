@@ -1,0 +1,190 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "prismdb.fullname" . }}
+  labels:
+    {{- include "prismdb.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "prismdb.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "prismdb.name" . }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+      annotations:
+        checksum/topology: {{ .Values.topology | toJson | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "prismdb.fullname" . }}
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: {{ include "prismdb.name" . }}
+                  app.kubernetes.io/instance: {{ .Release.Name }}
+              topologyKey: kubernetes.io/hostname
+      containers:
+        - name: prismd
+          image: "{{ .Values.image.repository }}@{{ .Values.image.digest }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - read-serve
+            - --listen
+            - "0.0.0.0:{{ .Values.service.port }}"
+            - --topology
+            - /etc/prism-topology.json
+            - --shard-cert
+            - /var/run/prism-shard.crt
+            - --shard-key
+            - /var/run/prism-shard.key
+            - --shard-ca
+            - /var/run/prism-shard-ca.crt
+            - --server-cert
+            - /var/run/prism-server.crt
+            - --server-key
+            - /var/run/prism-server.key
+            - --client-ca
+            - /var/run/prism-client-ca.crt
+            - --auth-policy
+            - /etc/prism-auth-policy.json
+            - --timeout-ms
+            - {{ .Values.timeoutMs | quote }}
+          ports:
+            - name: mtls-api
+              containerPort: {{ .Values.service.port }}
+              protocol: TCP
+          readinessProbe:
+            exec:
+              command:
+                - /usr/local/bin/prismd
+                - probe
+                - --address
+                - "127.0.0.1:{{ .Values.service.port }}"
+                - --server-name
+                - {{ .Values.serverName | quote }}
+                - --cert
+                - /var/run/prism-probe.crt
+                - --key
+                - /var/run/prism-probe.key
+                - --ca
+                - /var/run/prism-probe-ca.crt
+                - --path
+                - /readyz
+                - --timeout-ms
+                - "5000"
+            periodSeconds: 10
+            timeoutSeconds: 6
+            failureThreshold: 3
+          livenessProbe:
+            exec:
+              command:
+                - /usr/local/bin/prismd
+                - probe
+                - --address
+                - "127.0.0.1:{{ .Values.service.port }}"
+                - --server-name
+                - {{ .Values.serverName | quote }}
+                - --cert
+                - /var/run/prism-probe.crt
+                - --key
+                - /var/run/prism-probe.key
+                - --ca
+                - /var/run/prism-probe-ca.crt
+                - --path
+                - /healthz
+                - --timeout-ms
+                - "5000"
+            periodSeconds: 20
+            timeoutSeconds: 6
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: topology
+              mountPath: /etc/prism-topology.json
+              subPath: topology.json
+              readOnly: true
+            - name: server-tls
+              mountPath: /var/run/prism-server.crt
+              subPath: tls.crt
+              readOnly: true
+            - name: server-tls
+              mountPath: /var/run/prism-server.key
+              subPath: tls.key
+              readOnly: true
+            - name: server-tls
+              mountPath: /var/run/prism-client-ca.crt
+              subPath: ca.crt
+              readOnly: true
+            - name: shard-tls
+              mountPath: /var/run/prism-shard.crt
+              subPath: tls.crt
+              readOnly: true
+            - name: shard-tls
+              mountPath: /var/run/prism-shard.key
+              subPath: tls.key
+              readOnly: true
+            - name: shard-tls
+              mountPath: /var/run/prism-shard-ca.crt
+              subPath: ca.crt
+              readOnly: true
+            - name: auth
+              mountPath: /etc/prism-auth-policy.json
+              subPath: policy.json
+              readOnly: true
+            - name: probe-tls
+              mountPath: /var/run/prism-probe.crt
+              subPath: tls.crt
+              readOnly: true
+            - name: probe-tls
+              mountPath: /var/run/prism-probe.key
+              subPath: tls.key
+              readOnly: true
+            - name: probe-tls
+              mountPath: /var/run/prism-probe-ca.crt
+              subPath: ca.crt
+              readOnly: true
+      volumes:
+        - name: topology
+          configMap:
+            name: {{ include "prismdb.fullname" . }}-topology
+            defaultMode: 0440
+        - name: server-tls
+          secret:
+            secretName: {{ .Values.secrets.serverTls }}
+            defaultMode: 0440
+        - name: shard-tls
+          secret:
+            secretName: {{ .Values.secrets.shardTls }}
+            defaultMode: 0440
+        - name: auth
+          secret:
+            secretName: {{ .Values.secrets.authorizationPolicy }}
+            defaultMode: 0440
+        - name: probe-tls
+          secret:
+            secretName: {{ .Values.secrets.probeTls }}
+            defaultMode: 0440

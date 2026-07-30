@@ -86,3 +86,32 @@ may propose action updates. A base update is a reviewed change to both the
 Dockerfile and workflow `PYTHON_IMAGE`, followed by the full image policy,
 SBOM, vulnerability, protocol, and failure gates. Never change only the human
 readable Python tag while retaining an unrelated digest.
+
+## PrismDB read-service distribution
+
+The same assurance contract applies independently to `prismd`. The
+`.github/workflows/prismd-release.yml` workflow builds
+`deploy/prismd/Dockerfile` from a digest-pinned Rust 1.75 builder into a
+digest-pinned distroless Debian 12 `nonroot` runtime, verifies UID/GID 65532,
+and runs `prismd version` with a read-only filesystem, no network, no
+capabilities, and `no-new-privileges`.
+
+The workflow also lints and renders `deploy/helm/prismdb`, proves that an
+unpinned image and single replica fail schema validation, generates SPDX,
+retains a machine-readable vulnerability result, and blocks fixable
+High/Critical findings. A protected `prismd-v*` tag publishes amd64/arm64,
+keylessly signs the index digest, attests its SPDX SBOM, publishes GitHub build
+provenance, verifies the workflow/tag identity, and retains a release receipt.
+
+Independent verification uses the same commands above with:
+
+```bash
+export IMAGE=ghcr.io/bobcatsfan33/prismd
+export TAG=prismd-v0.1.0
+```
+
+The expected certificate identity changes to
+`.github/workflows/prismd-release.yml@refs/tags/${TAG}`. Deployment admission
+must allow the approved receipt digest, not the `prismd-v*` tag. This is a
+supported read-service distribution; it is not evidence for the still-absent
+write service or shard-node distribution.

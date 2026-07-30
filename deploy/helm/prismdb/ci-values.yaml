@@ -1,0 +1,18 @@
+image:
+  digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+topology:
+  version: 1
+  shards:
+    - shard_id: 0
+      address: prism-shard-0.prism.svc.cluster.local:7443
+      server_name: prism-shard-0.prism.svc.cluster.local
+networkPolicy:
+  ingressNamespaceLabels:
+    kubernetes.io/metadata.name: prism-clients
+  ingressPodLabels:
+    prismdb-access: reader
+  shardNamespaceLabels:
+    kubernetes.io/metadata.name: prism
+  shardPodLabels:
+    prismdb-role: shard
+  shardPort: 7443
