@@ -33,6 +33,10 @@ USAGE:
                   map OTel GenAI spans (semconv pinned) into events
   prism recover   --path <dir>
                   replay every acknowledged-but-unpublished batch from the WAL
+  prism shard-serve --path <dir> --listen <ip:port> --shard-id <n>
+                    --cert <chain.pem> --key <key.pem> --client-ca <ca.pem>
+                    [--timeout-ms 5000]
+                  read-only coordinator RPC over mandatory mutual TLS
   prism evidence block-size --out <file.json> [--corpus <tsv>]
                   derive the default block size from measurement (charter C-1)
   prism search    --path <dir> --query <text> [--tenant T] [--from MS] [--to MS]
@@ -122,6 +126,7 @@ fn run(argv: Vec<String>) -> Result<()> {
         "ingest-source" => cmd_ingest_source(&a),
         "ingest-otlp" => cmd_ingest_otlp(&a),
         "recover" => cmd_recover(&a),
+        "shard-serve" => cmd_shard_serve(&a),
         "evidence" => cmd_evidence(&a),
         "search" => cmd_search(&a),
         "sql" => cmd_sql(&a),
@@ -224,6 +229,53 @@ fn open(a: &Args) -> Result<Engine> {
         Some(cold) => engine.with_cold(cold),
         None => engine,
     })
+}
+
+fn cmd_shard_serve(a: &Args) -> Result<()> {
+    a.allow(&[
+        "path",
+        "listen",
+        "shard-id",
+        "cert",
+        "key",
+        "client-ca",
+        "timeout-ms",
+    ])?;
+    let address: std::net::SocketAddr = a
+        .req("listen")?
+        .parse()
+        .map_err(|_| PrismError::Invalid("--listen must be an IP address and port".into()))?;
+    if address.port() == 0 {
+        return Err(PrismError::Invalid(
+            "--listen port 0 is test-only; configure an explicit production port".into(),
+        ));
+    }
+    let shard_id = a
+        .req("shard-id")?
+        .parse::<usize>()
+        .map_err(|_| PrismError::Invalid("--shard-id must be an unsigned integer".into()))?;
+    let timeout_ms = a.parse_opt("timeout-ms", 5_000u64)?;
+    let tls = prism_engine::shard_rpc::server_tls_from_pem(
+        std::path::Path::new(a.req("cert")?),
+        std::path::Path::new(a.req("key")?),
+        std::path::Path::new(a.req("client-ca")?),
+    )?;
+    let server = prism_engine::shard_rpc::ShardRpcServer::new(
+        shard_id,
+        Arc::new(open(a)?),
+        tls,
+        std::time::Duration::from_millis(timeout_ms),
+    )?;
+    let listener = std::net::TcpListener::bind(address)
+        .map_err(|e| PrismError::Io(format!("shard RPC bind listener: {e}")))?;
+    emit(&serde_json::json!({
+        "status": "listening",
+        "transport": "mutual-tls",
+        "protocol_version": prism_engine::shard_rpc::SHARD_RPC_PROTOCOL_VERSION,
+        "shard_id": shard_id,
+        "address": address.to_string(),
+    }))?;
+    server.serve(listener)
 }
 
 /// Resolve the separately supervised production model service, or retain the

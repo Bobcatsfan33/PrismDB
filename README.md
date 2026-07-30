@@ -105,7 +105,11 @@ prism fsck --path ./demo
 
 **Deliberate limits right now** — these are sprints, not oversights
 
-- Single writer, single node, in-process. No network, no server, no distribution.
+- The read-only shard RPC service is executable over mandatory mutual TLS, but
+  `sharded::Cluster` still fans out to local engines. Multi-node coordinator
+  routing, network-partition/scaling evidence, remote-durable WAL replication,
+  and cross-node write failover remain open; the service does not expose writes
+  and therefore cannot weaken the existing ack contract.
 - SQL is a minimal subset: projections, filters, `LIMIT`, scalar aggregates and `GROUP BY`, plus the `embedding ≈≈ 'text'` predicate. No joins, no subqueries, no `OFFSET`. The full semantics — nulls, ties, model versions, the cost-based optimizer — are S8, and S8 may *extend* the query contract but not contradict it.
 - Scalar loops only: no SIMD (S6), no GPU (S7). Every kernel here is the *reference* implementation that the fast ones will have to prove themselves equal to.
 - The deterministic local hash embedder remains the zero-configuration development default. S13's production plane now includes a separately supervised, dependency-free identity gateway to a colocated GPU inference runtime: mounted weights/tokenizer/preprocessing bytes are independently hashed before readiness, only loopback backends and peer-authorized Unix clients are accepted, and every response is cardinality/dimension/finiteness/norm checked under the exact persisted identity. Exact tenant/model/version/purpose grants, pre-ACK local GPU budgets, stable denial reasons, and a durable no-text usage ledger are enforced below every engine door. The gateway release is built from a digest-pinned base, vulnerability-gated, SBOM-attested, keylessly signed, and published with build provenance. Versioned redact-before-embedding, fleet-wide quota/chargeback, cache, calibrated drift/OOD gates, and the long-running API workload remain open; see [`docs/MODEL-PLANE.md`](docs/MODEL-PLANE.md), [`docs/MODEL-GOVERNANCE.md`](docs/MODEL-GOVERNANCE.md), and [`docs/RELEASE-ASSURANCE.md`](docs/RELEASE-ASSURANCE.md).

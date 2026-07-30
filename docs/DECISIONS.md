@@ -797,7 +797,7 @@ Two options, both defensible:
 - **One assigned writer per shard; CAS is the safety net, not the routine path.** Steady-state, a shard's single owner publishes without contention — the CAS almost always creates cleanly. The conditional put is there for the **one moment that matters**: an ownership change. A CAS conflict no longer means "halt everything" ([D-069](#d-069--the-object-store-is-a-catalog-mirror-not-a-master-local-current-stays-the-single-writer-authority)); it means **"you have lost ownership of this shard"** — a *named* condition: stop writing to that shard, and either re-acquire it (the previous owner is gone) or hand off (a new owner took it). **Detection graduates to tolerance**, exactly along the roadmap D-069 filed, and no further: two owners never *both* proceed, because the loser is told, by the CAS, the instant it tries.
 - **Ownership transfer rides the same CAS.** Acquiring a shard is a CAS write of an ownership record keyed by shard; the winner owns it, the loser reads the winner's identity and defers. There is no separate lock service, no lease broker — the object store's conditional put is the whole coordination primitive, which is why the dependency surface does not grow (the [D-002](#) charter).
 - **Falsification criteria, written in.** This design is **conditional on measurement**. If, in the soak, the **publication latency** (commit round-trip through the CAS catalog) or the **lease/ownership-transfer semantics** cannot meet the sprint's targets, the **filed Raft alternative activates** — a real consensus layer for the catalog metadata, with the object store demoted back to bulk storage. The mirror machinery is useful under either outcome (D-069). The gate that decides: **commit RTT is measured in CI against MinIO and recorded**, and the receipt is **backend-tagged** (a MinIO number and an S3-over-WAN number are different products, same as the [cost worksheet](../testing/evidence/cost-worksheet.json)) — a measured commit-RTT that misses the target is not argued with, it flips the decision.
-- **What this is not (scope).** No auto-resharding — the split protocol is designed and documented, executed manually. No cross-shard semantic structures (a cluster-wide index). No multi-region. Intra-cluster transport is plaintext on a trusted network, with **TLS named as an S14 wall** — [D-065](#d-065--the-s3-client-is-hand-rolled-and-tls-is-the-one-honest-exception)'s boundary extended and logged, never silently widened.
+- **What this is not (scope).** No auto-resharding — the split protocol is designed and documented, executed manually. No cross-shard semantic structures (a cluster-wide index). No multi-region. This paragraph's original plaintext transport deferral is superseded by [D-088](#d-088--the-shard-boundary-is-read-only-mutual-tls-and-bounded-before-it-is-distributed): the read-only shard service now requires mutual TLS; coordinator wiring and cross-node writes remain explicitly separate.
 
 ## D-072 — Sharding is a layout only with a cluster-global generation
 **S12. Surfaced building the sharding-is-a-layout gate ([query §20](QUERY-CONTRACT.md)).** A generation is a **codebook** (coarse + PQ) trained on data ([S5](PROGRESS.md)); the single-store bootstrap trains it on the first ingest's rows. If each shard bootstraps its **own** generation on its **own** slice of the corpus, the codebooks differ across shard counts — and a different codebook is a different PQ approximation, which changes **candidate selection** (which rows are reranked), which can change the top-`k`. So per-shard bootstrap makes sharding **not** a layout: the same corpus on 1 vs 4 shards would answer differently, through the codebook.
@@ -1054,3 +1054,42 @@ that evidence.
   expected repository/workflow/tag identity and issuer checks, then allows
   only an explicitly promoted digest. A correct signature proves origin; it
   does not authorize every correctly built development version.
+
+## D-088 — The shard boundary is read-only, mutual TLS, and bounded before it is distributed
+
+**S12 HA/transport increment 1.** A transport that simply exposes `Engine`
+methods over a socket would widen three trust boundaries at once: identity,
+allocation, and durability. The first remote surface therefore carries only
+the existing deterministic query fragments and makes every other capability
+absent.
+
+- **Mutual TLS is the only production door.** A shard requires a client
+  certificate from a dedicated coordinator CA. A coordinator requires the
+  shard CA and verifies the configured shard DNS name. There is no insecure or
+  server-auth-only constructor. `rustls 0.23.35` declares a Rust 1.71 MSRV,
+  below PrismDB's declared Rust 1.75 floor, and unlike the existing
+  `native-tls` server surface can require client certificates. The first 0.21
+  implementation was rejected before merge when `cargo audit` found advisories
+  in its ring/webpki dependency line. TLS remains the security exception to the
+  dependency-light charter; implementing it by hand is rejected.
+- **The envelope is explicit and bounded.** Version, request id, and target
+  shard are mandatory. One connection carries one four-byte-length-prefixed
+  JSON request and response, capped at 16 MiB before allocation. Selected-row
+  lists cap at 10,000, deadlines cap at 60 seconds, and the listener caps
+  concurrent handshakes/requests at 64. Local certificate, CA, and key inputs
+  cap at 4 MiB before allocation.
+- **The boundary is read-only by construction.** Health, snapshot, candidates,
+  rerank, and materialize are present. Ingest, ownership, publication, and
+  recovery are not protocol variants. Cross-node takeover cannot land until
+  the admission log is remote-durable; otherwise a new node could not honor an
+  ack for a batch that died with the old node.
+- **What is proven.** The real TLS client/server gate drives every query
+  fragment, rejects an untrusted coordinator, rejects a valid server at the
+  wrong DNS name, bounds a half-open connection by deadline, and rejects an
+  oversized frame from its prefix. `prism shard-serve` makes the server an
+  executable production surface with hardened key-file checks.
+- **What remains.** `sharded::Cluster` still uses local engines directly.
+  Routing that coordinator through `TlsShardClient`, then running real
+  partition/hedge/scaling campaigns is the next read-HA increment.
+  Remote-durable WAL replication and cross-node write failover remain a
+  separate durability increment. See [SHARD-TRANSPORT.md](SHARD-TRANSPORT.md).

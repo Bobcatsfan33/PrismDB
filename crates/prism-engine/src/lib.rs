@@ -29,6 +29,7 @@ pub mod rowsource;
 pub mod sample;
 pub mod scheduler;
 pub mod search;
+pub mod shard_rpc;
 pub mod sharded;
 pub mod source;
 pub mod sql;
