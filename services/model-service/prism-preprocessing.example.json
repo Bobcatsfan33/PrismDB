@@ -1,0 +1,8 @@
+{
+  "format_version": 1,
+  "backend": "text-embeddings-inference",
+  "truncate": true,
+  "normalize": true,
+  "max_input_bytes": 32768,
+  "prompt": null
+}

@@ -1,5 +1,7 @@
 /target
 **/*.rs.bk
+__pycache__/
+*.py[cod]
 
 # Quickstart scratch (created by scripts/check-readme-quickstart.sh)
 /demo

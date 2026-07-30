@@ -23,6 +23,25 @@ Sprint gates from [PRISM.md](PRISM.md) Part IV. **A sprint is done when its gate
 | S16 | Competitive benchmark + recall contract | third-party reproducible; SLOs name recall and cost, not latency alone; **losses published** | ⬜ |
 | S17 | Beachhead product completion | partners query full telemetry with no application-side joins; operators complete drills from docs alone | ⬜ |
 
+### S13 increment 2 — deployable model identity gateway
+
+[`services/model-service`](../services/model-service) is now the runnable
+server side of D-084. It independently verifies every explicitly enumerated
+weights/tokenizer/preprocessing byte before readiness, fronts a colocated
+loopback-only Text Embeddings Inference GPU process, authorizes Unix clients by
+Linux peer credentials, and gates health on a real dimension-checked warmup.
+Malformed backend output fails the complete affected batch closed while
+preserving protocol cardinality. Its container is dependency-free and
+non-root; the release build requires an approved digest-pinned base.
+
+This closes the missing executable inference boundary, but it does **not**
+close S13: a release image still needs SBOM/signature/provenance publication
+and a real GPU runner; tenant model authorization, redact-before-embedding,
+rate/cost controls, cache, and calibrated drift/OOD remain. Kubernetes
+autoscaling belongs to the long-running S14 API workload that will own these
+native sidecars; the current PrismDB executable is a CLI, and is not described
+as a server.
+
 ---
 
 ## S0 — complete

@@ -1,0 +1,19 @@
+{
+  "registry_path": "/etc/prism/model-registry.json",
+  "socket_path": "/run/prism/model.sock",
+  "socket_mode": "0660",
+  "allowed_peer_uids": [65532],
+  "request_timeout_ms": 5000,
+  "max_concurrency": 8,
+  "models": [
+    {
+      "model_id": "replace-with-approved-model-id",
+      "model_version": "b5f4f9bcd7631a0cbb72e9a434602fd651edef027ac0dd595d36768ee01b7483",
+      "model_root": "/models/approved",
+      "weights": ["model.safetensors"],
+      "tokenizer": ["tokenizer.json"],
+      "preprocessing": ["prism-preprocessing.json"],
+      "backend_url": "http://127.0.0.1:8080"
+    }
+  ]
+}

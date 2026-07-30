@@ -946,3 +946,42 @@ valid and be wrong.
   GPU service and its autoscaling/health implementation remain the next S13
   increment, along with tenant policy, redaction, rate/cost controls, cache,
   and calibrated drift/OOD alarms.
+
+## D-085 — The GPU runtime is untrusted and colocated; a dependency-free gateway owns identity
+
+**S13 production-plane increment 2.** The Rust client contract in D-084 cannot
+prove what bytes a GPU runtime loaded merely because that runtime echoes a
+model name. The executable boundary is therefore split in two: an established
+Text Embeddings Inference (TEI) process owns CUDA, dynamic batching, and model
+execution, while PrismDB's small dependency-free gateway owns artifact
+verification, identity, and the Unix protocol.
+
+- **The gateway verifies bytes, not tags.** It streams explicitly enumerated
+  weights, tokenizer, and preprocessing files through a framed SHA-256 tree
+  digest before binding its socket. Paths are normalized, relative, unique,
+  regular, beneath the approved root, and not symlinks. The resulting tuple
+  must equal the Rust registry and derive the same full `model_version`.
+- **Preprocessing is an artifact.** The one preprocessing manifest must
+  exactly declare the supported TEI backend, truncation, normalization,
+  32-KiB input bound, and absence of an implicit prompt. This keeps a
+  deployment flag from silently changing the score space while the weights
+  stay constant.
+- **The backend is pod-local.** Only explicit loopback HTTP endpoints are
+  accepted. Runtime egress is a deployment error, and a production TEI image
+  and gateway base must be pinned by digest. The model directory is mounted
+  read-only into both processes; TEI may crash without entering the database
+  address space.
+- **Readiness spends a real inference.** Registry, artifact bytes, TEI health,
+  and a real dimension/finiteness/norm-checked warmup all pass before the Unix
+  socket exists. A wrong mount or dead GPU therefore cannot produce a green
+  ready state.
+- **The local socket is still an authorization boundary.** Linux
+  `SO_PEERCRED` admits only configured UIDs; socket mode grants no `other`
+  access; request concurrency, bytes, time, batch cardinality, dimensions,
+  finiteness, and norm are all bounded. Inputs are never logged.
+- **Autoscaling is not claimed yet.** PrismDB is currently a one-shot CLI, not
+  a long-running API workload. A Kubernetes sidecar/HPA artifact before S14's
+  service exists would autoscale no product. S13 therefore ships a runnable,
+  containerized gateway and explicit operations contract; the API workload,
+  sidecar lifecycle, GPU load gate, signed image/SBOM/provenance, and HPA/PDB
+  become the next deployment increment rather than a misleading YAML file.
