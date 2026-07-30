@@ -46,8 +46,11 @@ and recomputes global top-k.
 This section supersedes the S12 table row's earlier transport-wall wording.
 S12 remains 🟡 because deterministic localhost partition correctness is not an
 independent-host 1→4 scaling result or a latency/jitter/async-hedge campaign.
-Cross-node write failover is still blocked on a remote-durable admission log
-and deliberately absent from the protocol.
+The remote-durable admission log is now implemented as S14 increment 2
+([D-091](DECISIONS.md)): immutable object-store records carry the ownership
+epoch, are read back before the acknowledgement boundary, and are recovered
+on a replacement node from a separate hot tier. The authenticated write RPC
+and public ingest route remain deliberately absent from protocol v2.
 
 ### S13 increment 2 — deployable model identity gateway
 
@@ -123,6 +126,25 @@ network selectors. The distroless image is built from pinned bases and the
 attestation, provenance, and a digest receipt. This closes the read-service
 engineering increment, not S14 or product approval; the write, encryption,
 recovery, load/SLO, independent security, and organizational gates remain.
+
+### S14 increment 2 — remote-durable admission and replacement-node recovery
+
+[`wal.rs`](../crates/prism-engine/src/wal.rs) now extends the local framed WAL
+with create-only object-store admission records. Ownership epochs occupy the
+high half of each record ID, so a replacement writer's records remain strictly
+after the writer it fenced and the atomic snapshot WAL floor stays valid.
+Every append resolves CAS ambiguity and reads back exact bytes before the
+durability boundary; recovery rejects any local/remote disagreement.
+
+The permanent cross-node gate uses distinct node directories over one durable
+backend. Node A dies after the local+remote WAL boundary and before catalog
+publication. Node B takes a higher ownership epoch, recovers the acknowledged
+record without node A's disk, answers byte-identically to an independent
+publication, and fences the old writer. A persistent remote outage is proven
+to fail before any durable acknowledgement. This closes the admission-log
+prerequisite, not the public write product: authenticated shard ingest, public
+tenant injection, write metrics, already-published-part backup/hydration,
+retention, and production RPO/RTO evidence remain open.
 
 ---
 

@@ -96,6 +96,15 @@ impl Engine {
         crate::storage::ownership::assert_owner(self.cold.backend().as_ref(), held)
     }
 
+    /// The ownership epoch held by this process, or `0` before ownership is acquired.
+    ///
+    /// The replicated admission log uses this value as the high half of its record IDs, so a
+    /// replacement writer's WAL records are ordered strictly after every record admitted by the
+    /// writer it fenced.
+    pub fn ownership_epoch(&self) -> u64 {
+        self.owner_epoch.load(Ordering::SeqCst)
+    }
+
     pub fn with_plane(mut self, plane: Arc<dyn ModelPlane>) -> Self {
         self.plane = plane;
         self
