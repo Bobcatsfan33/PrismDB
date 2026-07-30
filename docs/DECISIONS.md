@@ -1167,3 +1167,35 @@ This decision closes the supported public **read** boundary only. A public
 write service, replicated admission log and failover, envelope encryption,
 backup/restore, independent-host scale/chaos, load-derived SLO, and external
 penetration test remain explicit deployment blockers.
+
+## D-091 — Cross-node acknowledgement requires an immutable remote admission record
+
+**S14 production-service increment 2.** A local `fsync` can keep a process-restart promise but
+cannot keep a node-loss promise. Replicated mode therefore extends D-068's acknowledgement point:
+the exact admission record must exist both in the local framed WAL and as a create-only object in
+the shard's authoritative object store before the path proceeds.
+
+- **Record identity carries the ownership fence.** The high 32 bits are the monotonic ownership
+  epoch and the low 32 bits are that owner's sequence. A replacement owner's first record is
+  therefore later than every record from the writer it fenced, preserving D-077's single
+  `applied_wal_record` floor without a second progress protocol.
+- **Remote success is read-back evidence.** Each immutable
+  `wal/shard-N/records/<record-id>.json` object is CAS-created. An identical existing object is an
+  idempotent retry; different bytes at the same ID are a named invariant failure. The writer reads
+  the exact bytes back before treating the append as durable.
+- **Recovery takes the verified union.** A replacement node merges local and remote records by ID,
+  rejects any byte-level disagreement, and reuses the normal publish/reconcile path. The remote log
+  is retained after publication; deletion is deliberately deferred until backup retention and
+  recovery-depth policy can prove an object is no longer required.
+- **A takeover is fail-named.** Ownership is checked before allocation, after the remote round
+  trip, and again at catalog publication. A superseded process cannot acknowledge or publish a new
+  request. A record durably written just before the fence may be recovered by the new owner, which
+  is the normal outcome for a request whose response was lost.
+
+The permanent gate uses two independent hot-tier directories over one object store: node A writes
+the local and remote admission record and dies before catalog publication; node B acquires a higher
+epoch, reconstructs the acknowledged data from the remote WAL, answers byte-identically to an
+independent publication, and fences node A. A persistent remote outage fails before the durable
+acknowledgement point. Restoring already-published hot parts requires the separate backup/hydration
+workflow. Public ingest and the authenticated write RPC remain the next increment; no public write
+claim is made here.

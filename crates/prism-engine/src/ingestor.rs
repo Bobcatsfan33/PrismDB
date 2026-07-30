@@ -23,12 +23,14 @@ use crate::admission::{self, KeyDictionary, QuotaEnforcer};
 use crate::engine::Engine;
 use crate::idempotency::{IdempotencyIndex, Verdict};
 use crate::source::Source;
-use crate::wal::{Wal, WalRecord};
-use prism_types::error::Result;
+use crate::wal::{RemoteWal, Wal, WalRecord};
+use prism_types::error::{PrismError, Result};
 use prism_types::event::{DeadLetter, Event};
 use prism_types::limits::RejectReason;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct IngestReport2 {
@@ -60,6 +62,7 @@ pub struct Ingestor {
     pub quotas: QuotaEnforcer,
     dict_path: PathBuf,
     idem_path: PathBuf,
+    remote_wal: Option<RemoteWal>,
 }
 
 impl Ingestor {
@@ -72,8 +75,22 @@ impl Ingestor {
             quotas: QuotaEnforcer::new(),
             dict_path: root.join("admission/key-dictionary.json"),
             idem_path: root.join("admission/idempotency.json"),
+            remote_wal: None,
             engine,
         })
+    }
+
+    /// Open the cross-node write path.
+    ///
+    /// Ownership is acquired before the remote log is used. The ownership epoch becomes part of
+    /// every WAL record ID, and every accepted batch must be durable both locally and in the
+    /// authoritative object store before the write path proceeds past its acknowledgement point.
+    pub fn open_replicated(engine: Engine, shard_id: usize) -> Result<Self> {
+        engine.acquire_ownership()?;
+        let remote_wal = RemoteWal::new(Arc::clone(engine.cold.backend()), shard_id);
+        let mut ingestor = Self::open(engine)?;
+        ingestor.remote_wal = Some(remote_wal);
+        Ok(ingestor)
     }
 
     pub fn key_dictionary(&self) -> Result<KeyDictionary> {
@@ -107,7 +124,7 @@ impl Ingestor {
         let floor = self.engine.snapshot()?.applied_wal_record;
         let mut reports = Vec::new();
 
-        for rec in self.wal.read_all()? {
+        for rec in self.admission_records()? {
             let applied = matches!(floor, Some(f) if rec.record_id <= f);
             if applied {
                 self.reconcile_applied(&rec)?;
@@ -122,6 +139,30 @@ impl Ingestor {
         let floor = self.engine.snapshot()?.applied_wal_record;
         self.wal.compact_through(floor)?;
         Ok(reports)
+    }
+
+    fn admission_records(&self) -> Result<Vec<WalRecord>> {
+        let mut records = BTreeMap::new();
+        for record in self.wal.read_all()? {
+            records.insert(record.record_id, record);
+        }
+        if let Some(remote) = &self.remote_wal {
+            for record in remote.read_all()? {
+                match records.get(&record.record_id) {
+                    Some(local) if local != &record => {
+                        return Err(PrismError::Corrupt(format!(
+                            "local and replicated admission WAL differ for record {}",
+                            record.record_id
+                        )))
+                    }
+                    Some(_) => {}
+                    None => {
+                        records.insert(record.record_id, record);
+                    }
+                }
+            }
+        }
+        Ok(records.into_values().collect())
     }
 
     /// Reconcile the client-facing state of a WAL record the snapshot has **already applied** but a
@@ -232,12 +273,29 @@ impl Ingestor {
         }
 
         // --- 3. the durable admission log. THIS IS THE ACK POINT. ---
-        let record_id = self.wal.append(
-            accepted.clone(),
-            source.map(|s| s.name().to_string()),
-            next_offset,
-            now_ms,
-        )?;
+        let source_name = source.map(|s| s.name().to_string());
+        let record_id = if let Some(remote) = &self.remote_wal {
+            self.engine.assert_write_owner()?;
+            let local = self.wal.read_all()?;
+            let record_id = remote.next_record_id(self.engine.ownership_epoch(), &local)?;
+            let record = WalRecord {
+                record_id,
+                events: accepted.clone(),
+                source: source_name.clone(),
+                source_offset: next_offset,
+                created_at_ms: now_ms,
+            };
+            self.wal.append_record(&record)?;
+            remote.append(&record)?;
+            // A replacement may have acquired the shard during the remote round trip. Such a
+            // request is not acknowledged by this node; the replacement will recover the durable
+            // record, while this stale writer is forbidden from publishing it.
+            self.engine.assert_write_owner()?;
+            record_id
+        } else {
+            self.wal
+                .append(accepted.clone(), source_name.clone(), next_offset, now_ms)?
+        };
         report.wal_record = Some(record_id);
 
         // From here on the events are *guaranteed*. If we die, recovery replays them.
@@ -246,7 +304,7 @@ impl Ingestor {
         let rec = WalRecord {
             record_id,
             events: accepted,
-            source: source.map(|s| s.name().to_string()),
+            source: source_name,
             source_offset: next_offset,
             created_at_ms: now_ms,
         };
