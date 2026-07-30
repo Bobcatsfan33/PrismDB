@@ -46,7 +46,7 @@ spec:
           image: "{{ .Values.image.repository }}@{{ .Values.image.digest }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
-            - read-serve
+            - serve
             - --listen
             - "0.0.0.0:{{ .Values.service.port }}"
             - --topology

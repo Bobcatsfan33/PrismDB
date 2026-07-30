@@ -261,6 +261,48 @@
       "upstream": []
     },
     {
+      "name": "MAX_EVENT_ID_BYTES",
+      "value": 256,
+      "kind": "policy",
+      "rationale": "docs/INGESTION-CONTRACT.md §2 Identity bytes are bounded -- event identity is durable index material, not an unbounded payload.",
+      "upstream": []
+    },
+    {
+      "name": "MAX_TENANT_ID_BYTES",
+      "value": 128,
+      "kind": "policy",
+      "rationale": "docs/INGESTION-CONTRACT.md §2 Identity bytes are bounded -- tenant identity is carried through routing, policy, indexes, and audit records.",
+      "upstream": []
+    },
+    {
+      "name": "MAX_EVENT_NAME_BYTES",
+      "value": 256,
+      "kind": "policy",
+      "rationale": "docs/INGESTION-CONTRACT.md §2 Identity bytes are bounded -- an event name is a classification identifier, not a document body.",
+      "upstream": []
+    },
+    {
+      "name": "MAX_TRACE_ID_BYTES",
+      "value": 128,
+      "kind": "policy",
+      "rationale": "docs/INGESTION-CONTRACT.md §2 Identity bytes are bounded -- the cap accommodates standard trace identifiers while bounding stored correlation metadata.",
+      "upstream": []
+    },
+    {
+      "name": "MAX_SPAN_ID_BYTES",
+      "value": 64,
+      "kind": "policy",
+      "rationale": "docs/INGESTION-CONTRACT.md §2 Identity bytes are bounded -- the cap accommodates standard span identifiers while bounding stored correlation metadata.",
+      "upstream": []
+    },
+    {
+      "name": "MAX_IDEMPOTENCY_KEY_BYTES",
+      "value": 256,
+      "kind": "policy",
+      "rationale": "docs/INGESTION-CONTRACT.md §2 Identity bytes are bounded -- retry keys occupy the durable idempotency index and must pay a bounded admission cost.",
+      "upstream": []
+    },
+    {
       "name": "MAX_EMBED_INPUT_BYTES",
       "value": 32768,
       "kind": "policy",

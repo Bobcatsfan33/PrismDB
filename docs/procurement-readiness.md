@@ -7,12 +7,12 @@ production-approved.
 
 The current decision is **not approved**, and PrismDB as a whole is **not yet a software release
 candidate**. The signed model-service image, mTLS remote coordinator, and authenticated `prismd`
-read-service distribution are strong component artifacts. The read API now has exact-certificate
-tenant policy, bounded requests, metrics, a hardened Helm chart, and a signed-image release path.
-The admission log is now remote-durable and replacement-node recovery is gated, but it is not yet
-reachable through an authenticated shard/public write API. These components do not turn the
-database core into a complete supported product: a public write plane and shard distribution,
-encryption and key lifecycle, backup and RPO/RTO, load-derived SLOs, independent-host
+API distribution are strong component artifacts. The public API now has exact-certificate tenant
+policy, bounded requests, metrics, a hardened Helm chart, and a signed-image release path.
+The admission log is remote-durable, replacement-node recovery is gated, and the authenticated
+public ingest path injects tenant identity above a replicated-only shard RPC. These components do
+not turn the database core into a complete supported product: a supported shard-node distribution,
+encryption and key lifecycle, backup/hydration and RPO/RTO, load-derived SLOs, independent-host
 scaling/fault evidence, independent penetration testing, support, and organizational assurance
 remain required.
 

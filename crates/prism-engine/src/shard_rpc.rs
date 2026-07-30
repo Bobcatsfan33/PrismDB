@@ -1,11 +1,11 @@
 //! Authenticated coordinator↔shard transport.
 //!
 //! The wire is deliberately small: one mutual-TLS connection carries one bounded,
-//! length-prefixed JSON request and one response. The operations are read-only and
-//! mirror the three fragment calls used by [`crate::sharded::Cluster`]. A remote
-//! mutation or ownership takeover is intentionally absent until the admission log is
-//! remote-durable; exposing writes here would weaken the ack contract.
+//! length-prefixed JSON request and one response. Read operations mirror the fragment calls used
+//! by [`crate::sharded::Cluster`]. Ingest is available only on a server constructed with the
+//! remote-durable admission log; the read-only constructor remains incapable of mutation.
 
+use crate::ingestor::{IngestReport2, Ingestor};
 use crate::search::{ShardCandidate, ShardScored};
 use crate::sharded::{Cluster, ReadShard};
 use crate::Engine;
@@ -25,13 +25,14 @@ use std::io::{Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-pub const SHARD_RPC_PROTOCOL_VERSION: u16 = 2;
+pub const SHARD_RPC_PROTOCOL_VERSION: u16 = 3;
 pub const MAX_SHARD_RPC_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_SHARD_RPC_SELECTIONS: usize = 10_000;
 pub const MAX_SHARD_RPC_CONNECTIONS: usize = 64;
+pub const MAX_SHARD_RPC_EVENTS: usize = 1_000;
 pub const MAX_REMOTE_READ_SHARDS: usize = 256;
 pub const MAX_REMOTE_TOPOLOGY_BYTES: u64 = 1024 * 1024;
 pub const MAX_SHARD_RPC_TLS_FILE_BYTES: u64 = 4 * 1024 * 1024;
@@ -75,6 +76,10 @@ enum RpcOperation {
         snapshot: Snapshot,
         selected: Vec<(String, usize)>,
     },
+    Ingest {
+        events: Vec<Event>,
+        now_ms: i64,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -102,6 +107,7 @@ enum RpcPayload {
     Candidates(Vec<ShardCandidate>),
     Rerank(Vec<ShardScored>),
     Materialize(Vec<(Event, u32)>),
+    Ingest(IngestReport2),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -110,6 +116,7 @@ pub struct ShardHealth {
     pub shard_id: usize,
     pub snapshot_id: String,
     pub store_config: StoreConfig,
+    pub writable: bool,
 }
 
 fn transport_error(context: &str, error: impl std::fmt::Display) -> PrismError {
@@ -322,6 +329,7 @@ pub struct ShardRpcServer {
     engine: Arc<Engine>,
     tls: Arc<ServerConfig>,
     timeout: Duration,
+    writer: Option<Arc<Mutex<Ingestor>>>,
 }
 
 impl ShardRpcServer {
@@ -337,6 +345,25 @@ impl ShardRpcServer {
             engine,
             tls,
             timeout,
+            writer: None,
+        })
+    }
+
+    /// Construct a shard endpoint whose mutation door is backed by the replicated admission log.
+    pub fn new_replicated_writer(
+        shard_id: usize,
+        ingestor: Ingestor,
+        tls: Arc<ServerConfig>,
+        timeout: Duration,
+    ) -> Result<Self> {
+        validate_timeout(timeout)?;
+        let engine = Arc::clone(&ingestor.engine);
+        Ok(Self {
+            shard_id,
+            engine,
+            tls,
+            timeout,
+            writer: Some(Arc::new(Mutex::new(ingestor))),
         })
     }
 
@@ -448,6 +475,7 @@ impl ShardRpcServer {
                 shard_id: self.shard_id,
                 snapshot_id: self.engine.snapshot()?.snapshot_id,
                 store_config: self.engine.store.config.clone(),
+                writable: self.writer.is_some(),
             })),
             RpcOperation::Snapshot => Ok(RpcPayload::Snapshot(self.engine.snapshot()?)),
             RpcOperation::SnapshotById { snapshot_id } => {
@@ -485,6 +513,31 @@ impl ShardRpcServer {
                 validate_selection_in_snapshot(&snapshot, &selected)?;
                 Ok(RpcPayload::Materialize(
                     self.engine.search_materialize(&selected)?,
+                ))
+            }
+            RpcOperation::Ingest { events, now_ms } => {
+                if events.is_empty() || events.len() > MAX_SHARD_RPC_EVENTS {
+                    return Err(invalid_transport(format!(
+                        "ingest batch needs 1..={MAX_SHARD_RPC_EVENTS} events"
+                    )));
+                }
+                let tenant = &events[0].tenant_id;
+                if tenant.is_empty() || events.iter().any(|event| event.tenant_id != *tenant) {
+                    return Err(invalid_transport(
+                        "ingest batch must contain one non-empty tenant",
+                    ));
+                }
+                let writer = self.writer.as_ref().ok_or_else(|| {
+                    PrismError::Policy(
+                        "shard RPC ingest is disabled because this endpoint has no replicated WAL"
+                            .into(),
+                    )
+                })?;
+                let mut writer = writer.lock().map_err(|_| {
+                    PrismError::Invariant("shard RPC ingest lock was poisoned".into())
+                })?;
+                Ok(RpcPayload::Ingest(
+                    writer.ingest(events, None, None, now_ms)?,
                 ))
             }
         }
@@ -668,6 +721,18 @@ impl TlsShardClient {
         }
     }
 
+    pub fn ingest(&self, events: Vec<Event>, now_ms: i64) -> Result<IngestReport2> {
+        if events.is_empty() || events.len() > MAX_SHARD_RPC_EVENTS {
+            return Err(invalid_transport(format!(
+                "ingest batch needs 1..={MAX_SHARD_RPC_EVENTS} events"
+            )));
+        }
+        match self.call(RpcOperation::Ingest { events, now_ms })? {
+            RpcPayload::Ingest(report) => Ok(report),
+            _ => Err(invalid_transport("ingest returned the wrong payload type")),
+        }
+    }
+
     fn call(&self, operation: RpcOperation) -> Result<RpcPayload> {
         let request_id = format!(
             "{}-{}",
@@ -844,6 +909,7 @@ pub struct RemoteReadCluster {
     scheme: PartitionScheme,
     dim: usize,
     seed: u64,
+    writable: Vec<bool>,
 }
 
 impl RemoteReadCluster {
@@ -911,6 +977,7 @@ impl RemoteReadCluster {
             scheme: config.partitions,
             dim: config.dim,
             seed: config.seed,
+            writable: health.iter().map(|item| item.writable).collect(),
         })
     }
 
@@ -932,7 +999,7 @@ impl RemoteReadCluster {
     /// The public service calls this from readiness rather than treating a successful startup
     /// preflight as permanent. A partition therefore removes the pod from ready endpoints before
     /// callers receive a plausibly healthy but incomplete service.
-    pub fn readiness(&self) -> Result<()> {
+    pub fn readiness(&self, require_writable: bool) -> Result<()> {
         let health_results: Vec<Result<ShardHealth>> = std::thread::scope(|scope| {
             let handles: Vec<_> = self
                 .shards
@@ -959,9 +1026,15 @@ impl RemoteReadCluster {
                 || health.store_config.dim != self.dim
                 || health.store_config.seed != self.seed
                 || health.store_config.partitions != self.scheme
+                || health.writable != self.writable[shard_id]
             {
                 return Err(PrismError::Invariant(format!(
-                    "remote shard {shard_id} failed readiness identity/configuration validation"
+                    "remote shard {shard_id} failed readiness identity/configuration/mode validation"
+                )));
+            }
+            if require_writable && !health.writable {
+                return Err(PrismError::Policy(format!(
+                    "remote shard {shard_id} is read-only while the public policy grants ingest"
                 )));
             }
         }
@@ -1025,6 +1098,28 @@ impl RemoteReadCluster {
 
         Cluster::coordinate_cross_shard(&self.shards, self.dim, self.seed, &vector, query, missing)
     }
+
+    /// Route a single-tenant batch to its authenticated writable shard.
+    pub fn ingest(&self, events: Vec<Event>, now_ms: i64) -> Result<IngestReport2> {
+        if events.is_empty() || events.len() > MAX_SHARD_RPC_EVENTS {
+            return Err(invalid_transport(format!(
+                "ingest batch needs 1..={MAX_SHARD_RPC_EVENTS} events"
+            )));
+        }
+        let tenant = events[0].tenant_id.clone();
+        if tenant.is_empty() || events.iter().any(|event| event.tenant_id != tenant) {
+            return Err(invalid_transport(
+                "coordinator ingest batch must contain exactly one non-empty tenant",
+            ));
+        }
+        let shard_id = self.shard_index(&tenant);
+        if !self.writable[shard_id] {
+            return Err(PrismError::Policy(format!(
+                "remote shard {shard_id} is read-only; replicated WAL ingest is required"
+            )));
+        }
+        self.shards[shard_id].ingest(events, now_ms)
+    }
 }
 
 fn resolve_address(address: &str) -> Result<SocketAddr> {
@@ -1040,6 +1135,8 @@ fn resolve_address(address: &str) -> Result<SocketAddr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::object::{CachedObjectStore, LocalObjectStore, ObjectStore};
+    use crate::storage::CACHE_QUOTA_BYTES;
     use prism_part::partition::PartitionScheme;
     use prism_part::store::{StoreConfig, STORE_VERSION};
     use std::path::PathBuf;
@@ -1367,7 +1464,91 @@ mod tests {
         assert_eq!(health.protocol_version, SHARD_RPC_PROTOCOL_VERSION);
         assert_eq!(health.shard_id, 7);
         assert!(!health.snapshot_id.is_empty());
+        assert!(!health.writable);
         server.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn read_only_server_refuses_ingest_by_construction() {
+        let (tls, _, _) = tls_pair();
+        let server = ShardRpcServer::new(7, engine(), tls, Duration::from_millis(500)).unwrap();
+        let error = server
+            .process(RpcRequest {
+                version: SHARD_RPC_PROTOCOL_VERSION,
+                request_id: "no-write".into(),
+                target_shard: 7,
+                operation: RpcOperation::Ingest {
+                    events: vec![event("e1", "payment timeout")],
+                    now_ms: 2,
+                },
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("disabled"), "{error}");
+        assert!(error.contains("replicated WAL"), "{error}");
+    }
+
+    #[test]
+    fn authenticated_remote_ingest_uses_the_replicated_wal() {
+        let root = temp("write-node");
+        let remote_root = temp("write-remote");
+        fs::create_dir_all(&remote_root).unwrap();
+        let backend: Arc<dyn ObjectStore> = Arc::new(LocalObjectStore::new(&remote_root));
+        let raw_engine = Engine::init(
+            &root,
+            StoreConfig {
+                format_version: STORE_VERSION,
+                dim: 8,
+                nlist: 2,
+                pq_m: 2,
+                seed: 42,
+                kmeans_restarts: 2,
+                block_size: 4096,
+                partitions: PartitionScheme::default(),
+                promote: Vec::new(),
+            },
+        )
+        .unwrap()
+        .with_cold(Arc::new(CachedObjectStore::new(
+            Arc::clone(&backend),
+            CACHE_QUOTA_BYTES,
+        )));
+        let ingestor = Ingestor::open_replicated(raw_engine, 0).unwrap();
+        let engine = Arc::clone(&ingestor.engine);
+        let (server_tls, client_tls, _) = tls_pair();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server =
+            ShardRpcServer::new_replicated_writer(0, ingestor, server_tls, Duration::from_secs(2))
+                .unwrap();
+        let handle = std::thread::spawn(move || server.serve_connections(listener, 2));
+        let cluster = RemoteReadCluster::connect(
+            RemoteReadTopology {
+                version: 1,
+                shards: vec![RemoteShardEndpoint {
+                    shard_id: 0,
+                    address: address.to_string(),
+                    server_name: "shard.test".into(),
+                }],
+            },
+            client_tls,
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        let report = cluster
+            .ingest(vec![event("e1", "payment timeout")], 2)
+            .unwrap();
+        assert_eq!(report.published, 1);
+        assert!(report.wal_record.unwrap() >= 1u64 << 32);
+        assert!(!engine.snapshot().unwrap().parts.is_empty());
+        assert_eq!(
+            backend.list("wal/shard-0/records/").unwrap().len(),
+            1,
+            "the network write must leave a remote-durable admission record"
+        );
+        handle.join().unwrap().unwrap();
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(remote_root);
     }
 
     #[test]
@@ -1479,10 +1660,14 @@ mod tests {
 
     #[test]
     fn remote_coordinator_is_byte_identical_to_the_in_process_cluster() {
-        let (root, expected, topology, client_tls, servers) = two_shard_fixture([6, 6]);
+        let (root, expected, topology, client_tls, servers) = two_shard_fixture([8, 8]);
         let remote =
             RemoteReadCluster::connect(topology, client_tls, Duration::from_millis(500)).unwrap();
         assert_eq!(remote.num_shards(), 2);
+        remote.readiness(false).unwrap();
+        let error = remote.readiness(true).unwrap_err().to_string();
+        assert!(error.contains("read-only"), "{error}");
+        assert!(error.contains("policy grants ingest"), "{error}");
         let actual = remote
             .search(&Query {
                 text: "payment service".into(),

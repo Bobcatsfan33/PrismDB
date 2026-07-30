@@ -1,21 +1,22 @@
 # Coordinator-to-shard transport
 
-PrismDB's first real node boundary is a read-only shard RPC service and remote
-coordinator. The coordinator routes tenant-scoped reads to the owning shard and
+PrismDB's node boundary is an mTLS shard RPC service and remote coordinator.
+The coordinator routes tenant-scoped reads and writes to the owning shard and
 carries the three operations used by a cross-tenant two-round query:
 
 1. candidate discovery against an explicitly pinned snapshot;
 2. exact reranking of the coordinator-selected rows; and
 3. materialization of the final survivors.
 
-It also exposes health, exact catalog snapshot discovery/validation, and a
-complete read against a pinned snapshot. Protocol v2 binds every
+It also exposes health, exact catalog snapshot discovery/validation, a
+complete read against a pinned snapshot, and bounded single-tenant ingest.
+Protocol v3 binds every
   coordinator-supplied snapshot to the shard's immutable catalog bytes before it
   is used, and every rerank/materialize part handle must belong to that pinned
-  snapshot. It does **not** expose ingest, catalog publication, ownership
-acquisition, or recovery. Those mutations remain local until the admission log
-is remote-durable, because allowing another node to take over without the
-acknowledged-but-unpublished records would weaken the ack contract.
+  snapshot. Ingest exists only when the server is constructed with an
+object-store-backed replicated WAL and has acquired the shard ownership epoch.
+The protocol does not expose arbitrary catalog publication, ownership
+acquisition, recovery controls, or WAL record IDs.
 
 ## Security and resource contract
 
@@ -40,11 +41,13 @@ acknowledged-but-unpublished records would weaken the ack contract.
   and promoted columns must agree.
 - Frames are four-byte big-endian length-prefixed JSON and are rejected before
   allocation above 16 MiB. Rerank/materialize selections are capped at 10,000
-  rows. Socket deadlines are mandatory and bounded to 10 ms–60 s.
+  rows and ingest batches at 1,000 events. Socket deadlines are mandatory and
+  bounded to 10 ms–60 s.
 - The production listener caps concurrent TLS handshakes and requests at 64.
   Excess connections are closed rather than spawning unbounded work.
-- One connection carries one request and one response. All current operations
-  are deterministic reads against pinned state and can be retried safely.
+- One connection carries one request and one response. Reads are deterministic
+  against pinned state. Ingest retries rely on the existing per-tenant
+  idempotency-key contract and return duplicate suppression explicitly.
 
 ## Run a shard endpoint
 
@@ -59,12 +62,16 @@ prism shard-serve \
   --cert /run/prism-tls/shard-chain.pem \
   --key /run/prism-tls/shard-key.pem \
   --client-ca /run/prism-tls/coordinator-ca.pem \
-  --timeout-ms 5000
+  --timeout-ms 5000 \
+  --write-enabled true
 ```
 
-The command opens the normal production model and object-store configuration
-before listening, emits a JSON startup record, and then serves. Port `0` is
-refused outside the deterministic test harness.
+The command opens the normal production model and object-store configuration,
+recovers the replicated admission log, emits a JSON startup record, and then
+serves. Write mode requires `PRISM_S3_ENDPOINT`; the local object store is
+refused because it cannot survive node loss. Omitting `--write-enabled true`
+preserves the read-only server. Port `0` is refused outside the deterministic
+test harness.
 
 Rotate certificates with an overlap window: distribute the new CA bundle,
 rotate leaf identities, prove every peer is using the new chain, then remove the
@@ -119,7 +126,9 @@ answer. Partial semantic `GROUP BY` remains refused.
 The permanent gate proves:
 
 - a trusted coordinator completes health, catalog-bound snapshot operations,
-  full tenant reads, and all three cross-shard query fragments;
+  full tenant reads, all three cross-shard query fragments, and a
+  remote-durable tenant ingest;
+- a read-only endpoint refuses ingest by construction;
 - an untrusted coordinator certificate is rejected;
 - a valid certificate for the wrong shard DNS name is rejected;
 - a half-open peer hits the configured read deadline; and
@@ -131,9 +140,8 @@ The permanent gate proves:
   best-effort, refuses partial grouping, and recomputes top-k when loss occurs
   during materialization.
 
-The authenticated multi-node read path is now wired. Remaining read-HA evidence
+The authenticated multi-node read/write path is now wired. Remaining HA evidence
 is sustained 1→4 node scaling on independent hosts and timer-driven asynchronous
 hedging under latency/jitter, not an in-process or deterministic partition seam.
-Cross-node write failover remains a separate durability increment behind a
-remote-durable admission log. This CLI is an operator/query surface, not S14's
-public authenticated API service.
+Already-published hot-part restoration remains behind the backup/hydration
+increment. The public authenticated API is documented separately.

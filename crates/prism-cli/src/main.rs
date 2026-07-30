@@ -35,14 +35,14 @@ USAGE:
                   replay every acknowledged-but-unpublished batch from the WAL
   prism shard-serve --path <dir> --listen <ip:port> --shard-id <n>
                     --cert <chain.pem> --key <key.pem> --client-ca <ca.pem>
-                    [--timeout-ms 5000]
-                  read-only coordinator RPC over mandatory mutual TLS
+                    [--timeout-ms 5000] [--write-enabled true]
+                  coordinator RPC over mandatory mutual TLS; writes require remote WAL
   prism coordinator-search --topology <topology.json>
                     --cert <chain.pem> --key <key.pem> --shard-ca <ca.pem>
                     --query <text> [--tenant T] [--timeout-ms 5000]
                     [--k 10] [--nprobe 4] [--candidates 200] [--rerank 50]
                     [--group K] [--space model:version] [--best-effort]
-                  route and merge read-only queries across authenticated shards
+                  route and merge queries across authenticated shards
   prism evidence block-size --out <file.json> [--corpus <tsv>]
                   derive the default block size from measurement (charter C-1)
   prism search    --path <dir> --query <text> [--tenant T] [--from MS] [--to MS]
@@ -247,6 +247,7 @@ fn cmd_shard_serve(a: &Args) -> Result<()> {
         "key",
         "client-ca",
         "timeout-ms",
+        "write-enabled",
     ])?;
     let address: std::net::SocketAddr = a
         .req("listen")?
@@ -267,12 +268,40 @@ fn cmd_shard_serve(a: &Args) -> Result<()> {
         std::path::Path::new(a.req("key")?),
         std::path::Path::new(a.req("client-ca")?),
     )?;
-    let server = prism_engine::shard_rpc::ShardRpcServer::new(
-        shard_id,
-        Arc::new(open(a)?),
-        tls,
-        std::time::Duration::from_millis(timeout_ms),
-    )?;
+    let write_enabled = a.parse_opt("write-enabled", false)?;
+    let (server, recovered) = if write_enabled {
+        if std::env::var("PRISM_S3_ENDPOINT")
+            .ok()
+            .map(|value| value.trim().is_empty())
+            .unwrap_or(true)
+        {
+            return Err(PrismError::Invalid(
+                "--write-enabled requires PRISM_S3_ENDPOINT so the admission WAL survives node loss"
+                    .into(),
+            ));
+        }
+        let mut ingestor = prism_engine::Ingestor::open_replicated(open(a)?, shard_id)?;
+        let recovered = ingestor.recover(now_ms())?.len();
+        (
+            prism_engine::shard_rpc::ShardRpcServer::new_replicated_writer(
+                shard_id,
+                ingestor,
+                tls,
+                std::time::Duration::from_millis(timeout_ms),
+            )?,
+            recovered,
+        )
+    } else {
+        (
+            prism_engine::shard_rpc::ShardRpcServer::new(
+                shard_id,
+                Arc::new(open(a)?),
+                tls,
+                std::time::Duration::from_millis(timeout_ms),
+            )?,
+            0,
+        )
+    };
     let listener = std::net::TcpListener::bind(address)
         .map_err(|e| PrismError::Io(format!("shard RPC bind listener: {e}")))?;
     emit(&serde_json::json!({
@@ -281,6 +310,8 @@ fn cmd_shard_serve(a: &Args) -> Result<()> {
         "protocol_version": prism_engine::shard_rpc::SHARD_RPC_PROTOCOL_VERSION,
         "shard_id": shard_id,
         "address": address.to_string(),
+        "writable": write_enabled,
+        "recovered_wal_records": recovered,
     }))?;
     server.serve(listener)
 }

@@ -1168,6 +1168,10 @@ write service, replicated admission log and failover, envelope encryption,
 backup/restore, independent-host scale/chaos, load-derived SLO, and external
 penetration test remain explicit deployment blockers.
 
+D-091 and D-092 subsequently close the remote admission and supported public
+write boundaries; the encryption, backup/hydration, independent evidence, and
+external-review blockers remain.
+
 ## D-091 — Cross-node acknowledgement requires an immutable remote admission record
 
 **S14 production-service increment 2.** A local `fsync` can keep a process-restart promise but
@@ -1197,5 +1201,40 @@ the local and remote admission record and dies before catalog publication; node 
 epoch, reconstructs the acknowledged data from the remote WAL, answers byte-identically to an
 independent publication, and fences node A. A persistent remote outage fails before the durable
 acknowledgement point. Restoring already-published hot parts requires the separate backup/hydration
-workflow. Public ingest and the authenticated write RPC remain the next increment; no public write
-claim is made here.
+workflow. Public ingest and the authenticated write RPC are the next increment; no public write
+claim is made by D-091 alone.
+
+## D-092 — Public ingest injects tenant identity above a replicated-only shard write door
+
+**S14 production-service increment 3.** The remote WAL prerequisite is now joined to a supported
+network path without exposing engine mutation controls.
+
+- **Protocol v3 is writable only by construction.** The existing shard-server constructor remains
+  read-only. A separate constructor requires an `Ingestor` already bound to the replicated WAL and
+  ownership epoch. Health advertises that fact; sending ingest to a read-only shard is a named
+  policy failure.
+- **The coordinator routes one tenant, never caller-selected physical state.** A bounded batch
+  contains exactly one non-empty tenant and at most 1,000 events. Tenant-bucket routing chooses the
+  shard. The request cannot acquire ownership, publish a catalog, choose a WAL ID, recover, or name
+  source offsets.
+- **The public schema omits trusted fields.** `/v1/events` requires the certificate's `ingest`
+  scope and an explicit tenant grant. Each event omits `tenant_id` and `observed_time`; the service
+  injects both below authorization. Unknown fields—including a smuggled event tenant—fail.
+- **Visibility and retry behavior stay explicit.** The response is returned after the normal
+  publish path and carries offered, published, duplicate-suppressed, dead-lettered, reason, and
+  snapshot evidence. Internal part, WAL, recovery, and source-offset controls are not public
+  response fields. If a response is lost after the durable boundary, the existing tenant-scoped
+  idempotency contract turns a retry into a reported duplicate rather than a second row.
+- **Write mode cannot pretend a local disk is cross-node durability.** `prism shard-serve
+  --write-enabled true` requires production object-store configuration, recovers remote admission
+  records before listening, and reports the recovered count. Omitting the flag retains the
+  read-only endpoint.
+- **Readiness covers the capability policy promises.** If any public identity is granted
+  `ingest`, readiness requires every configured shard to advertise the writable constructor and
+  revalidates that mode on every probe. A read-only restart cannot leave an ingest API falsely
+  ready.
+
+Permanent gates prove real mTLS remote ingest leaves a remote admission object, the public mTLS
+door injects tenant and observed time, a CA-valid but unauthorized identity remains denied, and the
+read-only shard has no mutation path. Backup/hydration of already-published parts, encryption,
+customer-scale RPO/RTO, load/SLO evidence, and independent security review remain blockers.

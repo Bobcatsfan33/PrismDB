@@ -7,7 +7,7 @@
     "reviewBy": "2026-10-29",
     "softwareReleaseCandidate": false,
     "deploymentDecision": "not-approved",
-    "decisionReason": "PrismDB now has a supported authenticated read-service component and remote-durable admission recovery, but the write API, encryption, backup/RPO/RTO, independent operational evidence, and organizational deployment gates remain open."
+    "decisionReason": "PrismDB now has an authenticated tenant-scoped read/write API and remote-durable admission recovery, but the supported shard-node distribution, encryption, backup/hydration and RPO/RTO, independent operational evidence, and organizational deployment gates remain open."
   },
   "frameworks": [
     {
@@ -100,7 +100,7 @@
         "docs/RELEASE-ASSURANCE.md"
       ],
       "gaps": [
-        "Signed SBOM/provenance release assurance covers the model service and public read service, not the still-absent write/shard-node database distribution."
+        "Signed SBOM/provenance release assurance covers the model service and public API coordinator, not the still-absent shard-node database distribution."
       ]
     },
     {
@@ -118,7 +118,7 @@
         "crates/prism-service/src/lib.rs"
       ],
       "gaps": [
-        "The public read service has exact-certificate tenant grants, but no public write/ingest identity boundary or service exists."
+        "Read and ingest use exact-certificate tenant grants, but independent tenant-escape verification and lifecycle evidence remain open."
       ]
     },
     {
@@ -162,7 +162,7 @@
       ],
       "gaps": [
         "No supported backup/restore product workflow or customer-scale RPO/RTO drill exists.",
-        "Remote-durable admission and replacement-node recovery are gated, but no authenticated write transport exposes them and independent-host latency/jitter/scaling evidence remains open."
+        "Remote-durable admission, authenticated write transport, and replacement-node recovery are gated, but already-published part hydration and independent-host latency/jitter/scaling evidence remain open."
       ]
     },
     {
@@ -223,7 +223,7 @@
       "status": "open",
       "blocking": true,
       "ownerRole": "Engineering",
-      "acceptanceCriteria": "The shipped authenticated public read API is joined by a write service, migration/version policy, complete signed database distribution, and production deployment manifests that pass release gates.",
+      "acceptanceCriteria": "The shipped authenticated public read/write API is joined by migration/version policy, a complete signed shard-node database distribution, and production deployment manifests that pass release gates.",
       "evidence": [
         "docs/SHARD-TRANSPORT.md",
         "docs/PUBLIC-READ-SERVICE.md",

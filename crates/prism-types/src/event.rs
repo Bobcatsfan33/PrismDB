@@ -7,6 +7,12 @@ use serde::{Deserialize, Serialize};
 /// silently truncated (Part III §10: an event is never stored without the
 /// semantic columns it asked for, and admission failures must be *visible*).
 pub const MAX_BODY_BYTES: usize = 1 << 20; // 1 MiB
+pub const MAX_EVENT_ID_BYTES: usize = 256;
+pub const MAX_TENANT_ID_BYTES: usize = 128;
+pub const MAX_EVENT_NAME_BYTES: usize = 256;
+pub const MAX_TRACE_ID_BYTES: usize = 128;
+pub const MAX_SPAN_ID_BYTES: usize = 64;
+pub const MAX_IDEMPOTENCY_KEY_BYTES: usize = 256;
 
 /// The logical event model (Part III §9), as of S2.
 ///
@@ -95,6 +101,7 @@ impl Event {
             + self.body.len()
             + self.trace_id.len()
             + self.span_id.len()
+            + self.idempotency_key.as_ref().map_or(0, String::len)
             + attributes::byte_size(&self.attributes)
     }
 
@@ -108,6 +115,44 @@ impl Event {
         }
         if self.tenant_id.is_empty() {
             return Err((RejectReason::MissingTenantId, "tenant_id is empty".into()));
+        }
+        let identifiers = [
+            (
+                "event_id",
+                self.event_id.as_str(),
+                MAX_EVENT_ID_BYTES,
+                false,
+            ),
+            (
+                "tenant_id",
+                self.tenant_id.as_str(),
+                MAX_TENANT_ID_BYTES,
+                false,
+            ),
+            (
+                "event_name",
+                self.event_name.as_str(),
+                MAX_EVENT_NAME_BYTES,
+                false,
+            ),
+            ("trace_id", self.trace_id.as_str(), MAX_TRACE_ID_BYTES, true),
+            ("span_id", self.span_id.as_str(), MAX_SPAN_ID_BYTES, true),
+        ];
+        for (field, value, max, may_be_empty) in identifiers {
+            if (!may_be_empty && value.is_empty()) || value.len() > max {
+                return Err((
+                    RejectReason::InvalidIdentifier,
+                    format!("{field} must contain 1..={max} bytes"),
+                ));
+            }
+        }
+        if let Some(key) = self.idempotency_key.as_deref() {
+            if key.is_empty() || key.len() > MAX_IDEMPOTENCY_KEY_BYTES {
+                return Err((
+                    RejectReason::InvalidIdentifier,
+                    format!("idempotency_key must contain 1..={MAX_IDEMPOTENCY_KEY_BYTES} bytes"),
+                ));
+            }
         }
         if !self.cost.is_finite() {
             return Err((
@@ -223,6 +268,21 @@ mod tests {
         let mut e = ev();
         e.body = "x".repeat(MAX_BODY_BYTES + 1);
         assert_eq!(e.validate().unwrap_err().0, RejectReason::BodyTooLarge);
+    }
+
+    #[test]
+    fn identifiers_are_bounded_and_idempotency_bytes_count_toward_quota() {
+        let mut e = ev();
+        let baseline = e.byte_size();
+        e.idempotency_key = Some("retry-key".into());
+        assert_eq!(e.byte_size(), baseline + "retry-key".len());
+        e.validate().unwrap();
+
+        e.idempotency_key = Some("x".repeat(MAX_IDEMPOTENCY_KEY_BYTES + 1));
+        assert_eq!(e.validate().unwrap_err().0, RejectReason::InvalidIdentifier);
+        e.idempotency_key = None;
+        e.event_name.clear();
+        assert_eq!(e.validate().unwrap_err().0, RejectReason::InvalidIdentifier);
     }
 
     #[test]
