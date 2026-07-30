@@ -133,6 +133,8 @@ pub enum RejectReason {
     EventTimeInFuture,
 
     // --- identity ---
+    /// An identifier is empty where required or exceeds its field-specific byte cap.
+    InvalidIdentifier,
     /// The same key, with *different* content. Not a replay: a conflict. We refuse
     /// rather than silently rewrite history under a reused id.
     IdempotencyConflict,
@@ -161,6 +163,7 @@ impl RejectReason {
             RejectReason::AttributeKeyCardinalityExceeded => "attribute_key_cardinality_exceeded",
             RejectReason::EventTimeTooLate => "event_time_too_late",
             RejectReason::EventTimeInFuture => "event_time_in_future",
+            RejectReason::InvalidIdentifier => "invalid_identifier",
             RejectReason::IdempotencyConflict => "idempotency_conflict",
             RejectReason::QuotaExceeded => "quota_exceeded",
             RejectReason::ModelPolicyDenied => "model_policy_denied",
@@ -196,8 +199,10 @@ mod tests {
             RejectReason::AttributeKeyCardinalityExceeded,
             RejectReason::EventTimeTooLate,
             RejectReason::EventTimeInFuture,
+            RejectReason::InvalidIdentifier,
             RejectReason::IdempotencyConflict,
             RejectReason::QuotaExceeded,
+            RejectReason::ModelPolicyDenied,
             RejectReason::EmbeddingFailed,
         ];
         let mut seen = std::collections::BTreeSet::new();
@@ -205,7 +210,7 @@ mod tests {
             assert!(!r.as_str().is_empty());
             assert!(seen.insert(r.as_str()), "duplicate reason {}", r.as_str());
         }
-        assert_eq!(seen.len(), 15);
+        assert_eq!(seen.len(), 17);
     }
 
     // These read the constants through `black_box` so they are checked as *relations

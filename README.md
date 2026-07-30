@@ -71,14 +71,15 @@ The current enterprise deployment decision and expiring evidence index are docum
 [`docs/procurement-readiness.md`](docs/procurement-readiness.md); CI prevents open blocking gates
 from being represented as approved.
 
-The supported public read boundary is `prismd`: a mandatory-mTLS,
+The supported public boundary is `prismd`: a mandatory-mTLS,
 exact-certificate/tenant-authorized service with bounded HTTP, live shard
 readiness, fixed-cardinality metrics, a hardened Helm chart, and a signed
 digest release path. See
-[`docs/PUBLIC-READ-SERVICE.md`](docs/PUBLIC-READ-SERVICE.md). The engine also
-has a remote-durable admission log with replacement-node recovery; it is not
-yet exposed by an authenticated write API. PrismDB is still not
-production-approved because the public write boundary, encryption, backup/RPO/RTO,
+[`docs/PUBLIC-READ-SERVICE.md`](docs/PUBLIC-READ-SERVICE.md). The same boundary
+supports certificate-scoped, tenant-injected ingest over a replicated-only
+shard write RPC and remote-durable replacement-node recovery. PrismDB is still
+not production-approved because the supported shard-node distribution,
+encryption, backup/hydration and RPO/RTO,
 independent load/security, and organizational gates remain open.
 
 **Executable reference core under active development.** Sprints **S0 through S8** of eighteen are complete (**S7 shipped GPU-ready but GPU-off** — see Status): a dependency-light, single-node vertical slice that really ingests, really prunes, really scans compressed codes, really re-ranks exactly, and really answers — on a hardened, versioned, self-describing storage format, behind an admission boundary with exactly-once replay semantics, with tenant isolation enforced as a physical property of which bytes a query is allowed to read, an online model-migration lifecycle that keeps answering queries the whole way through, and a SIMD scan whose answer is byte-identical to the scalar reference on every CPU. **S7 (the GPU engine) is built but disabled** — the device-agnostic machinery (routing, fault-fallback, per-tenant device admission, the fp16 accuracy contract) is complete and tested against a CPU reference of the GPU route, and the GPU path itself stays off until a CI runner exists to prove it on real silicon. See [docs/PRISM.md](docs/PRISM.md) for the architecture and the full sprint roadmap, [docs/INGESTION-CONTRACT.md](docs/INGESTION-CONTRACT.md) for what an acknowledgement actually promises, [docs/QUERY-CONTRACT.md](docs/QUERY-CONTRACT.md) for what a cursor means, [docs/DETERMINISM-CONTRACT.md](docs/DETERMINISM-CONTRACT.md) for why the answer is the same on every CPU, plan, and route, and [docs/PROGRESS.md](docs/PROGRESS.md) for exactly what is proven so far and by which test.
@@ -119,23 +120,23 @@ independent load/security, and organizational gates remain open.
 
 **Deliberate limits right now** — these are sprints, not oversights
 
-- The read-only remote coordinator routes tenant reads and executes the
+- The remote coordinator routes tenant reads and tenant-scoped writes and executes the
   cross-shard two-round merge over mandatory mutual TLS, with catalog-bound
-  snapshot vectors and deterministic endpoint-loss gates. Sustained independent-
-  host 1→4 scaling and timer-driven hedge evidence, remote-durable WAL
-  replication, and cross-node write failover remain open; the service exposes
-  no writes and therefore cannot weaken the existing ack contract.
+  snapshot vectors, deterministic endpoint-loss gates, and remote-durable WAL
+  admission before acknowledgement. Sustained independent-host 1→4 scaling,
+  timer-driven hedge evidence, and already-published-part hydration remain open.
 - SQL is a minimal subset: projections, filters, `LIMIT`, scalar aggregates and `GROUP BY`, plus the `embedding ≈≈ 'text'` predicate. No joins, no subqueries, no `OFFSET`. The full semantics — nulls, ties, model versions, the cost-based optimizer — are S8, and S8 may *extend* the query contract but not contradict it.
 - Scalar loops only: no SIMD (S6), no GPU (S7). Every kernel here is the *reference* implementation that the fast ones will have to prove themselves equal to.
 - The deterministic local hash embedder remains the zero-configuration development default. S13's production plane now includes a separately supervised, dependency-free identity gateway to a colocated GPU inference runtime: mounted weights/tokenizer/preprocessing bytes are independently hashed before readiness, only loopback backends and peer-authorized Unix clients are accepted, and every response is cardinality/dimension/finiteness/norm checked under the exact persisted identity. Exact tenant/model/version/purpose grants, pre-ACK local GPU budgets, stable denial reasons, and a durable no-text usage ledger are enforced below every engine door. The gateway release is built from a digest-pinned base, vulnerability-gated, SBOM-attested, keylessly signed, and published with build provenance. Versioned redact-before-embedding, fleet-wide quota/chargeback, cache, calibrated drift/OOD gates, and the long-running API workload remain open; see [`docs/MODEL-PLANE.md`](docs/MODEL-PLANE.md), [`docs/MODEL-GOVERNANCE.md`](docs/MODEL-GOVERNANCE.md), and [`docs/RELEASE-ASSURANCE.md`](docs/RELEASE-ASSURANCE.md).
 - Semantic grouping clusters the re-rank survivors. Grouping an arbitrarily large *filtered set* — the flagship aggregate — is S9.
 - The probe count is fixed per query. Scaling it when a query sits on a cluster boundary is [issue #1](https://github.com/Bobcatsfan33/PrismDB/issues/1), targeted at S6.
-- **No public ingest/OTLP listener and no Kafka client.** The read-only
-  `prismd` HTTPS service is real; it deliberately cannot mutate. The OTel
+- **No OTLP listener and no Kafka client.** The authenticated `prismd` HTTPS
+  service accepts the reduced tenant-scoped event schema and routes it only to
+  replicated-WAL shard writers. The OTel
   GenAI *mapping* is tested and pinned to a semantic-convention version. The
   `Source` abstraction has Kafka's offset semantics and the file-backed source
-  exercises them through real process deaths, but a supported network ingest
-  service and Kafka integration remain separate write-plane work.
+  exercises them through real process deaths, but supported OTLP and Kafka
+  integrations remain separate connector work.
 - **Every tuned constant here was derived on a hash-embedder corpus, and is marked `corpus_conditional` in the ledger because of it.** The hash embedder makes tests reproducible with no weights and no network — and its motifs are unusually well-separated, which is exactly the wrong property in a corpus you tune an index on. Building a real-embedding golden corpus and re-deriving every sweep against it is [issue #3](https://github.com/Bobcatsfan33/PrismDB/issues/3). Honest is not the same as fixed.
 - A shared bucket's *manifest bytes* still name its co-tenants to anyone with raw disk access. Per-tenant envelope encryption is S14; a dedicated bucket is the answer until then. Stated in the [query contract](docs/QUERY-CONTRACT.md), not discovered by a customer.
 

@@ -57,7 +57,7 @@ pub struct IngestReport2 {
 
 /// The durable admission state that lives alongside a store.
 pub struct Ingestor {
-    pub engine: Engine,
+    pub engine: Arc<Engine>,
     pub wal: Wal,
     pub quotas: QuotaEnforcer,
     dict_path: PathBuf,
@@ -67,6 +67,10 @@ pub struct Ingestor {
 
 impl Ingestor {
     pub fn open(engine: Engine) -> Result<Self> {
+        Self::open_shared(Arc::new(engine))
+    }
+
+    fn open_shared(engine: Arc<Engine>) -> Result<Self> {
         let root = engine.store.root.clone();
         let wal = Wal::open(&root.join("wal"))?;
         prism_part::io::ensure_dir(&root.join("admission"))?;
@@ -86,9 +90,10 @@ impl Ingestor {
     /// every WAL record ID, and every accepted batch must be durable both locally and in the
     /// authoritative object store before the write path proceeds past its acknowledgement point.
     pub fn open_replicated(engine: Engine, shard_id: usize) -> Result<Self> {
+        let engine = Arc::new(engine);
         engine.acquire_ownership()?;
         let remote_wal = RemoteWal::new(Arc::clone(engine.cold.backend()), shard_id);
-        let mut ingestor = Self::open(engine)?;
+        let mut ingestor = Self::open_shared(engine)?;
         ingestor.remote_wal = Some(remote_wal);
         Ok(ingestor)
     }

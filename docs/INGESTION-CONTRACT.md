@@ -45,6 +45,17 @@ So there are two distinct mechanisms and they answer two distinct questions:
 
 A system that only had the second would double-count every retry until the next merge. A system that only had the first would silently diverge once its window rolled over. We say both, and we say where the seam is.
 
+### Identity bytes are bounded
+
+Durable identifiers are data, not free metadata. `event_id` and an explicit
+`idempotency_key` cap at 256 bytes, `tenant_id` at 128, `event_name` at 256,
+`trace_id` at 128, and `span_id` at 64. Required identifiers cannot be empty.
+Violations are dead-lettered as `invalid_identifier` (with the existing
+specific missing-event/tenant reasons retained), and idempotency-key bytes are
+included in byte and in-flight quota accounting. Otherwise one syntactically
+small event could grow the durable idempotency index without paying its
+admission cost.
+
 ---
 
 ## 3. The ack point, and invariant 7

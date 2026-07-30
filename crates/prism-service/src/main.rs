@@ -24,10 +24,13 @@ impl Args {
         let mut values = std::env::args().skip(1);
         let command = values
             .next()
-            .ok_or_else(|| PrismError::Invalid("usage: prismd read-serve [flags]".into()))?;
-        if !matches!(command.as_str(), "read-serve" | "probe" | "version") {
+            .ok_or_else(|| PrismError::Invalid("usage: prismd serve [flags]".into()))?;
+        if !matches!(
+            command.as_str(),
+            "serve" | "read-serve" | "probe" | "version"
+        ) {
             return Err(PrismError::Invalid(format!(
-                "unknown command `{command}`; expected read-serve, probe, or version"
+                "unknown command `{command}`; expected serve, probe, or version"
             )));
         }
         let mut flags = BTreeMap::new();
@@ -45,7 +48,7 @@ impl Args {
             }
         }
         let allowed: BTreeSet<&str> = match command.as_str() {
-            "read-serve" => [
+            "serve" | "read-serve" => [
                 "listen",
                 "topology",
                 "shard-cert",
@@ -210,7 +213,7 @@ fn run_probe(args: &Args) -> Result<()> {
 fn run() -> Result<()> {
     let args = Args::parse()?;
     match args.command.as_str() {
-        "read-serve" => run_service(&args),
+        "serve" | "read-serve" => run_service(&args),
         "probe" => run_probe(&args),
         "version" => {
             println!(

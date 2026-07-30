@@ -218,6 +218,36 @@ pub fn constants() -> Vec<Constant> {
             kind: Kind::Policy,
         },
         Constant {
+            name: "MAX_EVENT_ID_BYTES",
+            value: prism_types::event::MAX_EVENT_ID_BYTES as i64,
+            kind: Kind::Policy,
+        },
+        Constant {
+            name: "MAX_TENANT_ID_BYTES",
+            value: prism_types::event::MAX_TENANT_ID_BYTES as i64,
+            kind: Kind::Policy,
+        },
+        Constant {
+            name: "MAX_EVENT_NAME_BYTES",
+            value: prism_types::event::MAX_EVENT_NAME_BYTES as i64,
+            kind: Kind::Policy,
+        },
+        Constant {
+            name: "MAX_TRACE_ID_BYTES",
+            value: prism_types::event::MAX_TRACE_ID_BYTES as i64,
+            kind: Kind::Policy,
+        },
+        Constant {
+            name: "MAX_SPAN_ID_BYTES",
+            value: prism_types::event::MAX_SPAN_ID_BYTES as i64,
+            kind: Kind::Policy,
+        },
+        Constant {
+            name: "MAX_IDEMPOTENCY_KEY_BYTES",
+            value: prism_types::event::MAX_IDEMPOTENCY_KEY_BYTES as i64,
+            kind: Kind::Policy,
+        },
+        Constant {
             name: "MAX_EMBED_INPUT_BYTES",
             value: prism_types::MAX_EMBED_INPUT_BYTES as i64,
             kind: Kind::Policy,

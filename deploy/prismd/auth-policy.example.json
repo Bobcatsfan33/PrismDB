@@ -2,10 +2,10 @@
   "version": 1,
   "clients": [
     {
-      "identity_id": "example-reader",
+      "identity_id": "example-client",
       "certificate_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "tenants": ["tenant-a"],
-      "scopes": ["health", "search"],
+      "scopes": ["health", "ingest", "search"],
       "max_in_flight": 8
     },
     {
