@@ -838,7 +838,7 @@ Two options, both defensible:
 
 - **Fencing is on the write path, not startup-only.** Immediately before every catalog commit, the writer asserts it still holds the highest epoch ([`assert_write_owner`](../crates/prism-engine/src/engine.rs) → `storage::ownership::assert_owner`); if a later acquisition superseded it, the commit is refused **by name** (`write fenced: … epoch N … but epoch M has since acquired the shard`). So a writer paused mid-publication while a restart took over publishes **nothing** — no torn catalog, no duplicate parts. The zombie gate proves it (`tests/fencing.rs`): a real `prism` writer is frozen at the commit fence (the `maybe_pause` seam, as `kill -STOP` would), a second `prism` process acquires the next epoch and commits, and the resumed zombie fails with the named refusal — the store holds the restart's data, `verify` passes, the row count shows the zombie's batch never landed.
 - **A no-op for the single-writer path.** An engine that never acquired ownership holds epoch `0`, and the fence returns `Ok` — so the entire existing library write path is unchanged. The CLI's `ingest` acquires ownership, so the real (and clustered) write paths always fence.
-- **This is deliberately single-node.** Ownership fences a *stale local writer*; it does not fail a shard over to a **different** node. The hot tier and admission log are local, so a new node cannot honour [D-068](#d-068--ack-after-log)'s ack contract for acked-but-unpublished data without a remote-durable admission log (and a transport). **Cross-node shard failover is a named deferral** — the HA increment, not something to back into under a chaos harness — and must not silently weaken the ack contract. It joins the transport wall on S12's row in PROGRESS.
+- **This is deliberately single-node.** Ownership fences a *stale local writer*; it does not fail a shard over to a **different** node. The hot tier and admission log are local, so a new node cannot honour [D-068](#d-068--ack-after-log)'s ack contract for acked-but-unpublished data without a remote-durable admission log (and a write transport). **Cross-node shard failover is a named deferral** — the HA increment, not something to back into under a chaos harness — and must not silently weaken the ack contract. It remains behind the write/durability wall on S12's row in PROGRESS.
 
 ## D-077 — The WAL applied-progress marker lives inside the atomic snapshot (exactly-once, restoring invariant 3)
 
@@ -1093,3 +1093,38 @@ absent.
   partition/hedge/scaling campaigns is the next read-HA increment.
   Remote-durable WAL replication and cross-node write failover remain a
   separate durability increment. See [SHARD-TRANSPORT.md](SHARD-TRANSPORT.md).
+
+## D-089 — One coordinator algorithm serves local and authenticated remote shards
+
+**S12 HA/transport increment 2.** The mTLS fragment service becomes a product
+path only when the coordinator consumes it without creating a second set of
+query semantics. Local `Engine` shards and `TlsShardClient` therefore implement
+one read-only fragment contract, and the existing global-candidate-set merge is
+the only coordinator implementation.
+
+- **Topology cannot silently rewrite routing.** The bounded, versioned topology
+  requires contiguous shard IDs. Startup health-checks every endpoint and
+  refuses any difference in immutable store configuration, including partition
+  scheme, dimension, seed, quantizer, format, and promoted columns.
+- **A snapshot is a catalog capability, not client JSON.** Protocol v2 loads the
+  requested snapshot from the shard catalog and compares it byte-for-byte with
+  the coordinator copy before candidates, full reads, or validation. An
+  authenticated but faulty coordinator cannot edit part references, tombstones,
+  generations, or the WAL marker while retaining a plausible snapshot ID.
+  Rerank and materialization also carry the pinned snapshot, and every selected
+  part must belong to it; a valid handle outside the query capability is refused.
+- **Partitions stay explicit through every phase.** Failure to pin, validate,
+  find candidates, rerank, or materialize is fail-named by default.
+  Best-effort remains per-query and labels the shard. A materialization-time
+  loss removes every score from that shard and reruns finalization, allowing
+  reachable rows to backfill the global top-k; it never returns the old top-k
+  with missing bodies. Partial semantic grouping is still refused.
+- **What the gate proves.** Two real TLS shard endpoints return a response
+  byte-identical to the in-process cluster. Endpoint loss is exercised before
+  snapshot pin and after rerank, mixed configurations and edited snapshots are
+  refused, and tenant-scoped reads use the same authenticated boundary.
+- **What remains.** Deterministic localhost partitions prove correctness, not
+  WAN SLOs. Independent-host 1→4 scaling, latency/jitter campaigns, and
+  timer-driven asynchronous hedge races remain open. The protocol remains
+  read-only; remote-durable WAL replication is still the precondition for
+  cross-node write takeover.

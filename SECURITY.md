@@ -3,9 +3,10 @@
 ## Current status
 
 PrismDB is an executable reference core under active development, not a supported production
-service. The current release does not provide a production network server, authentication boundary,
-TLS transport, or per-tenant envelope encryption. See `README.md` and `docs/PROGRESS.md` before
-placing any sensitive data in a store.
+service. The current release does not provide a public production network server and authentication
+boundary, cross-node write transport, or per-tenant envelope encryption. The read-only
+coordinator↔shard path does require mutual TLS. See `README.md` and `docs/PROGRESS.md` before placing
+any sensitive data in a store.
 
 ## Reporting a vulnerability
 

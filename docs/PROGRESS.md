@@ -23,27 +23,31 @@ Sprint gates from [PRISM.md](PRISM.md) Part IV. **A sprint is done when its gate
 | S16 | Competitive benchmark + recall contract | third-party reproducible; SLOs name recall and cost, not latency alone; **losses published** | ⬜ |
 | S17 | Beachhead product completion | partners query full telemetry with no application-side joins; operators complete drills from docs alone | ⬜ |
 
-### S12 HA transport increment 1 — authenticated shard service
+### S12 HA transport increments 1–2 — authenticated service and remote coordinator
 
-The first real coordinator↔shard node boundary is now executable through
+The first real coordinator↔shard node boundary is executable through
 `prism shard-serve` ([D-088](DECISIONS.md),
-[transport contract](SHARD-TRANSPORT.md)). It exposes only health, pinned
-snapshot discovery, candidates, exact rerank, and materialization. Mutual TLS,
-server-name validation, private-key posture, a versioned/targeted envelope,
-16 MiB pre-allocation frame cap, 10,000-row selection cap, bounded deadlines,
-and a 64-connection blast-radius cap are mandatory; there is no plaintext
-constructor. The permanent gate drives all three query fragments and proves
-untrusted-client refusal, wrong-server-name refusal, half-open timeout, and
-oversized-frame rejection.
+[transport contract](SHARD-TRANSPORT.md)). Mutual TLS, server-name validation,
+private-key posture, a versioned/targeted envelope, a 16 MiB pre-allocation
+frame cap, 10,000-row selection cap, bounded deadlines, and a 64-connection
+blast-radius cap are mandatory; there is no plaintext constructor.
 
-This update supersedes the S12 table row's original statement that no
-coordinator↔shard transport exists; the row's multi-node and failover caveats
-remain in force.
+Increment 2 wires `prism coordinator-search` to those endpoints ([D-089](DECISIONS.md)).
+The topology is versioned, bounded, contiguous, and preflighted; mixed
+immutable store configuration is refused. Protocol v2 binds every supplied
+snapshot to immutable catalog bytes. Tenant reads route to one shard and
+cross-tenant reads execute the same two-round coordinator implementation used
+in-process. A two-shard TLS result is byte-identical to the local cluster.
+Endpoint loss is exercised at snapshot pin and after rerank: default queries
+fail with the shard named, explicit best-effort labels the loss, partial
+grouping is refused, and materialization-time loss removes the shard's scores
+and recomputes global top-k.
 
-S12 remains 🟡. The local coordinator is not yet wired through the client, so
-multi-node scaling, a real network-partition campaign, and asynchronous hedge
-timing are not claimed. Cross-node write failover is still blocked on a
-remote-durable admission log and deliberately absent from the protocol.
+This section supersedes the S12 table row's earlier transport-wall wording.
+S12 remains 🟡 because deterministic localhost partition correctness is not an
+independent-host 1→4 scaling result or a latency/jitter/async-hedge campaign.
+Cross-node write failover is still blocked on a remote-durable admission log
+and deliberately absent from the protocol.
 
 ### S13 increment 2 — deployable model identity gateway
 

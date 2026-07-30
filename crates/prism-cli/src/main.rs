@@ -37,6 +37,12 @@ USAGE:
                     --cert <chain.pem> --key <key.pem> --client-ca <ca.pem>
                     [--timeout-ms 5000]
                   read-only coordinator RPC over mandatory mutual TLS
+  prism coordinator-search --topology <topology.json>
+                    --cert <chain.pem> --key <key.pem> --shard-ca <ca.pem>
+                    --query <text> [--tenant T] [--timeout-ms 5000]
+                    [--k 10] [--nprobe 4] [--candidates 200] [--rerank 50]
+                    [--group K] [--space model:version] [--best-effort]
+                  route and merge read-only queries across authenticated shards
   prism evidence block-size --out <file.json> [--corpus <tsv>]
                   derive the default block size from measurement (charter C-1)
   prism search    --path <dir> --query <text> [--tenant T] [--from MS] [--to MS]
@@ -127,6 +133,7 @@ fn run(argv: Vec<String>) -> Result<()> {
         "ingest-otlp" => cmd_ingest_otlp(&a),
         "recover" => cmd_recover(&a),
         "shard-serve" => cmd_shard_serve(&a),
+        "coordinator-search" => cmd_coordinator_search(&a),
         "evidence" => cmd_evidence(&a),
         "search" => cmd_search(&a),
         "sql" => cmd_sql(&a),
@@ -276,6 +283,45 @@ fn cmd_shard_serve(a: &Args) -> Result<()> {
         "address": address.to_string(),
     }))?;
     server.serve(listener)
+}
+
+fn cmd_coordinator_search(a: &Args) -> Result<()> {
+    a.allow(&[
+        "topology",
+        "cert",
+        "key",
+        "shard-ca",
+        "timeout-ms",
+        "query",
+        "tenant",
+        "from",
+        "to",
+        "k",
+        "nprobe",
+        "candidates",
+        "rerank",
+        "group",
+        "space",
+        "no-adaptive",
+        "explain",
+        "fetch-budget-bytes",
+        "best-effort",
+    ])?;
+    let timeout_ms = a.parse_opt("timeout-ms", 5_000u64)?;
+    let topology = prism_engine::shard_rpc::RemoteReadTopology::load(std::path::Path::new(
+        a.req("topology")?,
+    ))?;
+    let tls = prism_engine::shard_rpc::client_tls_from_pem(
+        std::path::Path::new(a.req("cert")?),
+        std::path::Path::new(a.req("key")?),
+        std::path::Path::new(a.req("shard-ca")?),
+    )?;
+    let cluster = prism_engine::shard_rpc::RemoteReadCluster::connect(
+        topology,
+        tls,
+        std::time::Duration::from_millis(timeout_ms),
+    )?;
+    emit(&cluster.search(&query_from_args(a)?)?)
 }
 
 /// Resolve the separately supervised production model service, or retain the
@@ -477,7 +523,21 @@ fn cmd_search(a: &Args) -> Result<()> {
         "best-effort",
     ])?;
     let engine = open(a)?;
-    let q = Query {
+    let q = query_from_args(a)?;
+
+    if a.has("exact") {
+        // The oracle, exposed. Brute-force every eligible row: no centroids, no
+        // PQ, no candidate list. Slow by design, and the ground truth that the
+        // approximate path is measured against.
+        let hits = engine.exact_search(&q)?;
+        return emit(&serde_json::json!({ "exact": true, "hits": hits }));
+    }
+
+    emit(&engine.search(&q)?)
+}
+
+fn query_from_args(a: &Args) -> Result<Query> {
+    Ok(Query {
         text: a.req("query")?.to_string(),
         tenant: a.opt("tenant").map(String::from),
         time_from: a.parse_some("from")?,
@@ -502,17 +562,7 @@ fn cmd_search(a: &Args) -> Result<()> {
         // Opt in to a labelled partial answer when a shard is unreachable (query §21). Off by default:
         // a distributed query that cannot reach a shard fails, with the shard named.
         best_effort: a.has("best-effort"),
-    };
-
-    if a.has("exact") {
-        // The oracle, exposed. Brute-force every eligible row: no centroids, no
-        // PQ, no candidate list. Slow by design, and the ground truth that the
-        // approximate path is measured against.
-        let hits = engine.exact_search(&q)?;
-        return emit(&serde_json::json!({ "exact": true, "hits": hits }));
-    }
-
-    emit(&engine.search(&q)?)
+    })
 }
 
 fn cmd_ingest_source(a: &Args) -> Result<()> {

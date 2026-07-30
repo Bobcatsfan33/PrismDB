@@ -7,10 +7,13 @@
 //! remote-durable; exposing writes here would weaken the ack contract.
 
 use crate::search::{ShardCandidate, ShardScored};
+use crate::sharded::{Cluster, ReadShard};
 use crate::Engine;
 use prism_part::catalog::Snapshot;
+use prism_part::partition::{Bucket, PartitionScheme};
+use prism_part::store::StoreConfig;
 use prism_types::error::{PrismError, Result};
-use prism_types::{Event, Query};
+use prism_types::{Event, Query, SearchResult};
 use rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer, ServerName};
 use rustls::server::WebPkiClientVerifier;
 use rustls::{
@@ -25,10 +28,12 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-pub const SHARD_RPC_PROTOCOL_VERSION: u16 = 1;
+pub const SHARD_RPC_PROTOCOL_VERSION: u16 = 2;
 pub const MAX_SHARD_RPC_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_SHARD_RPC_SELECTIONS: usize = 10_000;
 pub const MAX_SHARD_RPC_CONNECTIONS: usize = 64;
+pub const MAX_REMOTE_READ_SHARDS: usize = 256;
+pub const MAX_REMOTE_TOPOLOGY_BYTES: u64 = 1024 * 1024;
 pub const MAX_SHARD_RPC_TLS_FILE_BYTES: u64 = 4 * 1024 * 1024;
 pub const DEFAULT_SHARD_RPC_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -47,15 +52,27 @@ struct RpcRequest {
 enum RpcOperation {
     Health,
     Snapshot,
+    SnapshotById {
+        snapshot_id: String,
+    },
+    ValidateSnapshot {
+        snapshot: Snapshot,
+    },
+    SearchAt {
+        snapshot: Snapshot,
+        query: Query,
+    },
     Candidates {
         snapshot: Snapshot,
         query: Query,
     },
     Rerank {
+        snapshot: Snapshot,
         query: Query,
         selected: Vec<(String, usize)>,
     },
     Materialize {
+        snapshot: Snapshot,
         selected: Vec<(String, usize)>,
     },
 }
@@ -71,7 +88,7 @@ struct RpcResponse {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 enum RpcOutcome {
-    Ok { payload: RpcPayload },
+    Ok { payload: Box<RpcPayload> },
     Error { code: String, message: String },
 }
 
@@ -80,6 +97,8 @@ enum RpcOutcome {
 enum RpcPayload {
     Health(ShardHealth),
     Snapshot(Snapshot),
+    Validated(String),
+    Search(Box<SearchResult>),
     Candidates(Vec<ShardCandidate>),
     Rerank(Vec<ShardScored>),
     Materialize(Vec<(Event, u32)>),
@@ -90,6 +109,7 @@ pub struct ShardHealth {
     pub protocol_version: u16,
     pub shard_id: usize,
     pub snapshot_id: String,
+    pub store_config: StoreConfig,
 }
 
 fn transport_error(context: &str, error: impl std::fmt::Display) -> PrismError {
@@ -122,6 +142,18 @@ fn validate_request_id(request_id: &str) -> Result<()> {
     {
         return Err(invalid_transport(
             "request_id must be 1..128 ASCII letters, digits, dots, underscores, or hyphens",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_snapshot_id(snapshot_id: &str) -> Result<()> {
+    if snapshot_id.len() != 9
+        || !snapshot_id.starts_with('s')
+        || !snapshot_id.as_bytes()[1..].iter().all(u8::is_ascii_digit)
+    {
+        return Err(invalid_transport(
+            "snapshot_id must use the canonical `s` plus eight decimal digits format",
         ));
     }
     Ok(())
@@ -362,7 +394,9 @@ impl ShardRpcServer {
                 version: SHARD_RPC_PROTOCOL_VERSION,
                 request_id,
                 shard_id: self.shard_id,
-                outcome: RpcOutcome::Ok { payload },
+                outcome: RpcOutcome::Ok {
+                    payload: Box::new(payload),
+                },
             },
             Err(error) => RpcResponse {
                 version: SHARD_RPC_PROTOCOL_VERSION,
@@ -410,24 +444,68 @@ impl ShardRpcServer {
                 protocol_version: SHARD_RPC_PROTOCOL_VERSION,
                 shard_id: self.shard_id,
                 snapshot_id: self.engine.snapshot()?.snapshot_id,
+                store_config: self.engine.store.config.clone(),
             })),
             RpcOperation::Snapshot => Ok(RpcPayload::Snapshot(self.engine.snapshot()?)),
+            RpcOperation::SnapshotById { snapshot_id } => {
+                validate_snapshot_id(&snapshot_id)?;
+                Ok(RpcPayload::Snapshot(self.load_snapshot(&snapshot_id)?))
+            }
+            RpcOperation::ValidateSnapshot { snapshot } => {
+                let snapshot = self.trusted_snapshot(&snapshot)?;
+                <Engine as ReadShard>::validate_snapshot(&self.engine, &snapshot)?;
+                Ok(RpcPayload::Validated(snapshot.snapshot_id))
+            }
+            RpcOperation::SearchAt { snapshot, query } => {
+                let snapshot = self.trusted_snapshot(&snapshot)?;
+                Ok(RpcPayload::Search(Box::new(
+                    self.engine.search_at(&snapshot, &query)?,
+                )))
+            }
             RpcOperation::Candidates { snapshot, query } => Ok(RpcPayload::Candidates(
-                self.engine.search_candidates(&snapshot, &query)?,
+                self.engine
+                    .search_candidates(&self.trusted_snapshot(&snapshot)?, &query)?,
             )),
-            RpcOperation::Rerank { query, selected } => {
-                validate_selection(&selected)?;
+            RpcOperation::Rerank {
+                snapshot,
+                query,
+                selected,
+            } => {
+                let snapshot = self.trusted_snapshot(&snapshot)?;
+                validate_selection_in_snapshot(&snapshot, &selected)?;
                 Ok(RpcPayload::Rerank(
                     self.engine.search_rerank_selected(&query, &selected)?,
                 ))
             }
-            RpcOperation::Materialize { selected } => {
-                validate_selection(&selected)?;
+            RpcOperation::Materialize { snapshot, selected } => {
+                let snapshot = self.trusted_snapshot(&snapshot)?;
+                validate_selection_in_snapshot(&snapshot, &selected)?;
                 Ok(RpcPayload::Materialize(
                     self.engine.search_materialize(&selected)?,
                 ))
             }
         }
+    }
+
+    fn load_snapshot(&self, snapshot_id: &str) -> Result<Snapshot> {
+        let current = self.engine.snapshot()?;
+        if current.snapshot_id == snapshot_id {
+            Ok(current)
+        } else {
+            self.engine.catalog().load_snapshot(snapshot_id)
+        }
+    }
+
+    fn trusted_snapshot(&self, requested: &Snapshot) -> Result<Snapshot> {
+        validate_snapshot_id(&requested.snapshot_id)?;
+        let stored = self.load_snapshot(&requested.snapshot_id)?;
+        if &stored != requested {
+            return Err(invalid_transport(format!(
+                "snapshot `{}` does not match the shard's immutable catalog bytes",
+                requested.snapshot_id
+            )));
+        }
+        Ok(stored)
     }
 }
 
@@ -446,6 +524,18 @@ fn validate_selection(selected: &[(String, usize)]) -> Result<()> {
                 .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
     }) {
         return Err(invalid_transport("selection contains an invalid part id"));
+    }
+    Ok(())
+}
+
+fn validate_selection_in_snapshot(snapshot: &Snapshot, selected: &[(String, usize)]) -> Result<()> {
+    validate_selection(selected)?;
+    let live: std::collections::BTreeSet<String> = snapshot.part_ids().into_iter().collect();
+    if let Some((part_id, _)) = selected.iter().find(|(part_id, _)| !live.contains(part_id)) {
+        return Err(invalid_transport(format!(
+            "selection names part `{part_id}`, which is not in pinned snapshot `{}`",
+            snapshot.snapshot_id
+        )));
     }
     Ok(())
 }
@@ -501,6 +591,40 @@ impl TlsShardClient {
         }
     }
 
+    pub fn snapshot_by_id(&self, snapshot_id: &str) -> Result<Snapshot> {
+        validate_snapshot_id(snapshot_id)?;
+        match self.call(RpcOperation::SnapshotById {
+            snapshot_id: snapshot_id.to_string(),
+        })? {
+            RpcPayload::Snapshot(snapshot) => Ok(snapshot),
+            _ => Err(invalid_transport(
+                "snapshot_by_id returned the wrong payload type",
+            )),
+        }
+    }
+
+    pub fn validate_snapshot(&self, snapshot: Snapshot) -> Result<()> {
+        let expected = snapshot.snapshot_id.clone();
+        match self.call(RpcOperation::ValidateSnapshot { snapshot })? {
+            RpcPayload::Validated(snapshot_id) if snapshot_id == expected => Ok(()),
+            RpcPayload::Validated(_) => Err(invalid_transport(
+                "validate_snapshot returned a different snapshot id",
+            )),
+            _ => Err(invalid_transport(
+                "validate_snapshot returned the wrong payload type",
+            )),
+        }
+    }
+
+    pub fn search_at(&self, snapshot: Snapshot, query: Query) -> Result<SearchResult> {
+        match self.call(RpcOperation::SearchAt { snapshot, query })? {
+            RpcPayload::Search(result) => Ok(*result),
+            _ => Err(invalid_transport(
+                "search_at returned the wrong payload type",
+            )),
+        }
+    }
+
     pub fn candidates(&self, snapshot: Snapshot, query: Query) -> Result<Vec<ShardCandidate>> {
         match self.call(RpcOperation::Candidates { snapshot, query })? {
             RpcPayload::Candidates(candidates) => Ok(candidates),
@@ -510,17 +634,30 @@ impl TlsShardClient {
         }
     }
 
-    pub fn rerank(&self, query: Query, selected: Vec<(String, usize)>) -> Result<Vec<ShardScored>> {
-        validate_selection(&selected)?;
-        match self.call(RpcOperation::Rerank { query, selected })? {
+    pub fn rerank(
+        &self,
+        snapshot: Snapshot,
+        query: Query,
+        selected: Vec<(String, usize)>,
+    ) -> Result<Vec<ShardScored>> {
+        validate_selection_in_snapshot(&snapshot, &selected)?;
+        match self.call(RpcOperation::Rerank {
+            snapshot,
+            query,
+            selected,
+        })? {
             RpcPayload::Rerank(scored) => Ok(scored),
             _ => Err(invalid_transport("rerank returned the wrong payload type")),
         }
     }
 
-    pub fn materialize(&self, selected: Vec<(String, usize)>) -> Result<Vec<(Event, u32)>> {
-        validate_selection(&selected)?;
-        match self.call(RpcOperation::Materialize { selected })? {
+    pub fn materialize(
+        &self,
+        snapshot: Snapshot,
+        selected: Vec<(String, usize)>,
+    ) -> Result<Vec<(Event, u32)>> {
+        validate_selection_in_snapshot(&snapshot, &selected)?;
+        match self.call(RpcOperation::Materialize { snapshot, selected })? {
             RpcPayload::Materialize(events) => Ok(events),
             _ => Err(invalid_transport(
                 "materialize returned the wrong payload type",
@@ -578,12 +715,271 @@ impl TlsShardClient {
             )));
         }
         match response.outcome {
-            RpcOutcome::Ok { payload } => Ok(payload),
-            RpcOutcome::Error { code, message } => Err(PrismError::Io(format!(
-                "remote shard {} returned {code}: {message}",
-                self.shard_id
-            ))),
+            RpcOutcome::Ok { payload } => Ok(*payload),
+            RpcOutcome::Error { code, message } => {
+                let message = format!("remote shard {} returned {code}: {message}", self.shard_id);
+                Err(match code.as_str() {
+                    "io" => PrismError::Io(message),
+                    "corrupt" => PrismError::Corrupt(message),
+                    "invalid" => PrismError::Invalid(message),
+                    "policy" => PrismError::Policy(message),
+                    "not_found" => PrismError::NotFound(message),
+                    "decode" => PrismError::Decode(message),
+                    "invariant" => PrismError::Invariant(message),
+                    "out_of_space" => PrismError::OutOfSpace(message),
+                    _ => PrismError::Io(format!(
+                        "{message}; the remote error code is not recognized by this client"
+                    )),
+                })
+            }
         }
+    }
+}
+
+impl ReadShard for TlsShardClient {
+    fn validate_snapshot(&self, snapshot: &Snapshot) -> Result<()> {
+        TlsShardClient::validate_snapshot(self, snapshot.clone())
+    }
+
+    fn candidates(&self, snapshot: &Snapshot, query: &Query) -> Result<Vec<ShardCandidate>> {
+        TlsShardClient::candidates(self, snapshot.clone(), query.clone())
+    }
+
+    fn rerank(
+        &self,
+        snapshot: &Snapshot,
+        query: &Query,
+        selected: &[(String, usize)],
+    ) -> Result<Vec<ShardScored>> {
+        TlsShardClient::rerank(self, snapshot.clone(), query.clone(), selected.to_vec())
+    }
+
+    fn materialize(
+        &self,
+        snapshot: &Snapshot,
+        selected: &[(String, usize)],
+    ) -> Result<Vec<(Event, u32)>> {
+        TlsShardClient::materialize(self, snapshot.clone(), selected.to_vec())
+    }
+}
+
+/// One authenticated shard endpoint in a remote read topology. Shard identifiers must be the
+/// contiguous range `0..N`; routing by tenant bucket therefore cannot silently disagree with the
+/// configured endpoint order.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteShardEndpoint {
+    pub shard_id: usize,
+    pub address: String,
+    pub server_name: String,
+}
+
+/// Versioned, bounded topology consumed by the read coordinator.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteReadTopology {
+    pub version: u16,
+    pub shards: Vec<RemoteShardEndpoint>,
+}
+
+impl RemoteReadTopology {
+    pub fn load(path: &Path) -> Result<Self> {
+        let metadata = fs::symlink_metadata(path)
+            .map_err(|error| transport_error("inspect coordinator topology", error))?;
+        if !metadata.file_type().is_file() {
+            return Err(invalid_transport(format!(
+                "coordinator topology {} must be a regular, non-symlink file",
+                path.display()
+            )));
+        }
+        if metadata.len() == 0 || metadata.len() > MAX_REMOTE_TOPOLOGY_BYTES {
+            return Err(invalid_transport(format!(
+                "coordinator topology {} size {} is outside 1..={MAX_REMOTE_TOPOLOGY_BYTES}",
+                path.display(),
+                metadata.len()
+            )));
+        }
+        let topology: Self = serde_json::from_slice(
+            &fs::read(path).map_err(|error| transport_error("read coordinator topology", error))?,
+        )?;
+        topology.validate()?;
+        Ok(topology)
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.version != 1 {
+            return Err(invalid_transport(format!(
+                "unsupported coordinator topology version {}; expected 1",
+                self.version
+            )));
+        }
+        if self.shards.is_empty() || self.shards.len() > MAX_REMOTE_READ_SHARDS {
+            return Err(invalid_transport(format!(
+                "coordinator topology needs 1..={MAX_REMOTE_READ_SHARDS} shards"
+            )));
+        }
+        let mut ids: Vec<usize> = self.shards.iter().map(|shard| shard.shard_id).collect();
+        ids.sort_unstable();
+        let expected: Vec<usize> = (0..self.shards.len()).collect();
+        if ids != expected {
+            return Err(invalid_transport(format!(
+                "coordinator shard ids must be the contiguous range 0..{}; found {ids:?}",
+                self.shards.len()
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// A multi-node, read-only coordinator over mutually authenticated shard clients.
+///
+/// Construction preflights every endpoint and refuses mixed store configurations. Query planning
+/// pins a snapshot vector, routes tenant-scoped reads to one shard, and runs the same two-round
+/// coordinator implementation as the in-process cluster for cross-tenant reads.
+pub struct RemoteReadCluster {
+    shards: Vec<TlsShardClient>,
+    scheme: PartitionScheme,
+    dim: usize,
+    seed: u64,
+}
+
+impl RemoteReadCluster {
+    pub fn connect(
+        topology: RemoteReadTopology,
+        tls: Arc<ClientConfig>,
+        timeout: Duration,
+    ) -> Result<Self> {
+        topology.validate()?;
+        let mut endpoints = topology.shards;
+        endpoints.sort_by_key(|endpoint| endpoint.shard_id);
+        let shards = endpoints
+            .into_iter()
+            .map(|endpoint| {
+                TlsShardClient::new(
+                    endpoint.shard_id,
+                    endpoint.address,
+                    endpoint.server_name,
+                    Arc::clone(&tls),
+                    timeout,
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let health_results: Vec<Result<ShardHealth>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = shards
+                .iter()
+                .map(|shard| scope.spawn(|| shard.health()))
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| {
+                    handle.join().map_err(|_| {
+                        PrismError::Invariant("a remote shard health-check thread panicked".into())
+                    })?
+                })
+                .collect()
+        });
+        let mut health = Vec::with_capacity(health_results.len());
+        for (shard_id, result) in health_results.into_iter().enumerate() {
+            health.push(result.map_err(|error| {
+                PrismError::Io(format!(
+                    "remote coordinator preflight could not reach shard {shard_id}: {error}"
+                ))
+            })?);
+        }
+        let config = health[0].store_config.clone();
+        config.validate()?;
+        for (shard_id, item) in health.iter().enumerate() {
+            if item.protocol_version != SHARD_RPC_PROTOCOL_VERSION || item.shard_id != shard_id {
+                return Err(PrismError::Invariant(format!(
+                    "remote coordinator preflight identity mismatch for shard {shard_id}"
+                )));
+            }
+            if item.store_config != config {
+                return Err(PrismError::Invariant(format!(
+                    "remote shard {shard_id} has a different immutable store configuration; \
+                     dimensions, seed, partition routing, and format must agree"
+                )));
+            }
+        }
+
+        Ok(Self {
+            shards,
+            scheme: config.partitions,
+            dim: config.dim,
+            seed: config.seed,
+        })
+    }
+
+    pub fn num_shards(&self) -> usize {
+        self.shards.len()
+    }
+
+    pub fn shard_index(&self, tenant: &str) -> usize {
+        let bucket = self.scheme.bucket_of(tenant);
+        let ordinal = match bucket {
+            Bucket::Shared(index) => index as u64,
+            Bucket::Dedicated(index) => self.scheme.buckets as u64 + index as u64,
+        };
+        (ordinal % self.shards.len() as u64) as usize
+    }
+
+    pub fn search(&self, query: &Query) -> Result<SearchResult> {
+        if let Some(tenant) = query.tenant.as_deref() {
+            let shard_id = self.shard_index(tenant);
+            let snapshot = self.shards[shard_id].snapshot().map_err(|error| {
+                PrismError::NotFound(format!(
+                    "shard {shard_id} unreachable while pinning its snapshot: {error}; \
+                     a tenant-scoped query is all-or-nothing"
+                ))
+            })?;
+            return self.shards[shard_id]
+                .search_at(snapshot, query.clone())
+                .map_err(|error| {
+                    PrismError::NotFound(format!(
+                        "shard {shard_id} unreachable while serving the tenant query: {error}; \
+                         a tenant-scoped query is all-or-nothing"
+                    ))
+                });
+        }
+
+        let snapshot_results: Vec<Result<Snapshot>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = self
+                .shards
+                .iter()
+                .map(|shard| scope.spawn(|| shard.snapshot()))
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| {
+                    handle.join().map_err(|_| {
+                        PrismError::Invariant("a remote shard snapshot thread panicked".into())
+                    })?
+                })
+                .collect()
+        });
+        let mut vector = Vec::with_capacity(snapshot_results.len());
+        let mut missing = Vec::new();
+        for (shard_id, result) in snapshot_results.into_iter().enumerate() {
+            match result {
+                Ok(snapshot) => vector.push(snapshot),
+                Err(error) if query.best_effort => {
+                    missing.push(prism_types::MissingShard {
+                        shard: shard_id,
+                        reason: format!("snapshot pin failed: {error}"),
+                    });
+                    vector.push(Snapshot::empty());
+                }
+                Err(error) => {
+                    return Err(PrismError::NotFound(format!(
+                        "shard {shard_id} unreachable while pinning the distributed snapshot \
+                         vector: {error}. The query did not opt in to a partial answer."
+                    )));
+                }
+            }
+        }
+
+        Cluster::coordinate_cross_shard(&self.shards, self.dim, self.seed, &vector, query, missing)
     }
 }
 
@@ -794,9 +1190,19 @@ mod tests {
         engine: Arc<Engine>,
         count: usize,
     ) -> (SocketAddr, std::thread::JoinHandle<Result<()>>) {
+        connection_server_for(7, tls, engine, count)
+    }
+
+    fn connection_server_for(
+        shard_id: usize,
+        tls: Arc<ServerConfig>,
+        engine: Arc<Engine>,
+        count: usize,
+    ) -> (SocketAddr, std::thread::JoinHandle<Result<()>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
-        let server = ShardRpcServer::new(7, engine, tls, Duration::from_millis(500)).unwrap();
+        let server =
+            ShardRpcServer::new(shard_id, engine, tls, Duration::from_millis(500)).unwrap();
         let handle = std::thread::spawn(move || server.serve_connections(listener, count));
         (address, handle)
     }
@@ -816,6 +1222,89 @@ mod tests {
             attributes: Default::default(),
             idempotency_key: None,
         }
+    }
+
+    fn event_for(id: &str, tenant: &str, body: &str) -> Event {
+        Event {
+            tenant_id: tenant.to_string(),
+            ..event(id, body)
+        }
+    }
+
+    type TwoShardFixture = (
+        PathBuf,
+        SearchResult,
+        RemoteReadTopology,
+        Arc<ClientConfig>,
+        [std::thread::JoinHandle<Result<()>>; 2],
+    );
+
+    fn two_shard_fixture(server_connections: [usize; 2]) -> TwoShardFixture {
+        let root = temp("remote-cluster");
+        let config = StoreConfig {
+            format_version: STORE_VERSION,
+            dim: 8,
+            nlist: 2,
+            pq_m: 2,
+            seed: 42,
+            kmeans_restarts: 2,
+            block_size: 4096,
+            partitions: PartitionScheme::default(),
+            promote: Vec::new(),
+        };
+        let cluster = crate::sharded::Cluster::init(&root, 2, config).unwrap();
+        let tenant0 = (0..10_000)
+            .map(|index| format!("tenant-{index}"))
+            .find(|tenant| cluster.shard_index(tenant) == 0)
+            .unwrap();
+        let tenant1 = (0..10_000)
+            .map(|index| format!("tenant-{index}"))
+            .find(|tenant| cluster.shard_index(tenant) == 1)
+            .unwrap();
+        cluster
+            .ingest(
+                vec![
+                    event_for("a1", &tenant0, "payment service timeout"),
+                    event_for("a2", &tenant0, "payment queue growing"),
+                    event_for("b1", &tenant1, "payment service recovered"),
+                    event_for("b2", &tenant1, "search latency high"),
+                ],
+                2,
+            )
+            .unwrap();
+        let query = Query {
+            text: "payment service".into(),
+            k: 4,
+            candidates: 8,
+            rerank: 8,
+            ..Query::default()
+        };
+        let expected = cluster.search(&query).unwrap();
+        drop(cluster);
+
+        let shard0 = Arc::new(Engine::open(&root.join("shard-0")).unwrap());
+        let shard1 = Arc::new(Engine::open(&root.join("shard-1")).unwrap());
+        let (server_tls, client_tls, _) = tls_pair();
+        let (address0, server0) =
+            connection_server_for(0, Arc::clone(&server_tls), shard0, server_connections[0]);
+        let (address1, server1) =
+            connection_server_for(1, server_tls, shard1, server_connections[1]);
+        let topology = RemoteReadTopology {
+            version: 1,
+            shards: vec![
+                RemoteShardEndpoint {
+                    shard_id: 0,
+                    address: address0.to_string(),
+                    server_name: "shard.test".into(),
+                },
+                RemoteShardEndpoint {
+                    shard_id: 1,
+                    address: address1.to_string(),
+                    server_name: "shard.test".into(),
+                },
+            ],
+        };
+        (root, expected, topology, client_tls, [server0, server1])
     }
 
     #[test]
@@ -852,7 +1341,7 @@ mod tests {
             )
             .unwrap();
         let (server_tls, client_tls, _) = tls_pair();
-        let (address, server) = connection_server(server_tls, shard, 5);
+        let (address, server) = connection_server(server_tls, shard, 6);
         let client = TlsShardClient::new(
             7,
             address.to_string(),
@@ -867,16 +1356,19 @@ mod tests {
             tenant: Some("tenant-a".into()),
             ..Query::default()
         };
+        let complete = client.search_at(snapshot.clone(), query.clone()).unwrap();
+        assert!(!complete.hits.is_empty());
         let candidates = client.candidates(snapshot.clone(), query.clone()).unwrap();
         assert!(!candidates.is_empty());
         let selected: Vec<_> = candidates
             .iter()
             .map(|candidate| (candidate.part_id.clone(), candidate.row))
             .collect();
-        let scored = client.rerank(query, selected).unwrap();
+        let scored = client.rerank(snapshot.clone(), query, selected).unwrap();
         assert!(!scored.is_empty());
         let materialized = client
             .materialize(
+                snapshot.clone(),
                 scored
                     .iter()
                     .map(|row| (row.part_id.clone(), row.row))
@@ -889,6 +1381,238 @@ mod tests {
             .all(|(event, _)| event.tenant_id == "tenant-a"));
         assert_eq!(snapshot.snapshot_id, client.health().unwrap().snapshot_id);
         server.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn coordinator_cannot_mutate_catalog_snapshot_bytes() {
+        let shard = engine();
+        shard
+            .ingest(vec![event("e1", "payment service timeout")], 2)
+            .unwrap();
+        let (server_tls, client_tls, _) = tls_pair();
+        let (address, server) = connection_server(server_tls, shard, 2);
+        let client = TlsShardClient::new(
+            7,
+            address.to_string(),
+            "shard.test",
+            client_tls,
+            Duration::from_millis(500),
+        )
+        .unwrap();
+        let mut snapshot = client.snapshot().unwrap();
+        snapshot.created_at_ms += 1;
+        let error = client
+            .candidates(snapshot, Query::default())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("immutable catalog bytes"), "{error}");
+        server.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn selected_parts_must_belong_to_the_pinned_snapshot() {
+        let shard = engine();
+        shard
+            .ingest(vec![event("e1", "payment service timeout")], 2)
+            .unwrap();
+        let snapshot = shard.snapshot().unwrap();
+        let (server_tls, _, _) = tls_pair();
+        let server = ShardRpcServer::new(7, shard, server_tls, Duration::from_millis(500)).unwrap();
+        let error = server
+            .process(RpcRequest {
+                version: SHARD_RPC_PROTOCOL_VERSION,
+                request_id: "foreign-part".into(),
+                target_shard: 7,
+                operation: RpcOperation::Materialize {
+                    snapshot,
+                    selected: vec![("p99999999-deadbeef".into(), 0)],
+                },
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not in pinned snapshot"), "{error}");
+    }
+
+    #[test]
+    fn remote_coordinator_is_byte_identical_to_the_in_process_cluster() {
+        let (root, expected, topology, client_tls, servers) = two_shard_fixture([6, 6]);
+        let remote =
+            RemoteReadCluster::connect(topology, client_tls, Duration::from_millis(500)).unwrap();
+        assert_eq!(remote.num_shards(), 2);
+        let actual = remote
+            .search(&Query {
+                text: "payment service".into(),
+                k: 4,
+                candidates: 8,
+                rerank: 8,
+                ..Query::default()
+            })
+            .unwrap();
+        assert_eq!(
+            serde_json::to_vec(&actual).unwrap(),
+            serde_json::to_vec(&expected).unwrap()
+        );
+        for server in servers {
+            server.join().unwrap().unwrap();
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn remote_partition_is_fail_named_or_explicitly_labelled() {
+        // Shard 1 accepts only the construction health check and then disappears. Shard 0 serves
+        // the default failure attempt, one best-effort query, and one refused partial GROUP BY.
+        let (root, _, topology, client_tls, servers) = two_shard_fixture([11, 1]);
+        let remote =
+            RemoteReadCluster::connect(topology, client_tls, Duration::from_millis(500)).unwrap();
+        let base = Query {
+            text: "payment service".into(),
+            k: 4,
+            candidates: 8,
+            rerank: 8,
+            ..Query::default()
+        };
+        let error = remote.search(&base).unwrap_err().to_string();
+        assert!(error.contains("shard 1 unreachable"), "{error}");
+        assert!(error.contains("did not opt in"), "{error}");
+
+        let partial = remote
+            .search(&Query {
+                best_effort: true,
+                ..base.clone()
+            })
+            .unwrap();
+        assert_eq!(partial.missing_shards.len(), 1);
+        assert_eq!(partial.missing_shards[0].shard, 1);
+        assert_eq!(partial.counters.shards_missing, 1);
+
+        let error = remote
+            .search(&Query {
+                best_effort: true,
+                group_k: Some(2),
+                ..base
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("GROUP BY"), "{error}");
+        assert!(error.contains("refused"), "{error}");
+
+        for server in servers {
+            server.join().unwrap().unwrap();
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn materialization_partition_recomputes_the_best_effort_topk() {
+        // Shard 1 survives health, snapshot pin, validation, candidates, and rerank, then disappears
+        // before final survivor bodies are fetched. Shard 0 is materialized once before that failure
+        // and once again after the coordinator removes shard 1's scores and recomputes the top-k.
+        let (root, _, topology, client_tls, servers) = two_shard_fixture([7, 5]);
+        let remote =
+            RemoteReadCluster::connect(topology, client_tls, Duration::from_millis(500)).unwrap();
+        let partial = remote
+            .search(&Query {
+                text: "payment service".into(),
+                k: 4,
+                candidates: 8,
+                rerank: 8,
+                best_effort: true,
+                ..Query::default()
+            })
+            .unwrap();
+        assert_eq!(partial.missing_shards.len(), 1);
+        assert_eq!(partial.missing_shards[0].shard, 1);
+        assert_eq!(partial.counters.shards_missing, 1);
+        assert!(!partial.hits.is_empty());
+        assert!(partial
+            .hits
+            .iter()
+            .all(|hit| remote.shard_index(&hit.event.tenant_id) == 0));
+        for server in servers {
+            server.join().unwrap().unwrap();
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn remote_topology_is_versioned_bounded_and_contiguous() {
+        let invalid = RemoteReadTopology {
+            version: 1,
+            shards: vec![RemoteShardEndpoint {
+                shard_id: 1,
+                address: "127.0.0.1:1".into(),
+                server_name: "shard.test".into(),
+            }],
+        };
+        let error = invalid.validate().unwrap_err().to_string();
+        assert!(error.contains("contiguous range"), "{error}");
+
+        let invalid = RemoteReadTopology {
+            version: 2,
+            shards: vec![RemoteShardEndpoint {
+                shard_id: 0,
+                address: "127.0.0.1:1".into(),
+                server_name: "shard.test".into(),
+            }],
+        };
+        let error = invalid.validate().unwrap_err().to_string();
+        assert!(error.contains("topology version"), "{error}");
+    }
+
+    #[test]
+    fn remote_preflight_refuses_mixed_store_configuration() {
+        let first = engine();
+        let second_root = temp("mixed-config");
+        let second = Arc::new(
+            Engine::init(
+                &second_root,
+                StoreConfig {
+                    format_version: STORE_VERSION,
+                    dim: 8,
+                    nlist: 2,
+                    pq_m: 2,
+                    seed: 99,
+                    kmeans_restarts: 2,
+                    block_size: 4096,
+                    partitions: PartitionScheme::default(),
+                    promote: Vec::new(),
+                },
+            )
+            .unwrap(),
+        );
+        let (server_tls, client_tls, _) = tls_pair();
+        let (address0, server0) = connection_server_for(0, Arc::clone(&server_tls), first, 1);
+        let (address1, server1) = connection_server_for(1, server_tls, second, 1);
+        let error = match RemoteReadCluster::connect(
+            RemoteReadTopology {
+                version: 1,
+                shards: vec![
+                    RemoteShardEndpoint {
+                        shard_id: 0,
+                        address: address0.to_string(),
+                        server_name: "shard.test".into(),
+                    },
+                    RemoteShardEndpoint {
+                        shard_id: 1,
+                        address: address1.to_string(),
+                        server_name: "shard.test".into(),
+                    },
+                ],
+            },
+            client_tls,
+            Duration::from_millis(500),
+        ) {
+            Ok(_) => panic!("mixed store configurations must be refused"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("different immutable store configuration"),
+            "{error}"
+        );
+        server0.join().unwrap().unwrap();
+        server1.join().unwrap().unwrap();
+        fs::remove_dir_all(second_root).unwrap();
     }
 
     #[test]
