@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "clients": [
+    {
+      "identity_id": "example-reader",
+      "certificate_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "tenants": ["tenant-a"],
+      "scopes": ["health", "search"],
+      "max_in_flight": 8
+    },
+    {
+      "identity_id": "kubernetes-probe",
+      "certificate_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "tenants": [],
+      "scopes": ["health"],
+      "max_in_flight": 2
+    }
+  ]
+}

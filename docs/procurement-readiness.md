@@ -6,11 +6,13 @@ controls name their gaps, and that a product with open blocking gates cannot be 
 production-approved.
 
 The current decision is **not approved**, and PrismDB as a whole is **not yet a software release
-candidate**. The signed model-service image and mTLS remote read coordinator are strong component
-artifacts, but they do not turn the database core into a supported production service. A public
-service/API and write plane, signed database distribution, encryption and key lifecycle, backup and
-RPO/RTO, service observability and SLOs, independent-host scaling/fault evidence, independent
-penetration testing, support, and organizational assurance remain required.
+candidate**. The signed model-service image, mTLS remote coordinator, and authenticated `prismd`
+read-service distribution are strong component artifacts. The read API now has exact-certificate
+tenant policy, bounded requests, metrics, a hardened Helm chart, and a signed-image release path.
+They do not turn the database core into a complete supported product: a public write plane and shard
+distribution, encryption and key lifecycle, backup and RPO/RTO, load-derived SLOs, independent-host
+scaling/fault evidence, independent penetration testing, support, and organizational assurance
+remain required.
 
 ## Evaluation baseline
 

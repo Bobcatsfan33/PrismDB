@@ -1128,3 +1128,42 @@ the only coordinator implementation.
   timer-driven asynchronous hedge races remain open. The protocol remains
   read-only; remote-durable WAL replication is still the precondition for
   cross-node write takeover.
+
+## D-090 — Public reads bind an exact client certificate to explicit tenants
+
+**S14 production-service increment 1.** The remote coordinator is an internal
+component, not a buyer-facing authorization boundary. The first public API is
+therefore a separate `prismd` service with a smaller query type and two
+independent identity checks.
+
+- **A trusted CA is necessary but not authorization.** TLS requires a client
+  certificate from the configured CA. The exact leaf DER SHA-256 must also
+  exist in a bounded policy with explicit identity, tenant, scope, and
+  concurrency grants. Wildcards are invalid. A CA-valid but unlisted identity
+  receives `403`, and the real TLS gate proves both listed and unlisted paths.
+- **Tenant is injected below public query controls.** The request names the
+  tenant it wants, but the service creates the engine `Query` only after that
+  name is in the certificate grant. The public schema has no cross-tenant,
+  best-effort, plan, route, adaptive-margin, candidate, or rerank control.
+  Unknown JSON fields fail. A public caller cannot turn an all-or-nothing
+  tenant read into a plausibly partial result.
+- **HTTP is a bounded envelope, not a general web framework.** One HTTP/1.1
+  request runs on one mTLS connection. Headers, body, text, result width,
+  deadlines, total connections, and per-identity searches all have
+  pre-allocation bounds. Duplicate headers and transfer encoding are refused.
+  Clean TLS close notification is part of the gate because truncation-ambiguous
+  EOF is not an acceptable success signal.
+- **Health is not a plaintext bypass.** Health, shard-backed readiness, and
+  fixed-cardinality metrics require certificate scopes. The deployment's exec
+  probe uses its own health-only client identity. Readiness re-authenticates
+  every shard and revalidates immutable routing configuration.
+- **The release subject is a digest.** A digest-pinned Rust builder produces a
+  distroless non-root image. The Helm chart refuses mutable image references,
+  one replica, empty topology, and unrestricted network selectors. The release
+  workflow builds, SBOMs, scans, signs, attests, and self-verifies `prismd-v*`
+  image digests.
+
+This decision closes the supported public **read** boundary only. A public
+write service, replicated admission log and failover, envelope encryption,
+backup/restore, independent-host scale/chaos, load-derived SLO, and external
+penetration test remain explicit deployment blockers.

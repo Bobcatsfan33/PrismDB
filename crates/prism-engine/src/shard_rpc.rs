@@ -220,9 +220,10 @@ fn read_private_key(path: &Path) -> Result<PrivateKeyDer<'static>> {
             .permissions()
             .mode()
             & 0o777;
-        if mode & 0o077 != 0 {
+        if mode & 0o037 != 0 {
             return Err(invalid_transport(format!(
-                "private key {} permissions are {mode:03o}; expected 0600 or stricter",
+                "private key {} permissions are {mode:03o}; expected 0640 or stricter \
+                 (group-read is allowed, group-write/execute and all other access are refused)",
                 path.display()
             )));
         }
@@ -265,7 +266,9 @@ fn root_store(path: &Path, label: &str) -> Result<RootCertStore> {
 
 /// Load a shard server identity and the dedicated CA allowed to issue coordinator certificates.
 ///
-/// The private-key path must be a regular non-symlink file with mode 0600 or stricter on Unix.
+/// The private-key path must be a regular non-symlink file with mode 0640 or stricter on Unix.
+/// Group-read supports an isolated Kubernetes `fsGroup`; group write/execute and all access for
+/// other users are refused.
 /// There is no "no client auth" constructor: production cannot accidentally downgrade mTLS.
 pub fn server_tls_from_pem(
     certificate_chain: &Path,
@@ -922,6 +925,47 @@ impl RemoteReadCluster {
             Bucket::Dedicated(index) => self.scheme.buckets as u64 + index as u64,
         };
         (ordinal % self.shards.len() as u64) as usize
+    }
+
+    /// Revalidate every authenticated shard identity and immutable store configuration.
+    ///
+    /// The public service calls this from readiness rather than treating a successful startup
+    /// preflight as permanent. A partition therefore removes the pod from ready endpoints before
+    /// callers receive a plausibly healthy but incomplete service.
+    pub fn readiness(&self) -> Result<()> {
+        let health_results: Vec<Result<ShardHealth>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = self
+                .shards
+                .iter()
+                .map(|shard| scope.spawn(|| shard.health()))
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| {
+                    handle.join().map_err(|_| {
+                        PrismError::Invariant("a remote shard readiness thread panicked".into())
+                    })?
+                })
+                .collect()
+        });
+        for (shard_id, health) in health_results.into_iter().enumerate() {
+            let health = health.map_err(|error| {
+                PrismError::Io(format!(
+                    "remote coordinator readiness could not reach shard {shard_id}: {error}"
+                ))
+            })?;
+            if health.protocol_version != SHARD_RPC_PROTOCOL_VERSION
+                || health.shard_id != shard_id
+                || health.store_config.dim != self.dim
+                || health.store_config.seed != self.seed
+                || health.store_config.partitions != self.scheme
+            {
+                return Err(PrismError::Invariant(format!(
+                    "remote shard {shard_id} failed readiness identity/configuration validation"
+                )));
+            }
+        }
+        Ok(())
     }
 
     pub fn search(&self, query: &Query) -> Result<SearchResult> {
@@ -1734,10 +1778,14 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn private_key_file_must_not_be_group_or_world_readable() {
+    fn private_key_file_allows_group_read_but_refuses_other_access() {
         use std::os::unix::fs::PermissionsExt;
         let path = temp("permissive-key");
         fs::write(&path, b"not-a-key").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+        let parse_error = read_private_key(&path).unwrap_err().to_string();
+        assert!(parse_error.contains("parse private key"), "{parse_error}");
+
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
         let error = read_private_key(&path).unwrap_err().to_string();
         assert!(error.contains("permissions are 644"), "{error}");

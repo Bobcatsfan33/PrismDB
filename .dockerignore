@@ -1,0 +1,9 @@
+.git
+.github
+target
+demo
+scratch
+**/__pycache__
+**/*.pyc
+services/model-service
+testing/corpus

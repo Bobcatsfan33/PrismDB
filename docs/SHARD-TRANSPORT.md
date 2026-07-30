@@ -25,9 +25,11 @@ acknowledged-but-unpublished records would weaken the ack contract.
   constructor.
 - Use separate, least-privilege cluster CAs for coordinator and shard
   identities. Do not reuse a public web PKI key or the object-store credentials.
-- Private-key files must be regular, non-symlink files with mode `0600` or
-  stricter on Unix. Certificate, CA, and private-key files are capped at 4 MiB
-  and rejected from metadata before allocation.
+- Private-key files must be regular, non-symlink files with mode `0640` or
+  stricter on Unix. Group-read supports one isolated Kubernetes `fsGroup`;
+  group write/execute and every permission for other users are refused.
+  Certificate, CA, and private-key files are capped at 4 MiB and rejected from
+  metadata before allocation.
 - Every request names its protocol version, unique request ID, and intended
   shard. A shard refuses a request addressed to another shard.
 - Coordinator topology is a versioned, deny-unknown-fields JSON file capped at
