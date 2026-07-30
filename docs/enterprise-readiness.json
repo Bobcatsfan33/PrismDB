@@ -1,0 +1,235 @@
+{
+  "schemaVersion": 1,
+  "product": "PrismDB",
+  "repository": "Bobcatsfan33/PrismDB",
+  "assessment": {
+    "asOf": "2026-07-29",
+    "reviewBy": "2026-10-29",
+    "softwareReleaseCandidate": false,
+    "deploymentDecision": "not-approved",
+    "decisionReason": "PrismDB is an executable reference core; production service, assurance, and deployment gates remain open."
+  },
+  "frameworks": [
+    {
+      "id": "nist-ssdf-1.1",
+      "name": "NIST SP 800-218 Secure Software Development Framework",
+      "version": "1.1",
+      "url": "https://csrc.nist.gov/pubs/sp/800/218/final"
+    },
+    {
+      "id": "slsa-1.2",
+      "name": "Supply-chain Levels for Software Artifacts",
+      "version": "1.2",
+      "url": "https://slsa.dev/spec/v1.2/"
+    },
+    {
+      "id": "owasp-asvs-5.0.0",
+      "name": "OWASP Application Security Verification Standard",
+      "version": "5.0.0",
+      "url": "https://owasp.org/www-project-application-security-verification-standard/"
+    },
+    {
+      "id": "csa-ccm-caiq-4.1",
+      "name": "CSA Cloud Controls Matrix and CAIQ",
+      "version": "4.1",
+      "url": "https://cloudsecurityalliance.org/artifacts/cloud-controls-matrix-v4-1"
+    },
+    {
+      "id": "nist-ai-rmf-1.0",
+      "name": "NIST Artificial Intelligence Risk Management Framework",
+      "version": "1.0",
+      "url": "https://www.nist.gov/publications/artificial-intelligence-risk-management-framework-ai-rmf-10"
+    },
+    {
+      "id": "csa-ai-caiq-1.0.2",
+      "name": "CSA AI Consensus Assessments Initiative Questionnaire",
+      "version": "1.0.2",
+      "url": "https://cloudsecurityalliance.org/artifacts/ai-consensus-assessments-initiative-questionnaire-ai-caiq"
+    }
+  ],
+  "controls": [
+    {
+      "id": "GOV-01",
+      "title": "Security governance and product boundary",
+      "status": "implemented",
+      "frameworks": ["nist-ssdf-1.1", "nist-ai-rmf-1.0"],
+      "evidence": ["SECURITY.md", "docs/PRISM.md", "docs/DECISIONS.md", "docs/PROGRESS.md"],
+      "gaps": []
+    },
+    {
+      "id": "SDLC-01",
+      "title": "Secure development and change verification",
+      "status": "implemented",
+      "frameworks": ["nist-ssdf-1.1", "owasp-asvs-5.0.0"],
+      "evidence": [
+        ".github/CODEOWNERS",
+        ".github/workflows/ci.yml",
+        ".github/workflows/nightly.yml",
+        "docs/UNSAFE-INVENTORY.md"
+      ],
+      "gaps": []
+    },
+    {
+      "id": "APPSEC-01",
+      "title": "Technical security verification",
+      "status": "partial",
+      "frameworks": ["owasp-asvs-5.0.0", "csa-ccm-caiq-4.1"],
+      "evidence": ["SECURITY.md", ".github/workflows/ci.yml", "docs/UNSAFE-INVENTORY.md"],
+      "gaps": [
+        "No commissioned independent penetration test exists.",
+        "The future production API/listener has not yet undergone ASVS-scoped verification."
+      ]
+    },
+    {
+      "id": "SUPPLY-01",
+      "title": "Release integrity, SBOM, signing, and provenance",
+      "status": "partial",
+      "frameworks": ["nist-ssdf-1.1", "slsa-1.2", "csa-ccm-caiq-4.1"],
+      "evidence": [
+        ".github/workflows/security.yml",
+        ".github/workflows/model-service-release.yml",
+        "docs/RELEASE-ASSURANCE.md"
+      ],
+      "gaps": [
+        "Signed SBOM/provenance release assurance covers the model-service image, not a supported PrismDB database distribution."
+      ]
+    },
+    {
+      "id": "IAM-01",
+      "title": "Identity, authorization, and tenant isolation",
+      "status": "partial",
+      "frameworks": ["owasp-asvs-5.0.0", "csa-ccm-caiq-4.1", "csa-ai-caiq-1.0.2"],
+      "evidence": ["docs/QUERY-CONTRACT.md", "docs/SHARD-TRANSPORT.md", "docs/MODEL-PLANE.md"],
+      "gaps": [
+        "The read-only shard service uses mTLS, but the product has no complete production API identity boundary or write service."
+      ]
+    },
+    {
+      "id": "CRYPTO-01",
+      "title": "Transport, storage encryption, and key management",
+      "status": "partial",
+      "frameworks": ["owasp-asvs-5.0.0", "csa-ccm-caiq-4.1"],
+      "evidence": ["docs/SHARD-TRANSPORT.md", "docs/STORAGE-CONTRACT.md", "SECURITY.md"],
+      "gaps": [
+        "Per-tenant envelope encryption and production KMS/HSM lifecycle are not implemented.",
+        "TLS/authentication for the eventual public service remains open."
+      ]
+    },
+    {
+      "id": "DATA-01",
+      "title": "Data protection, privacy, retention, and deletion",
+      "status": "partial",
+      "frameworks": ["csa-ccm-caiq-4.1", "csa-ai-caiq-1.0.2", "nist-ai-rmf-1.0"],
+      "evidence": ["docs/QUERY-CONTRACT.md", "docs/MODEL-GOVERNANCE.md", "docs/INGESTION-CONTRACT.md"],
+      "gaps": [
+        "Versioned redact-before-embedding, production retention/deletion, residency, and raw-disk metadata confidentiality remain open."
+      ]
+    },
+    {
+      "id": "RES-01",
+      "title": "Backup, recovery, failover, and resilience",
+      "status": "partial",
+      "frameworks": ["csa-ccm-caiq-4.1"],
+      "evidence": [
+        ".github/workflows/ci.yml",
+        ".github/workflows/nightly.yml",
+        "docs/STORAGE-CONTRACT.md",
+        "docs/SHARD-TRANSPORT.md"
+      ],
+      "gaps": [
+        "No supported backup/restore product workflow or customer-scale RPO/RTO drill exists.",
+        "Remote durable WAL replication, network-partition evidence, and cross-node write failover remain open."
+      ]
+    },
+    {
+      "id": "OBS-01",
+      "title": "Operational observability and SLO evidence",
+      "status": "partial",
+      "frameworks": ["csa-ccm-caiq-4.1", "csa-ai-caiq-1.0.2"],
+      "evidence": ["baselines.json", "docs/PROGRESS.md", ".github/workflows/nightly.yml"],
+      "gaps": [
+        "No production service metrics/tracing contract, alert catalog, SLOs, or long-running API workload evidence exists."
+      ]
+    },
+    {
+      "id": "IR-01",
+      "title": "Incident and vulnerability response",
+      "status": "partial",
+      "frameworks": ["nist-ssdf-1.1", "csa-ccm-caiq-4.1"],
+      "evidence": ["SECURITY.md", "docs/incident-response.md"],
+      "gaps": [
+        "Named on-call staff, customer notification, and an exercised incident drill are organizational gates."
+      ]
+    },
+    {
+      "id": "VM-01",
+      "title": "Dependency and vulnerability management",
+      "status": "implemented",
+      "frameworks": ["nist-ssdf-1.1", "csa-ccm-caiq-4.1"],
+      "evidence": ["SECURITY.md", ".github/dependabot.yml", ".github/workflows/security.yml"],
+      "gaps": []
+    },
+    {
+      "id": "AIRISK-01",
+      "title": "Model identity, quality, drift, and AI governance",
+      "status": "partial",
+      "frameworks": ["nist-ai-rmf-1.0", "csa-ai-caiq-1.0.2"],
+      "evidence": [
+        "docs/MODEL-GOVERNANCE.md",
+        "docs/MODEL-PLANE.md",
+        "docs/DETERMINISM-CONTRACT.md",
+        "baselines.json"
+      ],
+      "gaps": [
+        "Real-embedding corpus retuning, production GPU execution evidence, calibrated OOD/drift gates, and long-running service evaluation remain open."
+      ]
+    }
+  ],
+  "externalGates": [
+    {
+      "id": "ENG-SERVICE",
+      "title": "Production service and supported distribution",
+      "status": "open",
+      "blocking": true,
+      "ownerRole": "Engineering",
+      "acceptanceCriteria": "Supported network/API and write service, migration/version policy, signed database distribution, and production deployment manifests pass release gates.",
+      "evidence": []
+    },
+    {
+      "id": "EXT-PENTEST",
+      "title": "Independent penetration test",
+      "status": "open",
+      "blocking": true,
+      "ownerRole": "Product Security",
+      "acceptanceCriteria": "Signed final report covers API, shard transport, model plane, tenant isolation, formats, and deployment; critical/high findings are closed or CISO-accepted.",
+      "evidence": []
+    },
+    {
+      "id": "EXT-DR",
+      "title": "Production-topology recovery and failover exercise",
+      "status": "open",
+      "blocking": true,
+      "ownerRole": "SRE",
+      "acceptanceCriteria": "Signed customer-scale drill proves approved RPO/RTO, backup restoration, partition behavior, and write failover.",
+      "evidence": []
+    },
+    {
+      "id": "EXT-OPERATIONS",
+      "title": "Support, incident, SLO, and escalation readiness",
+      "status": "open",
+      "blocking": true,
+      "ownerRole": "Support and SRE",
+      "acceptanceCriteria": "Named 24x7 escalation rota, contracted support/SLO targets, status communications, and exercised incident notification procedure.",
+      "evidence": []
+    },
+    {
+      "id": "EXT-COMPLIANCE",
+      "title": "Organizational assurance and contractual package",
+      "status": "open",
+      "blocking": true,
+      "ownerRole": "GRC and Legal",
+      "acceptanceCriteria": "Buyer-required SIG/CAIQ, DPA, subprocessor/residency disclosure, and applicable SOC 2 or ISO 27001 evidence approved.",
+      "evidence": []
+    }
+  ]
+}
