@@ -20,3 +20,5 @@ prism-sql = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 native-tls = { workspace = true }
+rustls = { workspace = true }
+rustls-pki-types = { workspace = true }

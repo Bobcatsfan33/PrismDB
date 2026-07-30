@@ -167,23 +167,23 @@ pub(crate) struct Scored {
 
 /// A round-1 candidate a shard hands the coordinator: its PQ distance, its `event_id` (the tie the
 /// global merge breaks on, C-4), and the `(part_id, row)` handle the coordinator returns in round 2.
-#[derive(Clone, PartialEq)]
-pub(crate) struct ShardCandidate {
-    pub(crate) dist: f32,
-    pub(crate) event_id: String,
-    pub(crate) part_id: String,
-    pub(crate) row: usize,
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ShardCandidate {
+    pub dist: f32,
+    pub event_id: String,
+    pub part_id: String,
+    pub row: usize,
 }
 
 /// A round-2 exact score from a shard: the exact rerank score, the `event_id`, the `(part_id, row)`
 /// handle, and the exact vector (which the coordinator needs only for a semantic `GROUP BY`).
-#[derive(Clone, PartialEq)]
-pub(crate) struct ShardScored {
-    pub(crate) score: f32,
-    pub(crate) event_id: String,
-    pub(crate) part_id: String,
-    pub(crate) row: usize,
-    pub(crate) vector: Vec<f32>,
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ShardScored {
+    pub score: f32,
+    pub event_id: String,
+    pub part_id: String,
+    pub row: usize,
+    pub vector: Vec<f32>,
 }
 
 /// Everything a query needs from one generation, computed once.

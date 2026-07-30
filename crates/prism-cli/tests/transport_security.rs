@@ -103,3 +103,49 @@ fn production_transport_rejects_implicit_development_credentials() {
     );
     assert!(!store.exists());
 }
+
+#[test]
+fn shard_server_has_no_plaintext_or_optional_client_auth_mode() {
+    let output = Command::new(prism())
+        .args([
+            "shard-serve",
+            "--path",
+            "/does/not/matter",
+            "--listen",
+            "127.0.0.1:7443",
+            "--shard-id",
+            "0",
+        ])
+        .output()
+        .expect("run prism");
+
+    assert!(!output.status.success(), "shard server booted without mTLS");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("missing required flag --cert"), "{stderr}");
+}
+
+#[test]
+fn shard_server_refuses_an_ephemeral_production_port() {
+    let output = Command::new(prism())
+        .args([
+            "shard-serve",
+            "--path",
+            "/does/not/matter",
+            "--listen",
+            "127.0.0.1:0",
+            "--shard-id",
+            "0",
+            "--cert",
+            "/does/not/matter",
+            "--key",
+            "/does/not/matter",
+            "--client-ca",
+            "/does/not/matter",
+        ])
+        .output()
+        .expect("run prism");
+
+    assert!(!output.status.success(), "shard server accepted port zero");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("port 0 is test-only"), "{stderr}");
+}

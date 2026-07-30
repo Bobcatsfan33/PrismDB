@@ -18,14 +18,24 @@ repository = "https://github.com/Bobcatsfan33/PrismDB"
 
 # Dependency policy (see docs/DECISIONS.md, D-002):
 # The engine is dependency-light by charter. serde/serde_json handle durable
-# JSON. native-tls is the single security exception authorized by D-065:
-# production object storage requires a platform-maintained, certificate-
-# validating TLS implementation and must never use a hand-rolled TLS stack.
+# JSON. TLS is the security exception authorized by D-065/D-088: native-tls
+# protects production object storage, while rustls protects the mutual-auth
+# shard boundary that native-tls cannot express server-side. Neither may be
+# replaced with a hand-rolled TLS stack.
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # 0.2.14+ requires Rust 1.80; Prism's declared MSRV is 1.75.
 native-tls = "=0.2.13"
+# 0.23.35 declares Rust 1.71 compatibility, below PrismDB's Rust 1.75 MSRV. The
+# first 0.21 implementation was rejected before merge because cargo-audit found
+# advisories in its ring/webpki line. Unlike native-tls, rustls can require and
+# verify client certificates on a server, which is mandatory at this boundary.
+rustls = { version = "=0.23.35", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pki-types = { version = "=1.13.2", features = ["std"] }
+# Cargo.lock intentionally holds zeroize 1.8.1 and tempfile 3.10.1: the newest
+# semver-compatible releases require Cargo features newer than the declared
+# MSRV. The locked MSRV CI job prevents those transitive bounds from drifting.
 prism-types = { path = "crates/prism-types" }
 prism-quantizer = { path = "crates/prism-quantizer" }
 prism-part = { path = "crates/prism-part" }

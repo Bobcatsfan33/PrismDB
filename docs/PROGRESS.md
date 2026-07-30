@@ -23,6 +23,28 @@ Sprint gates from [PRISM.md](PRISM.md) Part IV. **A sprint is done when its gate
 | S16 | Competitive benchmark + recall contract | third-party reproducible; SLOs name recall and cost, not latency alone; **losses published** | ⬜ |
 | S17 | Beachhead product completion | partners query full telemetry with no application-side joins; operators complete drills from docs alone | ⬜ |
 
+### S12 HA transport increment 1 — authenticated shard service
+
+The first real coordinator↔shard node boundary is now executable through
+`prism shard-serve` ([D-088](DECISIONS.md),
+[transport contract](SHARD-TRANSPORT.md)). It exposes only health, pinned
+snapshot discovery, candidates, exact rerank, and materialization. Mutual TLS,
+server-name validation, private-key posture, a versioned/targeted envelope,
+16 MiB pre-allocation frame cap, 10,000-row selection cap, bounded deadlines,
+and a 64-connection blast-radius cap are mandatory; there is no plaintext
+constructor. The permanent gate drives all three query fragments and proves
+untrusted-client refusal, wrong-server-name refusal, half-open timeout, and
+oversized-frame rejection.
+
+This update supersedes the S12 table row's original statement that no
+coordinator↔shard transport exists; the row's multi-node and failover caveats
+remain in force.
+
+S12 remains 🟡. The local coordinator is not yet wired through the client, so
+multi-node scaling, a real network-partition campaign, and asynchronous hedge
+timing are not claimed. Cross-node write failover is still blocked on a
+remote-durable admission log and deliberately absent from the protocol.
+
 ### S13 increment 2 — deployable model identity gateway
 
 [`services/model-service`](../services/model-service) is now the runnable
