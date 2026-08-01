@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "prism-shard.fullname" . }}
+  labels:
+    {{- include "prism-shard.labels" . | nindent 4 }}
+spec:
+  # Headless: every shard gets a stable per-pod DNS name
+  # (<release>-prism-shard-<ordinal>.<release>-prism-shard.<namespace>.svc.cluster.local), which is
+  # the name a coordinator topology pins and the SAN a shard certificate must carry. A load-balanced
+  # ClusterIP would let a coordinator reach "some shard", which is never what routing wants.
+  clusterIP: None
+  publishNotReadyAddresses: false
+  selector:
+    app.kubernetes.io/name: {{ include "prism-shard.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - name: shard-rpc
+      port: {{ .Values.service.port }}
+      targetPort: shard-rpc
+      protocol: TCP

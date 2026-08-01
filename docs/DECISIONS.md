@@ -1238,3 +1238,60 @@ Permanent gates prove real mTLS remote ingest leaves a remote admission object, 
 door injects tenant and observed time, a CA-valid but unauthorized identity remains denied, and the
 read-only shard has no mutation path. Backup/hydration of already-published parts, encryption,
 customer-scale RPO/RTO, load/SLO evidence, and independent security review remain blockers.
+
+## D-093 — A shard node is a signed, supported distribution with a stable identity, not a binary an operator wires up
+
+**S14 production-service increment 4.** The database itself now ships the way the coordinator and
+model service already do. Until this increment, `prism shard-serve` was a correct process with no
+supported packaging: whoever deployed it chose the identity, the trust bundles, the filesystem
+posture, and the blast radius, and no release evidence covered the bytes they ran.
+
+- **The shard's identity is the workload object, not a runbook step.** A `StatefulSet` over a
+  headless `Service` gives every shard a stable ordinal, a stable DNS name — which is exactly the
+  name a coordinator topology pins and a shard certificate must carry in its SAN — and its own
+  volume. Replicas are `len(topology.shards)`, so "exactly one writer per shard" is arithmetic over
+  the configured cluster shape rather than a number an operator can drift from independently. The
+  pod ordinal is read through the downward API and passed as an explicit `--shard-id`; an
+  unresolved ordinal expands to an empty string and is refused, because a shard that guessed zero
+  there would make every pod claim shard 0.
+- **The node validates the cluster it believes it is in.** `shard-serve` now requires the same
+  versioned, bounded, contiguous topology the coordinator consumes, and refuses to start unless its
+  own `shard_id` is a member. A shard deployed under an id no coordinator will route to is a silent
+  hole in the keyspace; it is now a named startup failure.
+- **Two roles, two trust roots.** The shard-server identity proves *this is the shard*; the
+  coordinator CA proves *this caller may reach the shard*. One bundle behind both means any
+  coordinator certificate can also impersonate an endpoint. The chart refuses one `Secret` serving
+  both, and the process refuses the same file twice or a coordinator root that also appears in its
+  served chain. What the byte-level check cannot see — a root that signs the leaf without appearing
+  in either file — stays a documented deployment contract rather than an overclaimed guarantee.
+- **Readiness cannot precede recovery, by construction.** `recover_then_ready` returns a shard, never
+  a bound socket: replicated WAL recovery has already returned before a listener can exist, and a
+  recovery that fails returns an error, so an incompletely recovered write node is unreachable rather
+  than quietly serving a truncated history. The probe is a TCP check on that socket precisely
+  *because* an authenticated health RPC would require a coordinator-CA client identity inside the
+  shard pod — the trust mixing the increment just refused.
+- **Write mode refuses a durability target that cannot survive the node.** Beyond requiring an
+  object-store endpoint, `--write-enabled true` now refuses the conspicuous loopback development
+  store: an unauthenticated plaintext object store is a fine test fixture and is not where the
+  record that decides whether a write happened belongs.
+- **Termination drains.** SIGTERM stops the accept loop first, then waits for in-flight requests to
+  reach their own durability boundary; exceeding the budget is a named failure, never a silent exit.
+  The chart refuses a grace period shorter than the drain budget it is supposed to cover.
+- **Signed is not authorized.** A `prism-shard-v*` tag builds amd64/arm64, emits SPDX, blocks
+  fixable High/Critical findings, signs the index digest, attests SBOM and provenance, verifies its
+  own workflow-and-tag identity, and retains a receipt of identities and digests — never a
+  credential. Admission then requires *both* the exact workflow identity and an explicitly approved
+  digest, because a policy that admits anything a workflow signed admits every future release
+  automatically, including one cut from a branch nobody reviewed.
+
+Permanent gates prove the image runs as 65532 with a genuinely read-only root, no network and no
+capabilities; that mutable tags, missing digests, shared trust bundles, empty topologies and an
+under-budget grace period all fail to render; that missing TLS, topology, membership, object-store
+and write-recovery configuration each fail by name; that a read-only shard cannot write; that a
+recovered shard reports its replay before listening and an unrecoverable one never binds; that a
+CA-valid but wrong coordinator identity and a wrong DNS identity are both rejected; that SIGTERM
+drains and exits zero; and that admission refuses a signed-but-unapproved digest, a different
+workflow, and a different tag. This closes the *distribution* half of ENG-SERVICE. Migration and
+version policy, backup/hydration of already-published parts, envelope encryption and KMS lifecycle,
+customer-scale RPO/RTO, independent-host scale and load evidence, and independent penetration
+testing remain open.

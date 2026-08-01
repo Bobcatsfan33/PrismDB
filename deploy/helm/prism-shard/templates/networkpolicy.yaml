@@ -1,0 +1,66 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "prism-shard.fullname" . }}
+  labels:
+    {{- include "prism-shard.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "prism-shard.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  # Selecting both directions with only the rules below enumerated is what makes everything else
+  # denied. A shard is the database: its blast radius is whatever it can still reach.
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    # Approved coordinators only.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.coordinatorNamespaceLabels | nindent 14 }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.coordinatorPodLabels | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.service.port }}
+    # Monitoring and probes.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.monitoringNamespaceLabels | nindent 14 }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.monitoringPodLabels | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.service.port }}
+  egress:
+    # Cluster DNS.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # The external object store: cold parts, catalog mirror, and the replicated admission log.
+    - to:
+        - ipBlock:
+            cidr: {{ .Values.networkPolicy.objectStoreCidr | quote }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.objectStorePort }}
+    # The model plane the shard embeds through.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.modelNamespaceLabels | nindent 14 }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.modelPodLabels | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.modelPort }}

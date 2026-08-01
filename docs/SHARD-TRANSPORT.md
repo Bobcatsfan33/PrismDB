@@ -59,6 +59,7 @@ prism shard-serve \
   --path /var/lib/prism/shard-0 \
   --listen 0.0.0.0:7443 \
   --shard-id 0 \
+  --topology /etc/prism/topology.json \
   --cert /run/prism-tls/shard-chain.pem \
   --key /run/prism-tls/shard-key.pem \
   --client-ca /run/prism-tls/coordinator-ca.pem \
@@ -68,10 +69,29 @@ prism shard-serve \
 
 The command opens the normal production model and object-store configuration,
 recovers the replicated admission log, emits a JSON startup record, and then
-serves. Write mode requires `PRISM_S3_ENDPOINT`; the local object store is
-refused because it cannot survive node loss. Omitting `--write-enabled true`
-preserves the read-only server. Port `0` is refused outside the deterministic
-test harness.
+serves. Port `0` is refused outside the deterministic test harness.
+
+Startup refuses, by name, every configuration a supported distribution should
+never run under:
+
+- **an absent, non-contiguous, or non-member topology.** The node validates the
+  same versioned, bounded, contiguous topology the coordinator consumes and must
+  find its own `shard_id` in it. A shard deployed under an id no coordinator will
+  route to is a silent hole in the keyspace.
+- **one bundle serving both trust roles.** The `--cert` chain proves *this is the
+  shard*; `--client-ca` decides *who may call it*. The same file used twice, or a
+  coordinator root that also appears in the served chain, is refused. A root that
+  signs the leaf without appearing in either file cannot be seen from these bytes,
+  so two distinct Secrets remain a deployment contract, not a proven property.
+- **a write target that cannot survive this node.** `--write-enabled true`
+  requires `PRISM_S3_ENDPOINT` and refuses `PRISM_ALLOW_INSECURE_S3`: the local
+  disk cannot survive node loss, and the loopback development store is not where
+  the record deciding whether a write happened belongs.
+
+Omitting `--write-enabled true` preserves the read-only server. On `SIGTERM` the
+node stops accepting first and then drains in-flight requests to their own
+durability boundary; exceeding the request timeout is a named failure, not a
+silent exit.
 
 Rotate certificates with an overlap window: distribute the new CA bundle,
 rotate leaf identities, prove every peer is using the new chain, then remove the
@@ -121,6 +141,49 @@ disappears during final materialization, the coordinator removes all of that
 shard's scores and recomputes top-k so it cannot return a plausible but short
 answer. Partial semantic `GROUP BY` remains refused.
 
+## Deploy a shard node
+
+[`deploy/helm/prism-shard`](../deploy/helm/prism-shard) is the supported
+distribution; [`deploy/prism-shard/Dockerfile`](../deploy/prism-shard/Dockerfile)
+is the image it runs. Both are covered by
+[`RELEASE-ASSURANCE.md`](RELEASE-ASSURANCE.md).
+
+The chart deploys a `StatefulSet` over a headless Service, so every shard has a
+stable ordinal, a stable DNS name — the name a coordinator topology pins and the
+shard certificate must carry as its SAN — and its own volume. `replicas` is
+`len(topology.shards)`: one writer per shard is arithmetic over the configured
+cluster shape, not a separate number to keep in agreement. The pod ordinal
+becomes an explicit `--shard-id` through the downward API, which requires the
+`apps.kubernetes.io/pod-index` label (Kubernetes 1.31+); on an older cluster the
+value expands empty and the node refuses to start rather than every pod claiming
+shard 0.
+
+The pod runs as 65532 with a read-only root filesystem, no capabilities,
+RuntimeDefault seccomp, no service-account token, required anti-affinity, zone
+topology spread, a PDB, resource requests and limits, and a termination grace
+period the chart refuses to render below the drain budget. Only the shard data
+volume and a 64 MiB in-memory `/tmp` are writable. The NetworkPolicy is
+default-deny in both directions and admits only approved coordinators, cluster
+DNS, the external object store, the model plane, and monitoring.
+
+Readiness is a TCP check on the shard port. That is deliberate rather than
+convenient: the listener is bound only after replicated recovery returns, so a
+socket that accepts is a shard that finished recovering, and an authenticated
+health probe would require a coordinator-CA client identity *inside* the shard
+pod — precisely the trust-role mixing this distribution refuses.
+
+Three Secrets are created outside Helm, and the chart refuses to render if the
+first two are the same:
+
+- shard server TLS: `tls.crt`, `tls.key`;
+- coordinator trust root: `ca.crt`;
+- object-store credentials: the access key, secret key, and optional session
+  token, consumed through `envFrom`. Nothing in the chart accepts a credential as
+  a value, so no credential can reach Helm output or a release receipt.
+
+An immutable `sha256:` digest is mandatory. A missing digest, an `image.tag`
+key, or a tag or digest carried inside `image.repository` all fail rendering.
+
 ## Evidence and remaining wall
 
 The permanent gate proves:
@@ -140,8 +203,26 @@ The permanent gate proves:
   best-effort, refuses partial grouping, and recomputes top-k when loss occurs
   during materialization.
 
+The shard-distribution gates additionally prove:
+
+- the image runs as the observed identity 65532:65532, with a root filesystem
+  that genuinely refuses a write, no network, and no capabilities;
+- an unpinned or mutable image reference, one Secret serving both trust roles, an
+  empty topology, and a grace period below the drain budget all fail to render;
+- an absent, non-contiguous, or non-member topology, a shared trust bundle, a
+  missing write target, and the loopback development store each fail startup by
+  name;
+- a shard that recovered reports its replayed record count in the same record
+  that announces it is listening, and a shard whose recovery fails never binds;
+- `SIGTERM` drains and exits zero with a `graceful` stop record; and
+- release admission accepts only an explicitly approved digest under the exact
+  approved workflow identity, refusing a signed-but-unapproved digest, another
+  workflow's signature, and another tag's signature.
+
 The authenticated multi-node read/write path is now wired. Remaining HA evidence
 is sustained 1→4 node scaling on independent hosts and timer-driven asynchronous
 hedging under latency/jitter, not an in-process or deterministic partition seam.
 Already-published hot-part restoration remains behind the backup/hydration
-increment. The public authenticated API is documented separately.
+increment, and migration/version policy, envelope encryption, and customer-scale
+RPO/RTO are separate open gates. The public authenticated API is documented
+separately.

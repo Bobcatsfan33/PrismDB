@@ -34,9 +34,12 @@ USAGE:
   prism recover   --path <dir>
                   replay every acknowledged-but-unpublished batch from the WAL
   prism shard-serve --path <dir> --listen <ip:port> --shard-id <n>
+                    --topology <topology.json>
                     --cert <chain.pem> --key <key.pem> --client-ca <ca.pem>
                     [--timeout-ms 5000] [--write-enabled true]
-                  coordinator RPC over mandatory mutual TLS; writes require remote WAL
+                  coordinator RPC over mandatory mutual TLS; writes require remote WAL.
+                  The shard must be a member of the contiguous topology it is given, and
+                  its server chain may not share a trust root with the coordinator CA.
   prism coordinator-search --topology <topology.json>
                     --cert <chain.pem> --key <key.pem> --shard-ca <ca.pem>
                     --query <text> [--tenant T] [--timeout-ms 5000]
@@ -238,11 +241,40 @@ fn open(a: &Args) -> Result<Engine> {
     })
 }
 
+/// A write-enabled shard needs a durability authority that survives losing this node.
+///
+/// `PRISM_S3_ENDPOINT` is what moves the admission log off local disk; without it the "replicated"
+/// WAL would be replicated to the same disk that is about to fail, which is not durability. The
+/// conspicuous loopback development store is refused separately: an unauthenticated plaintext
+/// object store is a fine test fixture and is not a place to keep the record that decides whether
+/// an acknowledged write happened.
+fn require_replicated_write_target() -> Result<()> {
+    let endpoint = std::env::var("PRISM_S3_ENDPOINT").unwrap_or_default();
+    if endpoint.trim().is_empty() {
+        return Err(PrismError::Invalid(
+            "--write-enabled requires PRISM_S3_ENDPOINT so the admission WAL survives node loss"
+                .into(),
+        ));
+    }
+    if std::env::var("PRISM_ALLOW_INSECURE_S3")
+        .map(|value| value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+    {
+        return Err(PrismError::Invalid(
+            "--write-enabled refuses PRISM_ALLOW_INSECURE_S3; the durable admission log may not \
+             live on the loopback-only development object store"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 fn cmd_shard_serve(a: &Args) -> Result<()> {
     a.allow(&[
         "path",
         "listen",
         "shard-id",
+        "topology",
         "cert",
         "key",
         "client-ca",
@@ -263,34 +295,34 @@ fn cmd_shard_serve(a: &Args) -> Result<()> {
         .parse::<usize>()
         .map_err(|_| PrismError::Invalid("--shard-id must be an unsigned integer".into()))?;
     let timeout_ms = a.parse_opt("timeout-ms", 5_000u64)?;
+    let certificate_chain = std::path::PathBuf::from(a.req("cert")?);
+    let coordinator_ca = std::path::PathBuf::from(a.req("client-ca")?);
+    prism_engine::shard_rpc::assert_distinct_trust_roles(&certificate_chain, &coordinator_ca)?;
     let tls = prism_engine::shard_rpc::server_tls_from_pem(
-        std::path::Path::new(a.req("cert")?),
+        &certificate_chain,
         std::path::Path::new(a.req("key")?),
-        std::path::Path::new(a.req("client-ca")?),
+        &coordinator_ca,
     )?;
+    // The node validates the cluster shape it is a member of, using the coordinator's own
+    // contiguity rule: a shard deployed under an id no coordinator will route to must not start.
+    let topology = prism_engine::shard_rpc::RemoteReadTopology::load(std::path::Path::new(
+        a.req("topology")?,
+    ))?;
+    let endpoint = topology.endpoint_for(shard_id)?;
+    let server_name = endpoint.server_name.clone();
+    let shard_count = topology.shards.len();
+
     let write_enabled = a.parse_opt("write-enabled", false)?;
     let (server, recovered) = if write_enabled {
-        if std::env::var("PRISM_S3_ENDPOINT")
-            .ok()
-            .map(|value| value.trim().is_empty())
-            .unwrap_or(true)
-        {
-            return Err(PrismError::Invalid(
-                "--write-enabled requires PRISM_S3_ENDPOINT so the admission WAL survives node loss"
-                    .into(),
-            ));
-        }
-        let mut ingestor = prism_engine::Ingestor::open_replicated(open(a)?, shard_id)?;
-        let recovered = ingestor.recover(now_ms())?.len();
-        (
-            prism_engine::shard_rpc::ShardRpcServer::new_replicated_writer(
-                shard_id,
-                ingestor,
-                tls,
-                std::time::Duration::from_millis(timeout_ms),
-            )?,
-            recovered,
-        )
+        require_replicated_write_target()?;
+        let startup = prism_engine::shard_rpc::ShardRpcServer::recover_then_ready(
+            shard_id,
+            prism_engine::Ingestor::open_replicated(open(a)?, shard_id)?,
+            tls,
+            std::time::Duration::from_millis(timeout_ms),
+            now_ms(),
+        )?;
+        (startup.server, startup.recovered_wal_records)
     } else {
         (
             prism_engine::shard_rpc::ShardRpcServer::new(
@@ -302,18 +334,36 @@ fn cmd_shard_serve(a: &Args) -> Result<()> {
             0,
         )
     };
+    // Bound only after recovery returned: readiness cannot precede a replayed admission log.
     let listener = std::net::TcpListener::bind(address)
         .map_err(|e| PrismError::Io(format!("shard RPC bind listener: {e}")))?;
+    let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&shutdown))
+        .and_then(|_| {
+            signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&shutdown))
+        })
+        .map_err(|e| PrismError::Io(format!("install shard shutdown signal handlers: {e}")))?;
     emit(&serde_json::json!({
         "status": "listening",
         "transport": "mutual-tls",
         "protocol_version": prism_engine::shard_rpc::SHARD_RPC_PROTOCOL_VERSION,
         "shard_id": shard_id,
+        "server_name": server_name,
+        "topology_shards": shard_count,
         "address": address.to_string(),
         "writable": write_enabled,
         "recovered_wal_records": recovered,
     }))?;
-    server.serve(listener)
+    let result = server.serve_with_shutdown(listener, Arc::clone(&shutdown));
+    eprintln!(
+        "{}",
+        serde_json::json!({
+            "event": "shard_stopped",
+            "shard_id": shard_id,
+            "graceful": shutdown.load(std::sync::atomic::Ordering::SeqCst),
+        })
+    );
+    result
 }
 
 fn cmd_coordinator_search(a: &Args) -> Result<()> {
