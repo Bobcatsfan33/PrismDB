@@ -1213,6 +1213,12 @@ mod tests {
         ))
     }
 
+    /// Every key below pins `ec_param_enc:named_curve`, because the fixture must not depend on
+    /// which OpenSSL the host happens to ship. LibreSSL — what macOS puts on `PATH` as
+    /// `/usr/bin/openssl` — defaults to writing EC keys with *explicit* curve parameters, while
+    /// OpenSSL 3 defaults to the `prime256v1` OID. rustls accepts only the named form, so without
+    /// this flag the service refuses its own test certificate and these tests fail against a TLS
+    /// parse error instead of the behaviour they mean to test.
     fn openssl(dir: &Path, arguments: &[&str]) {
         let output = Command::new("openssl")
             .current_dir(dir)
@@ -1240,6 +1246,8 @@ mod tests {
                 "ec",
                 "-pkeyopt",
                 "ec_paramgen_curve:P-256",
+                "-pkeyopt",
+                "ec_param_enc:named_curve",
                 "-nodes",
                 "-days",
                 "3650",
@@ -1272,6 +1280,8 @@ mod tests {
                 "ec",
                 "-pkeyopt",
                 "ec_paramgen_curve:P-256",
+                "-pkeyopt",
+                "ec_param_enc:named_curve",
                 "-nodes",
                 "-sha256",
                 "-subj",

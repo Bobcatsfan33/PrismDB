@@ -10,11 +10,14 @@ candidate**. The signed model-service image, mTLS remote coordinator, and authen
 API distribution are strong component artifacts. The public API now has exact-certificate tenant
 policy, bounded requests, metrics, a hardened Helm chart, and a signed-image release path.
 The admission log is remote-durable, replacement-node recovery is gated, and the authenticated
-public ingest path injects tenant identity above a replicated-only shard RPC. These components do
-not turn the database core into a complete supported product: a supported shard-node distribution,
-encryption and key lifecycle, backup/hydration and RPO/RTO, load-derived SLOs, independent-host
-scaling/fault evidence, independent penetration testing, support, and organizational assurance
-remain required.
+public ingest path injects tenant identity above a replicated-only shard RPC. The shard node itself
+now has a signed, supported distribution: a digest-pinned non-root image, a StatefulSet chart with
+per-shard identity and default-deny networking, startup gates that refuse a non-member topology, a
+shared trust bundle, or a non-durable write target, and an admission policy requiring an approved
+digest under the exact approved workflow identity. These components do not turn the database core
+into a complete supported product: migration and version policy, encryption and key lifecycle,
+backup/hydration and RPO/RTO, load-derived SLOs, independent-host scaling/fault evidence,
+independent penetration testing, support, and organizational assurance remain required.
 
 ## Evaluation baseline
 

@@ -1,0 +1,185 @@
+{{- include "prism-shard.assertDistinctTrust" . -}}
+{{- if lt (mul .Values.terminationGracePeriodSeconds 1000) (int .Values.timeoutMs) -}}
+{{- fail (printf "terminationGracePeriodSeconds (%ds) is below the %dms request timeout the drain is budgeted against; SIGKILL would land mid-drain" (int .Values.terminationGracePeriodSeconds) (int .Values.timeoutMs)) -}}
+{{- end -}}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "prism-shard.fullname" . }}
+  labels:
+    {{- include "prism-shard.labels" . | nindent 4 }}
+spec:
+  # One pod per shard, with a stable ordinal identity and its own volume: this is what makes
+  # "exactly one writer per shard" a property of the workload object rather than a runbook step.
+  replicas: {{ include "prism-shard.replicas" . }}
+  serviceName: {{ include "prism-shard.fullname" . }}
+  podManagementPolicy: Parallel
+  updateStrategy:
+    type: RollingUpdate
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: {{ .Values.storage.retentionPolicy.whenDeleted }}
+    whenScaled: {{ .Values.storage.retentionPolicy.whenScaled }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "prism-shard.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "prism-shard.name" . }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+      annotations:
+        checksum/topology: {{ .Values.topology | toJson | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "prism-shard.fullname" . }}
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: {{ include "prism-shard.name" . }}
+                  app.kubernetes.io/instance: {{ .Release.Name }}
+              topologyKey: kubernetes.io/hostname
+      topologySpreadConstraints:
+        - maxSkew: {{ .Values.topologySpreadMaxSkew }}
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ include "prism-shard.name" . }}
+              app.kubernetes.io/instance: {{ .Release.Name }}
+      containers:
+        - name: prism-shard
+          image: {{ include "prism-shard.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            # The pod ordinal IS the shard id. Kubernetes expands $(PRISM_SHARD_ID) in args from
+            # this env var, so the identity stays an explicit --shard-id flag on a fixed template.
+            - name: PRISM_SHARD_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['apps.kubernetes.io/pod-index']
+            - name: PRISM_S3_ENDPOINT
+              value: {{ .Values.objectStore.endpoint | quote }}
+            - name: PRISM_S3_BUCKET
+              value: {{ .Values.objectStore.bucket | quote }}
+            - name: PRISM_S3_REGION
+              value: {{ .Values.objectStore.region | quote }}
+          envFrom:
+            # The object-store access key, secret key, and optional session token. Only the Secret
+            # name is rendered here; the credential bytes are resolved by the kubelet from the
+            # secret provider and never pass through Helm output or a release receipt.
+            - secretRef:
+                name: {{ .Values.secrets.objectStore }}
+          args:
+            - shard-serve
+            - --path
+            - /var/lib/prism/shard
+            - --listen
+            - "0.0.0.0:{{ .Values.service.port }}"
+            - --shard-id
+            - $(PRISM_SHARD_ID)
+            - --topology
+            - /etc/prism/topology.json
+            - --cert
+            - /var/run/prism-shard/server.crt
+            - --key
+            - /var/run/prism-shard/server.key
+            - --client-ca
+            - /var/run/prism-coordinator-ca/ca.crt
+            - --timeout-ms
+            - {{ .Values.timeoutMs | quote }}
+            {{- if .Values.writeEnabled }}
+            - --write-enabled
+            - "true"
+            {{- end }}
+          ports:
+            - name: shard-rpc
+              containerPort: {{ .Values.service.port }}
+              protocol: TCP
+          # The listener is bound only after replicated WAL recovery returns, so a socket that
+          # accepts is a shard that finished recovering. The probe is deliberately NOT an
+          # authenticated health RPC: that would require a coordinator-CA client identity inside the
+          # shard pod, which is precisely the trust-role mixing this distribution refuses.
+          startupProbe:
+            tcpSocket:
+              port: shard-rpc
+            periodSeconds: 10
+            failureThreshold: 60
+          readinessProbe:
+            tcpSocket:
+              port: shard-rpc
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            tcpSocket:
+              port: shard-rpc
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/prism
+            - name: tmp
+              mountPath: /tmp
+            - name: topology
+              mountPath: /etc/prism/topology.json
+              subPath: topology.json
+              readOnly: true
+            - name: server-tls
+              mountPath: /var/run/prism-shard/server.crt
+              subPath: tls.crt
+              readOnly: true
+            - name: server-tls
+              mountPath: /var/run/prism-shard/server.key
+              subPath: tls.key
+              readOnly: true
+            - name: coordinator-ca
+              mountPath: /var/run/prism-coordinator-ca/ca.crt
+              subPath: ca.crt
+              readOnly: true
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi
+        - name: topology
+          configMap:
+            name: {{ include "prism-shard.fullname" . }}-topology
+            defaultMode: 0440
+        - name: server-tls
+          secret:
+            secretName: {{ .Values.secrets.serverTls }}
+            defaultMode: 0440
+        - name: coordinator-ca
+          secret:
+            secretName: {{ .Values.secrets.coordinatorCa }}
+            defaultMode: 0440
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if .Values.storage.className }}
+        storageClassName: {{ .Values.storage.className | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.storage.size }}

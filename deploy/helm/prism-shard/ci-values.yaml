@@ -1,0 +1,32 @@
+image:
+  digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+writeEnabled: true
+objectStore:
+  endpoint: s3.us-east-1.amazonaws.com:443
+  bucket: prism-shard-ci
+  region: us-east-1
+topology:
+  version: 1
+  shards:
+    - shard_id: 0
+      address: prism-prism-shard-0.prism-prism-shard.prism.svc.cluster.local:7443
+      server_name: prism-prism-shard-0.prism-prism-shard.prism.svc.cluster.local
+    - shard_id: 1
+      address: prism-prism-shard-1.prism-prism-shard.prism.svc.cluster.local:7443
+      server_name: prism-prism-shard-1.prism-prism-shard.prism.svc.cluster.local
+networkPolicy:
+  coordinatorNamespaceLabels:
+    kubernetes.io/metadata.name: prism
+  coordinatorPodLabels:
+    app.kubernetes.io/name: prismdb
+  modelNamespaceLabels:
+    kubernetes.io/metadata.name: prism-model
+  modelPodLabels:
+    app.kubernetes.io/name: prism-model-service
+  modelPort: 8443
+  monitoringNamespaceLabels:
+    kubernetes.io/metadata.name: monitoring
+  monitoringPodLabels:
+    app.kubernetes.io/name: prometheus
+  objectStoreCidr: 10.64.0.0/16
+  objectStorePort: 443

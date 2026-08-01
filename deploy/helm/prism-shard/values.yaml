@@ -1,0 +1,74 @@
+# Replica count is NOT configurable: it is len(topology.shards). See templates/_helpers.tpl.
+
+image:
+  repository: ghcr.io/bobcatsfan33/prism-shard
+  digest: ""
+  pullPolicy: IfNotPresent
+
+service:
+  port: 7443
+
+# Bounds the shard RPC socket deadline and, with it, the shutdown drain budget.
+timeoutMs: 15000
+
+writeEnabled: false
+
+storage:
+  size: 100Gi
+  className: ""
+  # An explicit answer to "what happens to shard data when the StatefulSet goes away".
+  # Retain/Retain keeps the volume through both deletion and scale-down: a shard's parts are the
+  # database, and reclaiming them on a scale-down is a data-loss button nobody asked for.
+  retentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+
+secrets:
+  # Distinct Secrets by contract; rendering fails when they are the same name.
+  serverTls: prism-shard-server-tls
+  coordinatorCa: prism-coordinator-ca
+  # External object-store credentials. Only the Secret NAME appears in rendered output; the
+  # credential values are resolved by the kubelet from the secret provider at pod start and never
+  # pass through Helm, a values file, or a release receipt. Nothing in this chart accepts a
+  # credential as a value, so there is no way to set one that Helm could then render.
+  objectStore: prism-object-store
+
+objectStore:
+  endpoint: ""
+  bucket: ""
+  region: us-east-1
+
+topology:
+  version: 1
+  shards: []
+
+resources:
+  requests:
+    cpu: "1"
+    memory: 2Gi
+  limits:
+    cpu: "4"
+    memory: 8Gi
+
+# Must exceed timeoutMs so the drain has room to finish before the kubelet escalates to SIGKILL.
+terminationGracePeriodSeconds: 60
+
+networkPolicy:
+  # Only these coordinators may open the shard port. Everything else is denied by default.
+  coordinatorNamespaceLabels: {}
+  coordinatorPodLabels: {}
+  # The model plane the shard embeds through.
+  modelNamespaceLabels: {}
+  modelPodLabels: {}
+  modelPort: 8443
+  # Scrapers and probes permitted to reach the pod.
+  monitoringNamespaceLabels: {}
+  monitoringPodLabels: {}
+  # The external object store: a CIDR plus port, because it is off-cluster.
+  objectStoreCidr: ""
+  objectStorePort: 443
+
+podDisruptionBudget:
+  maxUnavailable: 1
+
+topologySpreadMaxSkew: 1

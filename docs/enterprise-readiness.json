@@ -96,11 +96,15 @@
         ".github/workflows/security.yml",
         ".github/workflows/model-service-release.yml",
         ".github/workflows/prismd-release.yml",
+        ".github/workflows/prism-shard-release.yml",
         "deploy/prismd/Dockerfile",
+        "deploy/prism-shard/Dockerfile",
+        "deploy/helm/prism-shard/values.schema.json",
+        "scripts/check_release_admission.py",
         "docs/RELEASE-ASSURANCE.md"
       ],
       "gaps": [
-        "Signed SBOM/provenance release assurance covers the model service and public API coordinator, not the still-absent shard-node database distribution."
+        "Signed SBOM/provenance release assurance now covers the model service, the public API coordinator, and the shard-node database distribution, but no release has yet been promoted through a protected tag under a repository ruleset restricting tag creation to release maintainers."
       ]
     },
     {
@@ -223,17 +227,24 @@
       "status": "open",
       "blocking": true,
       "ownerRole": "Engineering",
-      "acceptanceCriteria": "The shipped authenticated public read/write API is joined by migration/version policy, a complete signed shard-node database distribution, and production deployment manifests that pass release gates.",
+      "acceptanceCriteria": "The shipped authenticated public read/write API is joined by migration/version policy, a complete signed shard-node database distribution, and production deployment manifests that pass release gates. The signed shard-node distribution and its deployment manifests are complete; migration/version policy and the operational gates below remain.",
       "evidence": [
         "docs/SHARD-TRANSPORT.md",
         "docs/PUBLIC-READ-SERVICE.md",
+        "docs/RELEASE-ASSURANCE.md",
         "docs/openapi-public-read-v1.yaml",
         "crates/prism-engine/src/shard_rpc.rs",
         "crates/prism-engine/src/wal.rs",
+        "crates/prism-cli/src/main.rs",
         "crates/prism-cli/tests/remote_wal.rs",
+        "crates/prism-cli/tests/shard_distribution.rs",
         "crates/prism-service/src/lib.rs",
         "deploy/helm/prismdb/Chart.yaml",
-        ".github/workflows/prismd-release.yml"
+        "deploy/helm/prism-shard/Chart.yaml",
+        "deploy/helm/prism-shard/templates/statefulset.yaml",
+        "deploy/prism-shard/Dockerfile",
+        ".github/workflows/prismd-release.yml",
+        ".github/workflows/prism-shard-release.yml"
       ]
     },
     {

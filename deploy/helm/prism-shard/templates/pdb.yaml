@@ -1,0 +1,14 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "prism-shard.fullname" . }}
+  labels:
+    {{- include "prism-shard.labels" . | nindent 4 }}
+spec:
+  # Each shard owns a disjoint range of the keyspace, so losing two at once loses two ranges, not
+  # one replica of the same range. Voluntary disruption is capped so a drain retires shards serially.
+  maxUnavailable: {{ .Values.podDisruptionBudget.maxUnavailable }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "prism-shard.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}

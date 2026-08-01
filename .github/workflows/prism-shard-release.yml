@@ -1,0 +1,374 @@
+name: prism-shard release assurance
+
+on:
+  pull_request:
+    paths:
+      - "crates/prism-cli/**"
+      - "crates/prism-engine/**"
+      - "crates/prism-part/**"
+      - "crates/prism-types/**"
+      - "deploy/prism-shard/**"
+      - "deploy/helm/prism-shard/**"
+      - "scripts/check_release_admission.py"
+      - ".dockerignore"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/prism-shard-release.yml"
+      - "docs/SHARD-TRANSPORT.md"
+      - "docs/RELEASE-ASSURANCE.md"
+  push:
+    branches: [main]
+    tags:
+      - "prism-shard-v*"
+  workflow_dispatch:
+
+concurrency:
+  group: prism-shard-release-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+env:
+  RUST_IMAGE: rust:1.75.0-bookworm@sha256:87f3b2f93b82995443a1a558c234212dafe79cfdc3af956539610560369ddcd0
+  RUNTIME_IMAGE: gcr.io/distroless/cc-debian12:nonroot@sha256:fccdbb0a547c14e23fcf4ce8ad62ca5d43b4faae8d22cd292f490fef9946c96e
+  HELM_IMAGE: alpine/helm:3.18.4@sha256:e7ecbf4a200dea73d64bfb8cb0936829164945f2b4d02a0274093073ee8d264f
+  KUBECONFORM_IMAGE: ghcr.io/yannh/kubeconform:v0.7.0@sha256:85dbef6b4b312b99133decc9c6fc9495e9fc5f92293d4ff3b7e1b30f5611823c
+  BUSYBOX_IMAGE: busybox:1.37@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028
+  LOCAL_IMAGE: prism-shard:verification
+  VOLUME: prism-shard-identity-${{ github.run_id }}
+  TRIVY_VERSION: v0.72.0
+
+jobs:
+  verify-image:
+    name: image, chart, SBOM, and vulnerability gate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+
+      - name: build the release-equivalent image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+        with:
+          context: .
+          file: deploy/prism-shard/Dockerfile
+          load: true
+          push: false
+          tags: ${{ env.LOCAL_IMAGE }}
+          build-args: |
+            RUST_IMAGE=${{ env.RUST_IMAGE }}
+            RUNTIME_IMAGE=${{ env.RUNTIME_IMAGE }}
+
+      - name: verify immutable bases and unprivileged identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect "${LOCAL_IMAGE}" --format '{{ index .Config.Labels "org.opencontainers.image.base.name" }}')" = "${RUNTIME_IMAGE}"
+          test "$(docker image inspect "${LOCAL_IMAGE}" --format '{{ index .Config.Labels "org.opencontainers.image.build.base.name" }}')" = "${RUST_IMAGE}"
+          test "$(docker image inspect "${LOCAL_IMAGE}" --format '{{.Config.User}}')" = "65532:65532"
+
+      # The declared runtime contract, asserted rather than assumed: no writable root, no network,
+      # no capabilities, no privilege escalation. A shard needs its data volume and a bounded tmp;
+      # it needs nothing else the host could give it.
+      - name: smoke test the production runtime posture
+        run: >-
+          docker run --rm
+          --read-only
+          --network none
+          --cap-drop ALL
+          --security-opt no-new-privileges
+          "${LOCAL_IMAGE}" --version
+
+      - name: prove the observed runtime identity is the expected non-root user
+        shell: bash
+        run: |
+          set -euo pipefail
+          # There is no shell or `id` in distroless, so observe the identity through its effect:
+          # initialise a store onto a volume and read back who owns the resulting bytes. This is the
+          # uid the kernel actually ran as, not the uid the image config claims. The chown mirrors
+          # what the chart's fsGroup does for a PVC.
+          docker volume create "${VOLUME}" >/dev/null
+          docker run --rm -v "${VOLUME}:/d" "${BUSYBOX_IMAGE}" chown 65532:65532 /d
+          docker run --rm --read-only --network none --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+            -v "${VOLUME}:/var/lib/prism" \
+            "${LOCAL_IMAGE}" init --path /var/lib/prism/shard --dim 8 --nlist 2 --pq-m 2
+          owner="$(docker run --rm -v "${VOLUME}:/d" "${BUSYBOX_IMAGE}" stat -c '%u:%g' /d/shard)"
+          docker volume rm -f "${VOLUME}" >/dev/null
+          test "${owner}" = "65532:65532" || {
+            echo "shard data was written by ${owner}, not 65532:65532" >&2
+            exit 1
+          }
+
+      - name: prove the root filesystem is genuinely read-only
+        shell: bash
+        run: |
+          set -euo pipefail
+          # A read-only root that silently accepts a write would make every hardening claim above
+          # decorative. The same command that just succeeded against a mounted volume must fail
+          # when it targets the image filesystem.
+          if docker run --rm --read-only --network none --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+            "${LOCAL_IMAGE}" init --path /var/lib/prism/should-not-exist --dim 8 --nlist 2 --pq-m 2; then
+            echo "the image wrote to a read-only root filesystem" >&2
+            exit 1
+          fi
+
+      - name: lint and render the shard distribution chart
+        shell: bash
+        run: |
+          set -euo pipefail
+          helm_cmd=(docker run --rm -v "${PWD}:/work" -w /work "${HELM_IMAGE}")
+          "${helm_cmd[@]}" lint deploy/helm/prism-shard -f deploy/helm/prism-shard/ci-values.yaml
+          "${helm_cmd[@]}" template prism deploy/helm/prism-shard \
+            -f deploy/helm/prism-shard/ci-values.yaml > /tmp/prism-shard-rendered.yaml
+          grep -q 'kind: StatefulSet' /tmp/prism-shard-rendered.yaml
+          grep -q 'readOnlyRootFilesystem: true' /tmp/prism-shard-rendered.yaml
+          grep -q 'runAsNonRoot: true' /tmp/prism-shard-rendered.yaml
+          grep -q 'kind: NetworkPolicy' /tmp/prism-shard-rendered.yaml
+          grep -q 'kind: PodDisruptionBudget' /tmp/prism-shard-rendered.yaml
+          grep -q 'clusterIP: None' /tmp/prism-shard-rendered.yaml
+          grep -q 'persistentVolumeClaimRetentionPolicy' /tmp/prism-shard-rendered.yaml
+          grep -q 'topologySpreadConstraints' /tmp/prism-shard-rendered.yaml
+          # One writer per shard: replicas is len(topology.shards), and CI values declare two.
+          grep -q 'replicas: 2' /tmp/prism-shard-rendered.yaml
+          docker run --rm \
+            -v /tmp/prism-shard-rendered.yaml:/manifest.yaml:ro \
+            "${KUBECONFORM_IMAGE}" -strict -summary /manifest.yaml
+
+      - name: prove no credential material reaches Helm output
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -InE 'AWS_SECRET_ACCESS_KEY|AWS_ACCESS_KEY_ID|AWS_SESSION_TOKEN|BEGIN [A-Z ]*PRIVATE KEY' \
+            /tmp/prism-shard-rendered.yaml; then
+            echo "rendered chart contains credential material" >&2
+            exit 1
+          fi
+
+      - name: prove unsafe chart values fail closed
+        shell: bash
+        run: |
+          set -euo pipefail
+          helm_cmd=(docker run --rm -v "${PWD}:/work" -w /work "${HELM_IMAGE}")
+          refuse() {
+            local why="$1"; shift
+            if "${helm_cmd[@]}" "$@" >/dev/null 2>&1; then
+              echo "chart accepted ${why}" >&2
+              exit 1
+            fi
+          }
+          # A missing digest, a mutable tag in either place, a shared trust bundle, an empty
+          # topology, and a grace period shorter than the drain budget must all fail to render.
+          refuse "a missing image digest" lint deploy/helm/prism-shard
+          refuse "a mutable tag in image.repository" template prism deploy/helm/prism-shard \
+            -f deploy/helm/prism-shard/ci-values.yaml \
+            --set image.repository=ghcr.io/bobcatsfan33/prism-shard:latest
+          refuse "an image.tag key" template prism deploy/helm/prism-shard \
+            -f deploy/helm/prism-shard/ci-values.yaml --set image.tag=latest
+          refuse "one Secret serving both trust roles" template prism deploy/helm/prism-shard \
+            -f deploy/helm/prism-shard/ci-values.yaml \
+            --set secrets.coordinatorCa=prism-shard-server-tls
+          refuse "an empty topology" template prism deploy/helm/prism-shard \
+            --set image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          refuse "a grace period below the drain budget" template prism deploy/helm/prism-shard \
+            -f deploy/helm/prism-shard/ci-values.yaml \
+            --set terminationGracePeriodSeconds=30 --set timeoutMs=60000
+
+      - name: prove release admission refuses signed-but-unapproved releases
+        run: python3 scripts/check_release_admission.py --self-test
+
+      - name: generate SPDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610
+        with:
+          image: ${{ env.LOCAL_IMAGE }}
+          format: spdx-json
+          output-file: prism-shard.spdx.json
+          syft-version: v1.50.0
+          upload-artifact: false
+
+      - name: write machine-readable vulnerability evidence
+        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8
+        with:
+          image-ref: ${{ env.LOCAL_IMAGE }}
+          version: ${{ env.TRIVY_VERSION }}
+          format: json
+          output: prism-shard.trivy.json
+          scanners: vuln
+          vuln-type: os,library
+          ignore-unfixed: true
+          severity: HIGH,CRITICAL
+          exit-code: 0
+
+      - name: retain assurance evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: prism-shard-assurance-${{ github.run_id }}
+          path: |
+            prism-shard.spdx.json
+            prism-shard.trivy.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: block fixable high and critical vulnerabilities
+        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8
+        with:
+          image-ref: ${{ env.LOCAL_IMAGE }}
+          version: ${{ env.TRIVY_VERSION }}
+          format: table
+          scanners: vuln
+          vuln-type: os,library
+          ignore-unfixed: true
+          severity: HIGH,CRITICAL
+          exit-code: 1
+
+  publish:
+    name: publish, sign, and attest
+    if: startsWith(github.ref, 'refs/tags/prism-shard-v')
+    needs: verify-image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: compute canonical image name
+        shell: bash
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/prism-shard" >> "${GITHUB_ENV}"
+
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: metadata
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=match,pattern=prism-shard-v(.*),group=1
+            type=sha,format=long,prefix=sha-
+
+      - id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+        with:
+          context: .
+          file: deploy/prism-shard/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          build-args: |
+            RUST_IMAGE=${{ env.RUST_IMAGE }}
+            RUNTIME_IMAGE=${{ env.RUNTIME_IMAGE }}
+          provenance: mode=max
+
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac
+
+      - name: sign image digest
+        run: cosign sign --yes "${IMAGE}@${{ steps.build.outputs.digest }}"
+
+      - name: generate release SPDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610
+        with:
+          image: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+          registry-username: ${{ github.actor }}
+          registry-password: ${{ secrets.GITHUB_TOKEN }}
+          format: spdx-json
+          output-file: prism-shard.spdx.json
+          syft-version: v1.50.0
+          upload-artifact: false
+
+      - name: attest SBOM
+        run: >-
+          cosign attest --yes --predicate prism-shard.spdx.json --type spdxjson
+          "${IMAGE}@${{ steps.build.outputs.digest }}"
+
+      - name: publish GitHub build provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: verify the published signature and SBOM against the exact workflow and tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/prism-shard-release.yml@${GITHUB_REF}"
+          cosign verify \
+            --certificate-identity "${identity}" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "${IMAGE}@${{ steps.build.outputs.digest }}"
+          cosign verify-attestation \
+            --certificate-identity "${identity}" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            --type spdxjson \
+            "${IMAGE}@${{ steps.build.outputs.digest }}"
+
+      - name: write release receipt
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/prism-shard-release.yml@${GITHUB_REF}"
+          # Identities and digests only. A receipt that carried a credential would turn a 90-day
+          # build artifact into a 90-day secret.
+          jq -n \
+            --arg image "${IMAGE}" \
+            --arg image_digest "${IMAGE_DIGEST}" \
+            --arg runtime_base "${RUNTIME_IMAGE}" \
+            --arg build_base "${RUST_IMAGE}" \
+            --arg source_revision "${GITHUB_SHA}" \
+            --arg release_tag "${GITHUB_REF_NAME}" \
+            --arg certificate_identity "${identity}" \
+            --arg certificate_oidc_issuer "https://token.actions.githubusercontent.com" \
+            '{
+              schema_version: 1,
+              image: $image,
+              image_digest: $image_digest,
+              runtime_base: $runtime_base,
+              build_base: $build_base,
+              source_revision: $source_revision,
+              release_tag: $release_tag,
+              certificate_identity: $certificate_identity,
+              certificate_oidc_issuer: $certificate_oidc_issuer
+            }' > prism-shard.release.json
+
+      - name: prove the receipt is admissible only against an explicit approval
+        shell: bash
+        run: |
+          set -euo pipefail
+          identity="$(jq -r .certificate_identity prism-shard.release.json)"
+          digest="$(jq -r .image_digest prism-shard.release.json)"
+          jq -n --arg image "${IMAGE}" --arg identity "${identity}" --arg digest "${digest}" \
+            '{image: $image, certificate_identity: $identity, approved_digests: [$digest]}' \
+            > /tmp/prism-shard-approvals.json
+          python3 scripts/check_release_admission.py \
+            --receipt prism-shard.release.json --approvals /tmp/prism-shard-approvals.json
+          # The same receipt against an approval list that does not name this digest must refuse.
+          jq '.approved_digests = ["sha256:0000000000000000000000000000000000000000000000000000000000000000"]' \
+            /tmp/prism-shard-approvals.json > /tmp/prism-shard-approvals-other.json
+          if python3 scripts/check_release_admission.py \
+            --receipt prism-shard.release.json --approvals /tmp/prism-shard-approvals-other.json; then
+            echo "admission accepted a digest that was never approved" >&2
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: prism-shard-release-${{ github.ref_name }}
+          path: |
+            prism-shard.spdx.json
+            prism-shard.release.json
+          if-no-files-found: error
+          retention-days: 90

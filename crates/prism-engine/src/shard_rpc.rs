@@ -24,7 +24,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -37,6 +37,8 @@ pub const MAX_REMOTE_READ_SHARDS: usize = 256;
 pub const MAX_REMOTE_TOPOLOGY_BYTES: u64 = 1024 * 1024;
 pub const MAX_SHARD_RPC_TLS_FILE_BYTES: u64 = 4 * 1024 * 1024;
 pub const DEFAULT_SHARD_RPC_TIMEOUT: Duration = Duration::from_secs(5);
+/// Poll interval for the nonblocking accept loop and the shutdown drain.
+const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
@@ -298,6 +300,35 @@ pub fn server_tls_from_pem(
     Ok(Arc::new(config))
 }
 
+/// Refuse a shard node whose server identity and coordinator-client trust share a root.
+///
+/// A shard server proves *it is the shard*; a coordinator client proves *it may call the shard*.
+/// If one CA issues both, any coordinator certificate can also impersonate a shard endpoint and the
+/// two roles stop being separable. This compares the two bundles as bytes: it refuses the same file
+/// used twice and refuses a coordinator trust root that also appears in the shard's served chain.
+/// It cannot see a root that signs the leaf without appearing in either file, so the deployment
+/// contract — two distinct Secrets, documented in `SHARD-TRANSPORT.md` — remains the outer control.
+pub fn assert_distinct_trust_roles(certificate_chain: &Path, coordinator_ca: &Path) -> Result<()> {
+    if fs::canonicalize(certificate_chain).ok() == fs::canonicalize(coordinator_ca).ok() {
+        return Err(invalid_transport(format!(
+            "shard server chain and coordinator trust root are the same file {}; \
+             the server identity and the coordinator-client trust must be separate bundles",
+            coordinator_ca.display()
+        )));
+    }
+    let served = read_certificates(certificate_chain, "server certificate chain")?;
+    for root in read_certificates(coordinator_ca, "coordinator trust root")? {
+        if served.contains(&root) {
+            return Err(invalid_transport(
+                "a coordinator trust root also appears in the shard server chain; \
+                 issue the shard-server and coordinator-client identities from separate CAs"
+                    .to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Load a coordinator client identity and the dedicated CA allowed to issue shard certificates.
 pub fn client_tls_from_pem(
     certificate_chain: &Path,
@@ -321,6 +352,15 @@ fn validate_timeout(timeout: Duration) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+/// A write-enabled shard that has finished replicated recovery and has not yet been bound.
+///
+/// Holding the recovered count next to the not-yet-serving server is what lets a node report
+/// exactly how much history it replayed in the same record that announces it began listening.
+pub struct ShardNodeStartup {
+    pub server: ShardRpcServer,
+    pub recovered_wal_records: usize,
 }
 
 /// A read-only shard RPC server. Every accepted connection must complete a mutual-TLS handshake.
@@ -367,6 +407,28 @@ impl ShardRpcServer {
         })
     }
 
+    /// Recover the replicated admission log, then hand back a shard that is ready to be bound.
+    ///
+    /// The ordering is the guarantee, and it is expressed in the return type: this yields a
+    /// [`ShardNodeStartup`], never a listener. A caller cannot admit a single connection before
+    /// replicated recovery has returned, because until then there is nothing to accept on. A
+    /// recovery that fails returns `Err` and no socket is ever bound, so an incompletely recovered
+    /// write node is unreachable rather than quietly serving a truncated history.
+    pub fn recover_then_ready(
+        shard_id: usize,
+        mut ingestor: Ingestor,
+        tls: Arc<ServerConfig>,
+        timeout: Duration,
+        now_ms: i64,
+    ) -> Result<ShardNodeStartup> {
+        validate_timeout(timeout)?;
+        let recovered_wal_records = ingestor.recover(now_ms)?.len();
+        Ok(ShardNodeStartup {
+            server: Self::new_replicated_writer(shard_id, ingestor, tls, timeout)?,
+            recovered_wal_records,
+        })
+    }
+
     pub fn bind_and_serve(self, address: SocketAddr) -> Result<()> {
         let listener =
             TcpListener::bind(address).map_err(|e| transport_error("bind listener", e))?;
@@ -375,23 +437,66 @@ impl ShardRpcServer {
 
     /// Serve forever with a fixed upper bound on concurrent TLS handshakes and requests.
     pub fn serve(self, listener: TcpListener) -> Result<()> {
+        self.serve_with_shutdown(listener, Arc::new(AtomicBool::new(false)))
+    }
+
+    /// Serve until `shutdown` is set, then drain.
+    ///
+    /// Draining is what makes termination safe for a *write* node: the listener stops accepting
+    /// first, so no new admission can begin, and the loop then waits for every in-flight request to
+    /// reach its own durability boundary before returning. An ingest that has been acknowledged has
+    /// already crossed the WAL fsync ([`crate::wal`]), so a drained shutdown cannot strand an
+    /// acknowledged write; an ingest still in flight either completes and is acknowledged or never
+    /// acknowledges at all. Exceeding the drain budget is a named failure, never a silent exit.
+    pub fn serve_with_shutdown(
+        self,
+        listener: TcpListener,
+        shutdown: Arc<AtomicBool>,
+    ) -> Result<()> {
+        listener
+            .set_nonblocking(true)
+            .map_err(|e| transport_error("set shard listener nonblocking", e))?;
         let active = Arc::new(AtomicUsize::new(0));
+        let drain_budget = self.timeout;
         let server = Arc::new(self);
-        for accepted in listener.incoming() {
-            let stream = accepted.map_err(|e| transport_error("accept connection", e))?;
-            if active.fetch_add(1, Ordering::SeqCst) >= MAX_SHARD_RPC_CONNECTIONS {
-                active.fetch_sub(1, Ordering::SeqCst);
-                let _ = stream.shutdown(Shutdown::Both);
-                continue;
-            }
-            let server = Arc::clone(&server);
-            let active = Arc::clone(&active);
-            std::thread::spawn(move || {
-                if let Err(error) = server.handle_connection(stream) {
-                    eprintln!("prism shard RPC connection rejected: {error}");
+        while !shutdown.load(Ordering::SeqCst) {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    // BSD and macOS hand back an accepted socket that inherited the listener's
+                    // O_NONBLOCK; Linux does not. Clearing it explicitly makes the per-connection
+                    // read/write deadlines mean the same thing on every platform, instead of
+                    // turning a blocking read into a spurious `WouldBlock` rejection.
+                    if let Err(error) = stream.set_nonblocking(false) {
+                        return Err(transport_error("clear accepted socket nonblocking", error));
+                    }
+                    if active.fetch_add(1, Ordering::SeqCst) >= MAX_SHARD_RPC_CONNECTIONS {
+                        active.fetch_sub(1, Ordering::SeqCst);
+                        let _ = stream.shutdown(Shutdown::Both);
+                        continue;
+                    }
+                    let server = Arc::clone(&server);
+                    let active = Arc::clone(&active);
+                    std::thread::spawn(move || {
+                        if let Err(error) = server.handle_connection(stream) {
+                            eprintln!("prism shard RPC connection rejected: {error}");
+                        }
+                        active.fetch_sub(1, Ordering::SeqCst);
+                    });
                 }
-                active.fetch_sub(1, Ordering::SeqCst);
-            });
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(ACCEPT_POLL_INTERVAL);
+                }
+                Err(error) => return Err(transport_error("accept connection", error)),
+            }
+        }
+        let deadline = std::time::Instant::now() + drain_budget;
+        while active.load(Ordering::SeqCst) != 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(ACCEPT_POLL_INTERVAL);
+        }
+        if active.load(Ordering::SeqCst) != 0 {
+            return Err(invalid_transport(
+                "shard shutdown drain exceeded the configured request timeout".to_string(),
+            ));
         }
         Ok(())
     }
@@ -897,6 +1002,26 @@ impl RemoteReadTopology {
         }
         Ok(())
     }
+
+    /// Validate this topology from one shard node's point of view.
+    ///
+    /// A shard that does not know the cluster shape cannot notice that it was deployed with the
+    /// wrong identity. Reusing the coordinator's own contiguity rule here means a topology that a
+    /// coordinator would refuse cannot be the topology a shard silently starts under, and a
+    /// `shard_id` outside `0..N` fails by name at startup instead of answering for a range of the
+    /// keyspace no coordinator will ever route to it.
+    pub fn endpoint_for(&self, shard_id: usize) -> Result<&RemoteShardEndpoint> {
+        self.validate()?;
+        self.shards
+            .iter()
+            .find(|endpoint| endpoint.shard_id == shard_id)
+            .ok_or_else(|| {
+                invalid_transport(format!(
+                    "shard id {shard_id} is not a member of the configured topology of {} shards",
+                    self.shards.len()
+                ))
+            })
+    }
 }
 
 /// A multi-node, read-only coordinator over mutually authenticated shard clients.
@@ -1171,6 +1296,12 @@ mod tests {
         )
     }
 
+    /// Every key below pins `ec_param_enc:named_curve`, because the fixture must not depend on
+    /// which OpenSSL the host happens to ship. LibreSSL — what macOS puts on `PATH` as
+    /// `/usr/bin/openssl` — defaults to writing EC keys with *explicit* curve parameters, while
+    /// OpenSSL 3 defaults to the `prime256v1` OID. rustls accepts only the named form, so without
+    /// this flag the server refuses its own test certificate and these tests fail against a TLS
+    /// parse error instead of the behaviour they mean to test.
     fn openssl(dir: &Path, args: &[&str]) {
         let output = Command::new("openssl")
             .current_dir(dir)
@@ -1198,6 +1329,8 @@ mod tests {
                 "ec",
                 "-pkeyopt",
                 "ec_paramgen_curve:P-256",
+                "-pkeyopt",
+                "ec_param_enc:named_curve",
                 "-nodes",
                 "-days",
                 "3650",
@@ -1230,6 +1363,8 @@ mod tests {
                 "ec",
                 "-pkeyopt",
                 "ec_paramgen_curve:P-256",
+                "-pkeyopt",
+                "ec_param_enc:named_curve",
                 "-nodes",
                 "-sha256",
                 "-subj",
@@ -1549,6 +1684,218 @@ mod tests {
         handle.join().unwrap().unwrap();
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(remote_root);
+    }
+
+    /// A write node with one acknowledged-but-unpublished admission record, plus its backend.
+    fn pending_write_node(tag: &str) -> (PathBuf, PathBuf, Ingestor) {
+        let root = temp(tag);
+        let remote_root = temp(&format!("{tag}-remote"));
+        fs::create_dir_all(&remote_root).unwrap();
+        let backend: Arc<dyn ObjectStore> = Arc::new(LocalObjectStore::new(&remote_root));
+        let engine = Engine::init(
+            &root,
+            StoreConfig {
+                format_version: STORE_VERSION,
+                dim: 8,
+                nlist: 2,
+                pq_m: 2,
+                seed: 42,
+                kmeans_restarts: 2,
+                block_size: 4096,
+                partitions: PartitionScheme::default(),
+                promote: Vec::new(),
+            },
+        )
+        .unwrap()
+        .with_cold(Arc::new(CachedObjectStore::new(
+            Arc::clone(&backend),
+            CACHE_QUOTA_BYTES,
+        )));
+        let ingestor = Ingestor::open_replicated(engine, 0).unwrap();
+        // Cross the durability boundary without publishing: exactly the state a node dies in.
+        let remote = crate::wal::RemoteWal::new(Arc::clone(&backend), 0);
+        let record_id = remote
+            .next_record_id(ingestor.engine.ownership_epoch(), &[])
+            .unwrap();
+        let record = crate::wal::WalRecord {
+            record_id,
+            events: vec![event("pending-1", "payment service timeout")],
+            source: None,
+            source_offset: None,
+            created_at_ms: 1_760_000_000_000,
+        };
+        ingestor.wal.append_record(&record).unwrap();
+        remote.append(&record).unwrap();
+        (root, remote_root, ingestor)
+    }
+
+    #[test]
+    fn replicated_recovery_completes_before_a_shard_can_be_bound() {
+        let (root, remote_root, ingestor) = pending_write_node("recover-order");
+        let (server_tls, _, _) = tls_pair();
+
+        let startup = ShardRpcServer::recover_then_ready(
+            0,
+            ingestor,
+            server_tls,
+            Duration::from_secs(2),
+            1_760_000_000_001,
+        )
+        .unwrap();
+
+        // The acknowledged record was replayed, and the value proving it is in hand BEFORE any
+        // listener exists: `recover_then_ready` yields a server, never a bound socket, so there is
+        // no window in which a coordinator could be served from an unrecovered history.
+        assert_eq!(
+            startup.recovered_wal_records, 1,
+            "the acknowledged admission record must be replayed at startup"
+        );
+        assert!(
+            !startup.server.engine.snapshot().unwrap().parts.is_empty(),
+            "recovery must have published the replayed batch before the shard is bindable"
+        );
+
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(remote_root);
+    }
+
+    #[test]
+    fn a_shard_whose_recovery_fails_is_never_bindable() {
+        let (root, remote_root, ingestor) = pending_write_node("recover-fail");
+        let (server_tls, _, _) = tls_pair();
+
+        // Corrupt the remote admission log the way a mutable backend would: a well-formed record
+        // filed under a key that no longer matches its body. Recovery must refuse rather than serve
+        // a history it cannot vouch for.
+        let records = fs::read_dir(remote_root.join("wal").join("shard-0").join("records"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        assert_eq!(records.len(), 1);
+        let mut record: crate::wal::WalRecord =
+            serde_json::from_slice(&fs::read(&records[0]).unwrap()).unwrap();
+        record.record_id += 1;
+        fs::write(&records[0], serde_json::to_vec(&record).unwrap()).unwrap();
+
+        let outcome = ShardRpcServer::recover_then_ready(
+            0,
+            ingestor,
+            server_tls,
+            Duration::from_secs(2),
+            1_760_000_000_001,
+        );
+        let error = match outcome {
+            Ok(_) => panic!("a corrupt admission log must not produce a bindable shard"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("key id") && error.contains("body id"),
+            "a failed recovery must name the disagreement it found: {error}"
+        );
+
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(remote_root);
+    }
+
+    #[test]
+    fn shutdown_drains_in_flight_work_before_returning() {
+        let shard = engine();
+        shard
+            .ingest(vec![event("e1", "payment service timeout")], 2)
+            .unwrap();
+        let (server_tls, client_tls, _) = tls_pair();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = ShardRpcServer::new(0, shard, server_tls, Duration::from_secs(5)).unwrap();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let serving = Arc::clone(&shutdown);
+        let handle = std::thread::spawn(move || server.serve_with_shutdown(listener, serving));
+
+        // A request served through the draining accept loop behaves exactly as before.
+        let client = TlsShardClient::new(
+            0,
+            address.to_string(),
+            "shard.test",
+            client_tls,
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert!(client.health().is_ok());
+
+        shutdown.store(true, Ordering::SeqCst);
+        // The drain returns Ok only when nothing is still in flight; exceeding the budget is a
+        // named error, so a clean Ok here is the durability-preserving outcome, not a timeout.
+        handle
+            .join()
+            .unwrap()
+            .expect("a drained shutdown must not report an error");
+    }
+
+    #[test]
+    fn one_bundle_cannot_serve_both_trust_roles() {
+        let dir = temp("shared-trust");
+        fs::create_dir_all(&dir).unwrap();
+        generate_ca(&dir, "shared-ca");
+        generate_leaf(&dir, "server", "shard.test", "shared-ca", "serverAuth");
+
+        let same_file =
+            assert_distinct_trust_roles(&dir.join("shared-ca.pem"), &dir.join("shared-ca.pem"))
+                .unwrap_err()
+                .to_string();
+        assert!(same_file.contains("same file"), "{same_file}");
+
+        // A chain that carries the coordinator root is the subtler shape: two paths, one trust.
+        let mut chain = fs::read(dir.join("server.pem")).unwrap();
+        chain.extend_from_slice(&fs::read(dir.join("shared-ca.pem")).unwrap());
+        fs::write(dir.join("server-chain.pem"), &chain).unwrap();
+        let shared_root =
+            assert_distinct_trust_roles(&dir.join("server-chain.pem"), &dir.join("shared-ca.pem"))
+                .unwrap_err()
+                .to_string();
+        assert!(shared_root.contains("separate CAs"), "{shared_root}");
+
+        // Distinct CAs, as the deployment contract requires, are accepted.
+        generate_ca(&dir, "distinct-coordinator-ca");
+        assert_distinct_trust_roles(
+            &dir.join("server.pem"),
+            &dir.join("distinct-coordinator-ca.pem"),
+        )
+        .unwrap();
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_shard_refuses_a_topology_it_is_not_a_member_of() {
+        let topology = RemoteReadTopology {
+            version: 1,
+            shards: vec![
+                RemoteShardEndpoint {
+                    shard_id: 0,
+                    address: "prism-shard-0.internal:7443".into(),
+                    server_name: "prism-shard-0.internal".into(),
+                },
+                RemoteShardEndpoint {
+                    shard_id: 1,
+                    address: "prism-shard-1.internal:7443".into(),
+                    server_name: "prism-shard-1.internal".into(),
+                },
+            ],
+        };
+        assert_eq!(topology.endpoint_for(1).unwrap().shard_id, 1);
+        let error = topology.endpoint_for(2).unwrap_err().to_string();
+        assert!(error.contains("not a member"), "{error}");
+
+        let gapped = RemoteReadTopology {
+            version: 1,
+            shards: vec![RemoteShardEndpoint {
+                shard_id: 4,
+                address: "prism-shard-4.internal:7443".into(),
+                server_name: "prism-shard-4.internal".into(),
+            }],
+        };
+        let error = gapped.endpoint_for(4).unwrap_err().to_string();
+        assert!(error.contains("contiguous range"), "{error}");
     }
 
     #[test]

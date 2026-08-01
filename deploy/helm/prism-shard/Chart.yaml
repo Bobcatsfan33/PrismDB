@@ -1,0 +1,10 @@
+apiVersion: v2
+name: prism-shard
+description: PrismDB shard-node database distribution with stable per-shard identity
+type: application
+# The pod ordinal is read through the `apps.kubernetes.io/pod-index` label, which is generally
+# available from Kubernetes 1.31. On an older cluster the downward-API reference resolves to an
+# empty shard id and `prism shard-serve` refuses to start rather than guessing an identity.
+kubeVersion: ">=1.31.0-0"
+version: 0.1.0
+appVersion: "0.0.1"

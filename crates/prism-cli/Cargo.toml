@@ -19,6 +19,7 @@ prism-sql = { workspace = true }
 prism-engine = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+signal-hook = { workspace = true }
 
 [dev-dependencies]
 prism-types = { workspace = true }
