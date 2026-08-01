@@ -11,6 +11,7 @@ use prism_engine::bench::{self, BenchOpts};
 use prism_engine::corpus::{self, Kind};
 use prism_engine::engine::now_ms;
 use prism_engine::model::HashModelPlane;
+use prism_engine::storage::ShardPlacement;
 use prism_engine::{oracle, tsv, Engine, ModelPlane};
 use prism_part::store::{Store, StoreConfig, STORE_VERSION};
 use prism_types::error::{PrismError, Result};
@@ -31,12 +32,20 @@ USAGE:
                   poll a source, admit, ack, publish, THEN advance its offset
   prism ingest-otlp   --path <dir> --file <otlp.json> [--tenant fallback]
                   map OTel GenAI spans (semconv pinned) into events
-  prism recover   --path <dir>
-                  replay every acknowledged-but-unpublished batch from the WAL
+  prism recover   --path <dir> [--replicated true --shard-id <n>]
+                  replay every acknowledged-but-unpublished batch from the WAL;
+                  --replicated also replays the remote admission log, which is the
+                  only route to acked events on a replacement node
+  prism backup    --path <dir>
+                  back up every published part, the generations they need, and the
+                  catalog mirror, as one restorable set (D-094)
+  prism hydrate   --path <dir> [--shard-id <n> --topology <topology.json>]
+                  restore a replacement node from that set: plan, verify, install.
+                  Refuses a store that already has a CURRENT snapshot.
   prism shard-serve --path <dir> --listen <ip:port> --shard-id <n>
                     --topology <topology.json>
                     --cert <chain.pem> --key <key.pem> --client-ca <ca.pem>
-                    [--timeout-ms 5000] [--write-enabled true]
+                    [--timeout-ms 5000] [--write-enabled true] [--hydrate true]
                   coordinator RPC over mandatory mutual TLS; writes require remote WAL.
                   The shard must be a member of the contiguous topology it is given, and
                   its server chain may not share a trust root with the coordinator CA.
@@ -135,6 +144,8 @@ fn run(argv: Vec<String>) -> Result<()> {
         "ingest-source" => cmd_ingest_source(&a),
         "ingest-otlp" => cmd_ingest_otlp(&a),
         "recover" => cmd_recover(&a),
+        "backup" => cmd_backup(&a),
+        "hydrate" => cmd_hydrate(&a),
         "shard-serve" => cmd_shard_serve(&a),
         "coordinator-search" => cmd_coordinator_search(&a),
         "evidence" => cmd_evidence(&a),
@@ -176,7 +187,35 @@ fn path_of(a: &Args) -> Result<PathBuf> {
 /// Production requires explicit AWS credentials. Only the conspicuous, loopback-only
 /// `PRISM_ALLOW_INSECURE_S3=true` development path may use the MinIO defaults.
 fn cold_from_env() -> Result<Option<Arc<prism_engine::storage::CachedObjectStore>>> {
-    let Ok(endpoint) = std::env::var("PRISM_S3_ENDPOINT") else {
+    // A filesystem-backed object store rooted at a directory — a mounted durable volume, or the
+    // separate-process disaster drill's shared store. This is a *real* object store in the sense
+    // [storage §1](../../../docs/STORAGE-CONTRACT.md) already uses (content-addressed keys → durable
+    // objects behind the one `ObjectStore` trait), not a mock; the S3 backend is the production one
+    // and both go through the same seam, so the cold tier, catalog mirror, ownership epochs, and the
+    // replicated admission log all follow it together.
+    let dir = std::env::var("PRISM_OBJECT_STORE_DIR")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let endpoint = std::env::var("PRISM_S3_ENDPOINT")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    if dir.is_some() && endpoint.is_some() {
+        return Err(PrismError::Invalid(
+            "PRISM_OBJECT_STORE_DIR and PRISM_S3_ENDPOINT both name a cold-tier backend; set \
+             exactly one, because which store holds the durable truth is not a thing to guess"
+                .into(),
+        ));
+    }
+    if let Some(dir) = dir {
+        let backend = prism_engine::storage::LocalObjectStore::new(std::path::PathBuf::from(dir));
+        return Ok(Some(Arc::new(
+            prism_engine::storage::CachedObjectStore::new(
+                Arc::new(backend),
+                prism_engine::storage::CACHE_QUOTA_BYTES,
+            ),
+        )));
+    }
+    let Some(endpoint) = endpoint else {
         return Ok(None);
     };
     let allow_insecure = std::env::var("PRISM_ALLOW_INSECURE_S3")
@@ -269,6 +308,95 @@ fn require_replicated_write_target() -> Result<()> {
     Ok(())
 }
 
+/// The placement a shard is allowed to hold, from the topology it already validated
+/// ([D-094](../../../docs/DECISIONS.md)). Hydration checks each restored part's tenants against it,
+/// so a part that belongs to another shard is refused rather than opened.
+fn placement_of(engine: &Engine, shard_id: usize, shard_count: usize) -> ShardPlacement {
+    ShardPlacement {
+        scheme: engine.store.config.partitions.clone(),
+        shard_id,
+        shard_count,
+    }
+}
+
+/// Back up every published part, the generations they require, and the catalog mirror.
+fn cmd_backup(a: &Args) -> Result<()> {
+    a.allow(&["path"])?;
+    let engine = open(a)?;
+    let report = engine.backup_published()?;
+    emit(&serde_json::json!({
+        "status": "backed-up",
+        "snapshot_id": report.snapshot_id,
+        "parts": report.parts.len(),
+        "generations": report.generations,
+        "bytes": report.bytes,
+    }))
+}
+
+/// Restore a replacement node from the backup set.
+fn cmd_hydrate(a: &Args) -> Result<()> {
+    a.allow(&["path", "shard-id", "topology"])?;
+    let engine = open(a)?;
+    let placement = match (a.opt("shard-id"), a.opt("topology")) {
+        (Some(id), Some(topology)) => {
+            let shard_id = id.parse::<usize>().map_err(|_| {
+                PrismError::Invalid("--shard-id must be an unsigned integer".into())
+            })?;
+            let topology =
+                prism_engine::shard_rpc::RemoteReadTopology::load(std::path::Path::new(&topology))?;
+            topology.endpoint_for(shard_id)?;
+            Some(placement_of(&engine, shard_id, topology.shards.len()))
+        }
+        (None, None) => None,
+        _ => return Err(PrismError::Invalid(
+            "--shard-id and --topology go together: checking a restored part's tenants against \
+                 this shard's placement needs both the id and the cluster width"
+                .into(),
+        )),
+    };
+    let started = now_ms();
+    let report = engine.hydrate_from_backup(placement.as_ref())?;
+    emit(&serde_json::json!({
+        "status": "hydrated",
+        "snapshot_id": report.snapshot_id,
+        "parts": report.parts.len(),
+        "generations": report.generations,
+        "bytes": report.bytes,
+        "recovery_time_ms": now_ms().saturating_sub(started),
+    }))
+}
+
+/// Hydrate a replacement node **before it can be ready**, and only when it is genuinely empty.
+///
+/// This extends [D-093](../../../docs/DECISIONS.md)'s ordering rather than re-arguing it: the
+/// startup path still yields a shard and never a listener, and hydration now runs inside that path
+/// before replicated WAL recovery. A store that already has a `CURRENT` is a node that has already
+/// been restored (or never lost its disk), so this is a no-op — which keeps a restart idempotent
+/// without ever silently overwriting a live database.
+fn hydrate_if_empty(
+    engine: &Engine,
+    placement: &ShardPlacement,
+) -> Result<Option<serde_json::Value>> {
+    let current = engine.store.current_path();
+    let already = current.exists()
+        && !std::fs::read_to_string(&current)
+            .unwrap_or_default()
+            .trim()
+            .is_empty();
+    if already {
+        return Ok(None);
+    }
+    let started = now_ms();
+    let report = engine.hydrate_from_backup(Some(placement))?;
+    Ok(Some(serde_json::json!({
+        "snapshot_id": report.snapshot_id,
+        "parts": report.parts.len(),
+        "generations": report.generations.len(),
+        "bytes": report.bytes,
+        "recovery_time_ms": now_ms().saturating_sub(started),
+    })))
+}
+
 fn cmd_shard_serve(a: &Args) -> Result<()> {
     a.allow(&[
         "path",
@@ -280,6 +408,7 @@ fn cmd_shard_serve(a: &Args) -> Result<()> {
         "client-ca",
         "timeout-ms",
         "write-enabled",
+        "hydrate",
     ])?;
     let address: std::net::SocketAddr = a
         .req("listen")?
@@ -313,11 +442,23 @@ fn cmd_shard_serve(a: &Args) -> Result<()> {
     let shard_count = topology.shards.len();
 
     let write_enabled = a.parse_opt("write-enabled", false)?;
+
+    // Hydration precedes readiness by construction: it runs here, before any server value exists
+    // and long before a listener is bound, and a failure returns `Err` so a node that could not
+    // restore its parts is unreachable rather than serving a hole in the keyspace (D-094).
+    let hydrate = a.parse_opt("hydrate", false)?;
+    let engine = open(a)?;
+    let hydration = if hydrate {
+        hydrate_if_empty(&engine, &placement_of(&engine, shard_id, shard_count))?
+    } else {
+        None
+    };
+
     let (server, recovered) = if write_enabled {
         require_replicated_write_target()?;
         let startup = prism_engine::shard_rpc::ShardRpcServer::recover_then_ready(
             shard_id,
-            prism_engine::Ingestor::open_replicated(open(a)?, shard_id)?,
+            prism_engine::Ingestor::open_replicated(engine, shard_id)?,
             tls,
             std::time::Duration::from_millis(timeout_ms),
             now_ms(),
@@ -327,7 +468,7 @@ fn cmd_shard_serve(a: &Args) -> Result<()> {
         (
             prism_engine::shard_rpc::ShardRpcServer::new(
                 shard_id,
-                Arc::new(open(a)?),
+                Arc::new(engine),
                 tls,
                 std::time::Duration::from_millis(timeout_ms),
             )?,
@@ -353,6 +494,7 @@ fn cmd_shard_serve(a: &Args) -> Result<()> {
         "address": address.to_string(),
         "writable": write_enabled,
         "recovered_wal_records": recovered,
+        "hydrated": hydration,
     }))?;
     let result = server.serve_with_shutdown(listener, Arc::clone(&shutdown));
     eprintln!(
@@ -712,9 +854,29 @@ fn cmd_ingest_otlp(a: &Args) -> Result<()> {
 fn cmd_recover(a: &Args) -> Result<()> {
     use prism_engine::Ingestor;
 
+    a.allow(&["path", "replicated", "shard-id"])?;
     // `open` wires the cold tier from the environment (MinIO when `PRISM_S3_ENDPOINT` is set), so
     // recovery replays the WAL and heals the catalog against the *same* mirror the writer published to.
-    let mut ing = Ingestor::open(open(a)?)?;
+    //
+    // `--replicated` opens the **remote** admission log as well ([D-068](../../../docs/DECISIONS.md)):
+    // a replacement node has none of the lost node's local WAL bytes, so the only route to events
+    // that were acknowledged but never published is the shared object store. Without it this replays
+    // local WAL only, which is the right default for a restart on a surviving disk.
+    let replicated = a.parse_opt("replicated", false)?;
+    let mut ing = if replicated {
+        let shard_id = a
+            .opt("shard-id")
+            .map(|v| {
+                v.parse::<usize>().map_err(|_| {
+                    PrismError::Invalid("--shard-id must be an unsigned integer".into())
+                })
+            })
+            .transpose()?
+            .unwrap_or(0);
+        Ingestor::open_replicated(open(a)?, shard_id)?
+    } else {
+        Ingestor::open(open(a)?)?
+    };
     // A restart re-acquires write ownership at a **higher** epoch (D-076), fencing any lingering writer
     // the crash left behind before this process republishes.
     ing.engine.acquire_ownership()?;

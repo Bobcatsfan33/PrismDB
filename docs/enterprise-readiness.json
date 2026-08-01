@@ -160,13 +160,17 @@
         ".github/workflows/nightly.yml",
         "docs/STORAGE-CONTRACT.md",
         "docs/SHARD-TRANSPORT.md",
+        "docs/DECISIONS.md",
         "crates/prism-engine/src/shard_rpc.rs",
         "crates/prism-engine/src/wal.rs",
-        "crates/prism-cli/tests/remote_wal.rs"
+        "crates/prism-engine/src/storage/hydrate.rs",
+        "crates/prism-engine/src/storage/mirror.rs",
+        "crates/prism-cli/tests/remote_wal.rs",
+        "crates/prism-cli/tests/hydration.rs"
       ],
       "gaps": [
-        "No supported backup/restore product workflow or customer-scale RPO/RTO drill exists.",
-        "Remote-durable admission, authenticated write transport, and replacement-node recovery are gated, but already-published part hydration and independent-host latency/jitter/scaling evidence remain open."
+        "No customer-scale RPO/RTO drill exists: the automated disaster drill is process-isolated on a single host and its recovery-point and recovery-time numbers are staging-shaped, not independent-host or customer-scale evidence.",
+        "Published-part backup and replacement-node hydration are gated end-to-end, but object versioning and retention covering the recovery window remain an operator-side deployment duty the software cannot enforce, and independent-host latency/jitter/scaling evidence remains open."
       ]
     },
     {
