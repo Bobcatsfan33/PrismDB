@@ -343,6 +343,21 @@ jobs:
       # stale cursor gets the explicit expired-snapshot error (merge contract §5, query contract §2).
       - run: cargo test --release -p prism-cli --test lease -- --nocapture
 
+  hydration:
+    name: the S14 gate — the disaster drill, and every restore failure named
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The drill itself (D-094): publish, acknowledge a pre-publication tail, destroy the
+      # node-local disk, bring up a replacement as a SEPARATE PROCESS with its own data root,
+      # restore catalog/generations/parts, replay the remote admission log, compare complete
+      # answers and snapshots, and prove the superseded epoch cannot publish. Its recovery-point
+      # and recovery-time numbers are staging-shaped and process-isolated by construction — the
+      # independent-host and customer-scale RPO/RTO claims stay with EXT-DR and P14.
+      - run: cargo test --release -p prism-cli --test hydration -- --nocapture
+
   merge-scheduler:
     name: the S10 gate — size-tiered merges, bounded steady state, answers unchanged
     runs-on: ubuntu-latest

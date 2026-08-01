@@ -222,7 +222,14 @@ The shard-distribution gates additionally prove:
 The authenticated multi-node read/write path is now wired. Remaining HA evidence
 is sustained 1→4 node scaling on independent hosts and timer-driven asynchronous
 hedging under latency/jitter, not an in-process or deterministic partition seam.
-Already-published hot-part restoration remains behind the backup/hydration
-increment, and migration/version policy, envelope encryption, and customer-scale
+Already-published hot-part restoration has landed
+([D-094](DECISIONS.md), [storage §10](STORAGE-CONTRACT.md)): a replacement node
+hydrates the published parts, their generations, and the catalog from the object
+store *before* it is ready — `shard-serve --hydrate true` runs it inside the same
+startup path that already refuses to bind before recovery returns, so a node that
+could not restore its parts is unreachable rather than serving a hole in the
+keyspace. Hydration is skipped when the store already holds a `CURRENT`, which
+keeps a restart idempotent and means a restore can never quietly overwrite a
+serving node. Migration/version policy, envelope encryption, and customer-scale
 RPO/RTO are separate open gates. The public authenticated API is documented
 separately.

@@ -18,10 +18,10 @@ use prism_part::format::{self, FRAME_HEADER_BYTES};
 use prism_part::part::{ColumnStorage, PartReader};
 use prism_types::error::{PrismError, Result};
 
-/// The remote key of a part's cold tier (`parts/<id>/rerank.vec`), or a catalog mirror snapshot
-/// (`catalog/SNAPSHOT-<snapshot_id>`, the scheme [D-069](../../../../docs/DECISIONS.md)'s mirror
-/// writes). What reconciliation reclaims against the live set.
-const COLD_TIER_FILE: &str = "rerank.vec";
+/// The two remote schemes reconciliation reclaims against the live set: anything under a part's
+/// prefix (`parts/<id>/…` — its cold tier, and since [D-094](../../../../docs/DECISIONS.md) its
+/// backup file set and receipt), and a catalog mirror snapshot (`catalog/SNAPSHOT-<snapshot_id>`,
+/// what [D-069](../../../../docs/DECISIONS.md)'s mirror writes).
 const MIRROR_SNAPSHOT_PREFIX: &str = "catalog/SNAPSHOT-";
 
 /// What a remote-orphan reconciliation pass did.
@@ -41,11 +41,19 @@ pub struct ReconcileReport {
     pub aborted_uploads: Vec<String>,
 }
 
-/// The part id of a `parts/<id>/rerank.vec` key, if the key is a cold-tier object.
+/// The part id a `parts/<id>/<file>` key belongs to.
+///
+/// **Widened in [D-094](../../../../docs/DECISIONS.md)** from the cold tier alone to the whole part
+/// prefix. Before backup existed, only `rerank.vec` lived under a part's prefix; every other key
+/// would have fallen through to the "never sweep the unrecognised" branch and accumulated forever
+/// once backup started writing the hot tier and the receipt there. Reclamation is keyed on the part
+/// id, so a part that leaves the live set takes its entire backup set with it — under the same
+/// live-set-plus-horizon rule, and with the conservative direction unchanged: a key that names no
+/// part is still never swept.
 fn cold_tier_part_of(key: &str) -> Option<&str> {
     let rest = key.strip_prefix("parts/")?;
     let (id, tail) = rest.split_once('/')?;
-    (tail == COLD_TIER_FILE).then_some(id)
+    (!id.is_empty() && !tail.is_empty()).then_some(id)
 }
 
 /// The snapshot id a `catalog/SNAPSHOT-<id>` mirror key names, if the key is a mirror snapshot.

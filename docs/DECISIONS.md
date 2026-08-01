@@ -1295,3 +1295,89 @@ workflow, and a different tag. This closes the *distribution* half of ENG-SERVIC
 version policy, backup/hydration of already-published parts, envelope encryption and KMS lifecycle,
 customer-scale RPO/RTO, independent-host scale and load evidence, and independent penetration
 testing remain open.
+
+## D-094 — A published part is backed up as a complete, self-describing set, and a replacement node hydrates it before it is ready
+
+**S14 durability increment 1.** Three mechanisms already protect three different things, and the
+gap between them was the whole product's recovery story. The replicated WAL
+([D-068](DECISIONS.md), [D-091](DECISIONS.md)) protects events that were *acknowledged but not yet
+published*. The catalog mirror ([D-069](DECISIONS.md)) protects the *snapshot* — the list of parts.
+The cold tier puts each part's `rerank.vec` on the object store. What nothing protected is the
+**hot tier of an already-published part**: the PQ codes, the scalar and text columns, the bodies,
+and the manifest that describes them, which lived only on node-local disk.
+
+`recover_catalog_from_mirror` stated the consequence in its own refusal: it will not restore a
+snapshot naming a part that is not readable *locally*, "the hot tier is local, so a snapshot the
+mirror holds is only recoverable if its parts survived". A node whose disk is gone therefore had a
+catalog it could restore, a WAL tail it could replay, and no parts to restore them onto. Backup
+was a runbook nobody had written, executed against a layout nobody had specified.
+
+- **The backup unit is the whole part, described by a receipt written last.** Every file in a
+  part directory is uploaded under the key prefix the cold tier already used
+  (`parts/<part_id>/<file>`), and then — only after every file is durable and verified — a
+  `parts/<part_id>/BACKUP.json` records each file's length and SHA-256 alongside the part's
+  `generation_id` and tenants. The manifest's *presence* is the atomic assertion that this part is
+  completely backed up, exactly as the catalog commit is the atomic assertion that a part is
+  published. This is the publication discipline of storage §2 raised one level: upload, verify,
+  *then* reference. A listing can only say which objects exist; it cannot say whether a set is
+  complete or which bytes belong together, so the receipt is not redundant with the listing.
+- **A restore set is resolved and proven compatible before a single byte is installed.** Hydration
+  plans the whole set first — the mirror's highest snapshot, the parts it names, each part's
+  `BACKUP.json`, and the generation each part declares — and refuses the entire restore, by name,
+  if any member is missing, if two parts in one snapshot would require different generations than
+  the set can produce, or if a generation artifact fails its content address. Generations are
+  already content-addressed ([D-072](DECISIONS.md)), so "is this the codebook it claims to be" is
+  answered by re-deriving the id, not by trusting a filename. **Never mix generations** is enforced
+  at plan time, where the failure costs nothing, rather than discovered at query time.
+- **Installation is staged, verified, and atomic; a snapshot is never partially restored.** Each
+  part is fetched into a staging directory, every file checked against the receipt's length and
+  SHA-256, and only a fully verified part is renamed into place. `CURRENT` is written **last**,
+  after every part the snapshot names is installed and openable. A crash at any point leaves
+  staging directories and an unchanged `CURRENT` — old-or-new, never hybrid, the same rule the
+  publication kill-point matrix already enforces. Staging directories are orphans of exactly the
+  `.tmp` shape local GC already understands.
+- **Hydration precedes readiness, expressed in the return type.** The
+  [D-093](DECISIONS.md) ordering guarantee is extended rather than re-argued: the startup path
+  yields a shard, never a bound socket, and now hydration runs inside that path before replicated
+  WAL recovery does. A hydration that fails returns an error, so a node that could not restore its
+  parts is unreachable rather than quietly serving a hole in the keyspace.
+- **Restore never overwrites a live database silently.** Hydrating onto a store that already has a
+  `CURRENT` naming a snapshot is refused by name. A restore is a bootstrap action for an empty
+  replacement node; making it also a *destructive* action against a healthy node — one typo away
+  from replacing live data with a backup — is a footgun no operator asked for. Deliberate
+  re-hydration is an explicit, separate intent.
+- **Every failure mode is named, not inferred.** A file whose SHA-256 disagrees with the receipt is
+  *corrupt*; one shorter than the recorded length is *truncated*; a part declaring a generation the
+  set cannot produce is *wrong-generation*; a part whose tenants fall outside the shard's own
+  topology bucket is *wrong-tenant* (S4 isolation is placement, [D-071](DECISIONS.md), so a part
+  arriving at the wrong shard is a routing fault, not a file to open); an object the receipt names
+  and the store lacks is *missing*. Each is a distinct refusal with the part and file in the
+  message, because "restore failed" tells an operator at 3am nothing they can act on.
+- **Remote-orphan reconciliation now understands the whole part prefix.** Before this increment
+  only `parts/<id>/rerank.vec` was recognised as belonging to a part; every other key under
+  `parts/<id>/` fell through the "never sweep the unrecognised" branch and would have accumulated
+  forever. Reclamation is now keyed on the part id in the prefix, so a part that leaves the live
+  set takes its entire backup set with it, under the same live-set-plus-horizon rule as before. The
+  conservative direction is unchanged: an unrecognised key is still never swept.
+
+**No persisted structure is reinterpreted.** The part format, the manifest format, the snapshot
+format and the store layout are untouched; `BACKUP.json` is a new object in the remote key space,
+and the remote key space is not a format the reader parses. The reserved feature/extension
+mechanism is therefore not engaged, and this decision explicitly does not license a future
+increment to skip it.
+
+**Operator responsibility, stated because the software cannot enforce it.** PrismDB never deletes a
+backup object except through reconciliation past the reader-lease horizon, but it also cannot
+protect the bucket from the operator's own credentials. Object versioning and a retention or
+object-lock policy covering the intended recovery window are the deployment's duty, written into
+the storage contract rather than assumed.
+
+The permanent gate is the drill itself, automated: publish a customer-shaped dataset, acknowledge
+further pre-publication events, destroy the node-local disk, start a **replacement node as a
+separate process with a separate data root**, restore catalog and generations and parts, replay the
+remote admission WAL, compare complete answers and snapshots byte-for-byte, and prove the superseded
+epoch cannot publish. Recovery point and recovery time are measured and recorded — and labelled
+**staging-shaped, process-isolated, not host-isolated**: this drill proves the *mechanism*, and the
+independent-host and customer-scale RPO/RTO claims remain with EXT-DR and the P14 load increment,
+unclaimed here. Envelope encryption and KMS lifecycle, retention and deletion lifecycle, and
+independent-host scale evidence remain open and are deliberately untouched by this increment.
