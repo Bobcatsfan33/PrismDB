@@ -1381,3 +1381,116 @@ epoch cannot publish. Recovery point and recovery time are measured and recorded
 independent-host and customer-scale RPO/RTO claims remain with EXT-DR and the P14 load increment,
 unclaimed here. Envelope encryption and KMS lifecycle, retention and deletion lifecycle, and
 independent-host scale evidence remain open and are deliberately untouched by this increment.
+
+## D-095 — Per-tenant envelope encryption: tenant-scoped DEKs, a vetted AEAD per block, and a key id in every header
+
+**S14 confidentiality increment, design first.** Encryption changes what a stored byte *means*, so
+this decision lands before the code, and the normative rules live in the
+[encryption contract](ENCRYPTION-CONTRACT.md). The settled inputs — production backend, staging
+posture, the named unreachable-key-service gate, and the operator mitigation — are recorded here and
+are **not reopened by the implementation**.
+
+### The decisions
+
+- **Production wrapping-key backend is AWS KMS**, as the organisation's standard rather than on
+  PrismDB-local merits: one PKI ownership story covers the portfolio. (KMS's Ed25519 support matters
+  to *signing* contexts elsewhere and is irrelevant here — wrapping is encrypt/decrypt — but it is
+  the same vendor story.) **Staging is a software keystore implementing the same interface and the
+  same failure modes**, so the drill exercises the real code and only the *custody* claim differs.
+  **Every receipt names the backend that produced it** — the backend-conditional receipt discipline
+  from [storage §5](STORAGE-CONTRACT.md), now covering key custody.
+- **DEKs are tenant-scoped, wrapped by the KMS key, and stored only wrapped.** Every ciphertext
+  header carries the **explicit** KMS key id and DEK epoch. A key id is never inferred or defaulted;
+  a part that does not say which key encrypted it is refused rather than probed.
+- **A vetted AEAD, not a hand-rolled one.** `XChaCha20-Poly1305` (RustCrypto). This is a deliberate
+  departure from [D-002](DECISIONS.md), which hand-rolls SHA-256 and CRC-32 in-tree, and the
+  distinction is the point: a hash has one publishable test vector and no state, while an AEAD has
+  nonce management, constant-time tag comparison, and failure modes that test vectors do not cover —
+  a reused GCM nonce destroys confidentiality *and* authenticity, and no NIST vector detects it.
+  D-002's own reasoning ("hand-rolling a JSON parser would be strictly worse") applies with far more
+  force to authenticated encryption. Verified before adoption: it builds and round-trips under **MSRV
+  1.75** with `zeroize` pinned at 1.8.1 — the pin the workspace already maintains.
+- **Encryption is per framed block, never per file**, with the AEAD's associated data binding the
+  part id, column, block index, and key id. Whole-file encryption would break three existing
+  contracts at once — ranged fetches and the byte fetch budget, per-block CRC named-byte errors, and
+  block-level cache admission — and the AAD is what stops a block being moved between positions,
+  columns, or parts.
+- **A random 192-bit nonce per block, stored in the block header.** XChaCha20's extended nonce makes
+  random selection safe with no counter and no coordination between writers, which matters exactly
+  because publication is distributed and write ownership changes epoch
+  ([D-076](DECISIONS.md)). It costs 24 bytes per block — 0.15% at the default block size — and buys
+  the absence of a nonce-reuse invariant for a future sprint to get wrong.
+- **This one IS a format change, and it engages the reserved mechanism.** Unlike
+  [D-094](DECISIONS.md)'s `BACKUP.json` — a new object in a key space no reader parses —
+  `FEATURE_ENCRYPTION` (bit 6, reserved in S4 for precisely this) joins `SUPPORTED_FEATURES`, and the
+  envelope rides a **required** TLV extension so an unaware reader refuses the part rather than
+  skipping essential metadata. **The feature flag is explicit, never inferred**, and an unencrypted
+  store stays byte-identical.
+- **Metadata confidentiality closes the DATA-01 raw-disk gap.** Plaintext metadata is limited to what
+  the restore path must read *before* it can unwrap anything: part id, file lengths and hashes, key
+  id, algorithm id, and the **bucket ordinal**. The **tenant list becomes ciphertext**, so raw disk or
+  bucket access no longer discloses which tenants exist or share a bucket.
+  [D-094](DECISIONS.md)'s wrong-tenant refusal keeps working because routing is a function of the
+  bucket, which is exactly what stays readable — the check never needed the tenant names.
+- **The co-tenant limit is named, not papered over.** A dedicated-bucket tenant gets full
+  cryptographic isolation under its own DEK. A shared bucket may hold several tenants in one part, so
+  it is encrypted under a **bucket DEK**: at-rest confidentiality against outsiders, and **not**
+  cryptographic separation between co-tenants who share that key. Deployments needing the stronger
+  claim place those tenants dedicated. S4 tenant isolation as an *I/O property* is unchanged either
+  way.
+- **Key material never appears in logs, metrics, audit events, manifests, receipts, errors, or
+  `EXPLAIN`.** Plaintext DEKs live in a bounded cache zeroized on drop and nowhere else; an error
+  names a key by **id**, never by value.
+- **Rotation is expand → activate → rewrap → retire, and rewrap touches envelopes only.** Immutable
+  parts stay immutable: no part byte is rewritten and no nonce changes. Retire is refused while any
+  live envelope still needs the key — the same shape as generation retire refusing while a retained
+  snapshot names it. **Restore must work through the current key and through a
+  retired-but-authorized previous key**, so a rotation cannot orphan an existing backup.
+- **Fail-closed without corruption.** Revoked, missing, wrong-tenant, wrong-version, and corrupted
+  ciphertext are each distinct named refusals, never a fallback to plaintext. Decryption sits inside
+  [D-094](DECISIONS.md)'s staging boundary — decrypt, verify, then rename — so an unwrap failure
+  mid-restore leaves staging directories and an untouched `CURRENT`, and a clean retry follows from
+  the same property.
+
+### Rejected alternatives
+
+- **A hand-rolled AEAD, consistent with D-002's in-tree primitives.** Rejected: see above — the
+  charter's logic argues *for* the dependency here, not against it.
+- **AES-256-GCM as the default.** Rejected as the shipped default because its 96-bit nonce forces
+  either a coordinated counter across writers and ownership epochs, or living inside a birthday
+  bound nobody will re-check in three sprints. Kept as a **registered algorithm id** so an AES-NI
+  performance case can be measured and adopted later without a format break.
+- **Deriving nonces from (part, column, block) instead of storing them.** Rejected: it saves 24 bytes
+  per block and adds a derivation invariant whose violation is silent and catastrophic. The boring
+  option that cannot be got wrong is worth 0.15%.
+- **Whole-file or whole-part encryption.** Rejected: breaks ranged fetches, the declared byte fetch
+  budget, per-block named-byte errors, and block-level cache verification.
+- **Volume or filesystem encryption only.** Rejected: gives no per-tenant separation and does not
+  travel with objects copied to the object store or a backup bucket.
+- **Encrypting the cold tier only.** Rejected: the hot tier holds bodies and attributes — the
+  sensitive payload — so a cold-only cipher protects the cheaper half.
+- **Per-part DEKs individually wrapped for every tenant in a shared bucket.** Rejected for this
+  increment: it would give co-tenant separation in shared buckets at the cost of a wrapping fan-out
+  and a rotation story proportional to tenants-per-part. The dedicated-bucket path already provides
+  the strong claim; this stays filed rather than half-built.
+
+### Migration posture
+
+- **Existing unencrypted stores remain readable indefinitely** and are never rewritten. No part byte
+  changes, and the compatibility fixtures prove byte-identity.
+- **Enabling encryption is explicit, per-store, and forward-only**: new parts encrypt, existing parts
+  stay readable as they are. Encryption is not retroactive, and a store is never silently upgraded.
+- **Rollback is defined for the case that matters**: a store that never enabled encryption is
+  unaffected by this increment, and that is gated. **Disabling encryption on a store that has
+  encrypted parts is not supported** by a flag flip — it requires a rewrite migration, because the
+  bytes are ciphertext and pretending otherwise would be the silent misread the feature bit exists to
+  prevent.
+- **Any migration is versioned and atomic**, in the D-094 shape: staged, verified, renamed, with the
+  catalog pointer written last.
+
+### What this decision does not claim
+
+Everything gated is **software-keystore-backed** unless a live-KMS run is recorded, and receipts say
+which. A staging run proves the *code*, not the *custody*. The **key ceremony remains external**
+(Enterprise PKI), and no gate here claims otherwise. Retention and deletion lifecycle (P13) and
+independent-host evidence (P14) are untouched.
