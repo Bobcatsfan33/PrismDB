@@ -37,10 +37,64 @@ pub const TAG_BYTES: usize = 16;
 /// What sealing adds to a block: the stored nonce plus the tag.
 pub const SEAL_OVERHEAD: usize = NONCE_BYTES + TAG_BYTES;
 
-/// A data encryption key held in memory, zeroized on drop.
+/// Generate a fresh 256-bit DEK from the operating system's CSPRNG.
+///
+/// Not from [`prism_types::rng`]: a key drawn from the reproducible seeded generator would be
+/// reproducible by anyone holding the seed, which is the opposite of a key.
+pub fn generate_dek() -> Result<Zeroizing<[u8; 32]>> {
+    use chacha20poly1305::aead::rand_core::RngCore;
+    let mut key = Zeroizing::new([0u8; 32]);
+    OsRng
+        .try_fill_bytes(&mut *key)
+        .map_err(|e| PrismError::Io(format!("could not draw a data encryption key: {e}")))?;
+    Ok(key)
+}
+
+/// Wrap a DEK under a wrapping key, binding the wrapping key's id as associated data.
+///
+/// Key wrapping is itself an AEAD operation here rather than a bespoke construction: the wrapped
+/// blob is `nonce ‖ ciphertext ‖ tag` exactly as a sealed block is, and the key id in the AAD means
+/// a wrapped DEK cannot be re-labelled as having come from a different key without failing the tag.
+pub fn wrap_dek(wrapping_key: &[u8; 32], key_id: &str, dek: &[u8; 32]) -> Result<Vec<u8>> {
+    let cipher = BlockCipher::new(Zeroizing::new(*wrapping_key), key_id);
+    cipher.seal(WRAP_DOMAIN, WRAP_COLUMN, 0, dek)
+}
+
+/// Unwrap a DEK. A tag failure here means the wrapping key is wrong, the blob was modified, or it
+/// was wrapped under a different key id — all of which are refusals, never fallbacks.
+pub fn unwrap_dek(
+    wrapping_key: &[u8; 32],
+    key_id: &str,
+    wrapped: &[u8],
+) -> Result<Zeroizing<[u8; 32]>> {
+    let cipher = BlockCipher::new(Zeroizing::new(*wrapping_key), key_id);
+    let plain = cipher.open(WRAP_DOMAIN, WRAP_COLUMN, 0, wrapped)?;
+    if plain.len() != 32 {
+        return Err(PrismError::Corrupt(format!(
+            "unwrapped key material is {} bytes, expected 32",
+            plain.len()
+        )));
+    }
+    let mut dek = Zeroizing::new([0u8; 32]);
+    dek.copy_from_slice(&plain);
+    Ok(dek)
+}
+
+/// Domain separation for key wrapping, so a wrapped DEK can never be confused with a sealed data
+/// block even if an attacker could choose part ids.
+const WRAP_DOMAIN: &str = "\u{0}prism-key-wrap";
+const WRAP_COLUMN: &str = "\u{0}dek";
+
+/// A cipher over a data encryption key held in memory.
 ///
 /// The plaintext key exists here and nowhere else — never in a manifest, a receipt, a log, a metric,
 /// an error, or `EXPLAIN` output. Errors name a key by **id**, never by value.
+///
+/// **Scope of the zeroization claim, stated precisely.** The caller's copy of the key bytes is
+/// zeroized by [`Zeroizing`] when [`BlockCipher::new`] returns, and the bounded DEK cache drops its
+/// entries on eviction. The AEAD's *internal* key schedule is owned by the `chacha20poly1305`
+/// crate, and this build does not claim to control when that is wiped. Bounding how many keys are
+/// resident is what this codebase can guarantee; scrubbing another crate's private state is not.
 pub struct BlockCipher {
     cipher: XChaCha20Poly1305,
     key_id: String,
@@ -254,6 +308,50 @@ mod tests {
             !rendered.contains("171"),
             "key bytes must not appear: {rendered}"
         );
+    }
+
+    #[test]
+    fn a_dek_round_trips_through_wrapping() {
+        let master = [3u8; 32];
+        let dek = generate_dek().unwrap();
+        let wrapped = wrap_dek(&master, "key-v1", &dek).unwrap();
+        assert_ne!(
+            &wrapped[NONCE_BYTES..],
+            &dek[..],
+            "the DEK must not be stored in the clear"
+        );
+        let back = unwrap_dek(&master, "key-v1", &wrapped).unwrap();
+        assert_eq!(&*back, &*dek);
+    }
+
+    #[test]
+    fn two_generated_deks_differ() {
+        assert_ne!(&*generate_dek().unwrap(), &*generate_dek().unwrap());
+    }
+
+    #[test]
+    fn a_wrapped_dek_cannot_be_relabelled_as_another_keys() {
+        let master = [3u8; 32];
+        let dek = generate_dek().unwrap();
+        let wrapped = wrap_dek(&master, "key-v1", &dek).unwrap();
+        // Same wrapping key bytes, but claiming a different key id: the id is in the AAD.
+        assert!(unwrap_dek(&master, "key-v2", &wrapped).is_err());
+    }
+
+    #[test]
+    fn the_wrong_wrapping_key_cannot_unwrap() {
+        let dek = generate_dek().unwrap();
+        let wrapped = wrap_dek(&[3u8; 32], "key-v1", &dek).unwrap();
+        assert!(unwrap_dek(&[4u8; 32], "key-v1", &wrapped).is_err());
+    }
+
+    #[test]
+    fn a_sealed_data_block_cannot_be_unwrapped_as_a_dek() {
+        // Domain separation: the wrap AAD uses a reserved part/column no data block can claim.
+        let master = [3u8; 32];
+        let c = BlockCipher::new(Zeroizing::new(master), "key-v1");
+        let block = c.seal("p1", "body.data", 0, &[0u8; 32]).unwrap();
+        assert!(unwrap_dek(&master, "key-v1", &block).is_err());
     }
 
     #[test]

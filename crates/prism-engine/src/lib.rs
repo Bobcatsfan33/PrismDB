@@ -17,6 +17,7 @@ pub mod hedge;
 pub mod idempotency;
 pub mod ingest;
 pub mod ingestor;
+pub mod keys;
 pub mod merge;
 pub mod model;
 pub mod model_policy;
