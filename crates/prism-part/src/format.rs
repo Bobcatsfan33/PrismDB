@@ -694,6 +694,31 @@ pub fn frame_column(logical: &[u8], block_size: u32) -> (Vec<u8>, Vec<BlockRef>)
     (framed.file, framed.blocks)
 }
 
+/// The block references a column would have unsealed, without building the framed file.
+///
+/// The part id is content-addressed from these, and sealing needs the part id in its associated
+/// data — so the id has to exist *before* framing runs. Computing the references directly costs a
+/// CRC pass and no allocation of the file, rather than framing every column twice.
+pub fn plain_block_refs(logical: &[u8], block_size: u32) -> Vec<BlockRef> {
+    let bs = block_size as usize;
+    let chunks: Vec<&[u8]> = if logical.is_empty() {
+        vec![&[]]
+    } else {
+        logical.chunks(bs).collect()
+    };
+    let mut offset = 0u64;
+    let mut refs = Vec::with_capacity(chunks.len());
+    for payload in chunks {
+        refs.push(BlockRef {
+            file_offset: offset,
+            payload_len: payload.len() as u32,
+            crc32: crc32(payload),
+        });
+        offset += (FRAME_HEADER_BYTES + payload.len()) as u64;
+    }
+    refs
+}
+
 /// What framing produced: the file bytes, the block references the manifest stores, and the
 /// references the same column *would* have had unsealed.
 pub struct FramedColumn {
@@ -1205,6 +1230,21 @@ mod tests {
             restored.extend_from_slice(&plain);
         }
         assert_eq!(restored, data);
+    }
+
+    #[test]
+    fn plain_block_refs_match_what_framing_would_have_produced() {
+        // The id is computed from these before sealing runs, so they must agree with framing
+        // exactly — otherwise an encrypted part's id would not match its plaintext twin's.
+        for len in [0usize, 1, 1023, 1024, 1025, 5000] {
+            let data: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+            let framed = frame_column_sealed(&data, 1024, None, "p1", "c").unwrap();
+            assert_eq!(
+                plain_block_refs(&data, 1024),
+                framed.plain_blocks,
+                "length {len}"
+            );
+        }
     }
 
     #[test]
