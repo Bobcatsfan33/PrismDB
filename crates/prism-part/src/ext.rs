@@ -35,6 +35,89 @@ pub const EXT_S4_PARTITION: u16 = 0x8001 | EXT_REQUIRED;
 /// outcome is unacceptable *silently*, so the format refuses to let a reader be unaware.
 pub const EXT_S5_LINEAGE: u16 = 0x8002 | EXT_REQUIRED;
 
+/// The envelope of a per-tenant encrypted part (S14). **Required.**
+///
+/// Required, and not ceremonially: this extension is what says *"the stored bytes of this part are
+/// ciphertext"*. A reader that skipped it would pass sealed blocks — nonce, ciphertext and tag — to
+/// a decoder as though they were plaintext columns, and produce confident nonsense. It is exactly
+/// the failure mode the required bit exists to prevent, and it is why encryption also claims
+/// [`crate::format::FEATURE_ENCRYPTION`]: two independent refusals, because a build that misreads
+/// ciphertext as data is worse than a build that will not open the part at all.
+///
+/// It carries **no key material** — only the *wrapped* DEK and the ids needed to ask the key
+/// service to unwrap it ([D-095](../../../docs/DECISIONS.md)). A manifest that carried a plaintext
+/// key would make every backup copy of it a copy of the key.
+pub const EXT_S14_ENCRYPTION: u16 = 0x8003 | EXT_REQUIRED;
+
+/// The wrapped-DEK envelope stored in a part manifest.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct S14Ext {
+    /// The AEAD that sealed this part's blocks ([`crate::crypto::AEAD_XCHACHA20_POLY1305`]).
+    /// Versioned so a future cipher is an id this build refuses, never bytes it misreads.
+    pub algorithm: u16,
+    /// The **explicit** id of the wrapping key — never inferred, never defaulted.
+    pub wrapping_key_id: String,
+    /// Which DEK epoch this part was sealed under, so rotation can tell parts apart.
+    pub dek_epoch: u64,
+    /// The DEK, encrypted by the wrapping key. Useless without the key service.
+    pub wrapped_dek: Vec<u8>,
+    /// The placement this part belongs to. A **bucket ordinal, not a tenant name**: routing is a
+    /// function of the bucket, so the restore path's wrong-tenant refusal keeps working while raw
+    /// disk access stops disclosing which tenants exist (the DATA-01 metadata gap).
+    pub bucket_ordinal: u64,
+}
+
+impl S14Ext {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.u16(self.algorithm);
+        w.string(&self.wrapping_key_id);
+        w.u64(self.dek_epoch);
+        w.u32(self.wrapped_dek.len() as u32);
+        w.buf.extend_from_slice(&self.wrapped_dek);
+        w.u64(self.bucket_ordinal);
+        w.buf
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<S14Ext> {
+        let mut c = Cursor::new(bytes);
+        let algorithm = c.u16()?;
+        let wrapping_key_id = c.string()?;
+        let dek_epoch = c.u64()?;
+        let len = c.u32()? as usize;
+        // Untrusted length, bounded before allocation (S1 discipline). A wrapped 256-bit DEK is a
+        // few hundred bytes under any wrapping scheme; a manifest claiming more is corrupt.
+        const MAX_WRAPPED_DEK_BYTES: usize = 4096;
+        if len > MAX_WRAPPED_DEK_BYTES {
+            return Err(PrismError::Corrupt(format!(
+                "encryption envelope declares a {len}-byte wrapped DEK, above the \
+                 {MAX_WRAPPED_DEK_BYTES}-byte bound"
+            )));
+        }
+        let wrapped_dek = c.take(len)?.to_vec();
+        let bucket_ordinal = c.u64()?;
+        if wrapping_key_id.is_empty() {
+            return Err(PrismError::Corrupt(
+                "encryption envelope names no wrapping key; a part that does not say which key \
+                 sealed it must be refused, never probed against the keys we happen to hold"
+                    .into(),
+            ));
+        }
+        if wrapped_dek.is_empty() {
+            return Err(PrismError::Corrupt(
+                "encryption envelope carries no wrapped DEK".into(),
+            ));
+        }
+        Ok(S14Ext {
+            algorithm,
+            wrapping_key_id,
+            dek_epoch,
+            wrapped_dek,
+            bucket_ordinal,
+        })
+    }
+}
+
 /// What a part remembers about where it came from and what it has lost.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct S5Ext {
@@ -443,5 +526,63 @@ mod tests {
         w.u8(1);
         w.u8(7); // not a bucket kind
         assert!(S4Ext::decode(&w.buf).is_err());
+    }
+
+    fn envelope() -> S14Ext {
+        S14Ext {
+            algorithm: crate::crypto::AEAD_XCHACHA20_POLY1305,
+            wrapping_key_id: "arn:aws:kms:...:key/abc".into(),
+            dek_epoch: 3,
+            wrapped_dek: vec![9u8; 64],
+            bucket_ordinal: 5,
+        }
+    }
+
+    #[test]
+    fn an_encryption_envelope_round_trips() {
+        let e = envelope();
+        assert_eq!(S14Ext::decode(&e.encode()).unwrap(), e);
+    }
+
+    #[test]
+    fn the_encryption_extension_is_required() {
+        assert!(crate::format::Extension {
+            id: EXT_S14_ENCRYPTION,
+            bytes: vec![],
+        }
+        .is_required());
+    }
+
+    #[test]
+    fn an_envelope_without_a_wrapping_key_id_is_refused() {
+        let mut e = envelope();
+        e.wrapping_key_id = String::new();
+        let err = S14Ext::decode(&e.encode()).unwrap_err();
+        assert!(format!("{err}").contains("names no wrapping key"), "{err}");
+    }
+
+    #[test]
+    fn an_envelope_without_a_wrapped_dek_is_refused() {
+        let mut e = envelope();
+        e.wrapped_dek = Vec::new();
+        assert!(S14Ext::decode(&e.encode()).is_err());
+    }
+
+    #[test]
+    fn an_absurd_wrapped_dek_length_is_refused_before_allocation() {
+        let mut w = Writer::new();
+        w.u16(1);
+        w.string("key");
+        w.u64(0);
+        w.u32(u32::MAX); // claim 4 GiB of wrapped DEK
+        let err = S14Ext::decode(&w.buf).unwrap_err();
+        assert!(format!("{err}").contains("bound"), "{err}");
+    }
+
+    #[test]
+    fn a_truncated_envelope_is_refused() {
+        let e = envelope();
+        let bytes = e.encode();
+        assert!(S14Ext::decode(&bytes[..bytes.len() - 4]).is_err());
     }
 }

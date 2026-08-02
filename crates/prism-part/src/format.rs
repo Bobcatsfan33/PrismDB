@@ -132,7 +132,17 @@ pub const FEATURE_PROMOTED_COLUMNS: u64 = 1 << 3;
 pub const FEATURE_PARTITION_META: u64 = 1 << 4;
 /// S4: dictionary / delta / general column compression.
 pub const FEATURE_COLUMN_COMPRESSION: u64 = 1 << 5;
-/// S14: envelope encryption key id.
+
+// --- implemented in S14 ------------------------------------------------------
+//
+// Reserved in S4 with the number nailed down so two sprints could not claim the same bit;
+// implemented in S14 ([D-095](../../../docs/DECISIONS.md)). Until this increment a build refused an
+// encrypted part outright, which was exactly right — it could not read it, and guessing would have
+// been worse than failing. It is now supported, and the envelope rides a *required* extension
+// ([`crate::ext::EXT_S14_ENCRYPTION`]) so a build that knows the bit but not the envelope still
+// refuses rather than misreads.
+
+/// S14: the part's blocks are sealed, and the manifest carries a wrapped-DEK envelope.
 pub const FEATURE_ENCRYPTION: u64 = 1 << 6;
 
 /// Every feature this build understands. Anything outside this mask is refused.
@@ -140,7 +150,8 @@ pub const SUPPORTED_FEATURES: u64 = FEATURE_BLOCK_FRAMING
     | FEATURE_ATTRIBUTES
     | FEATURE_TRACE_CONTEXT
     | FEATURE_PARTITION_META
-    | FEATURE_PROMOTED_COLUMNS;
+    | FEATURE_PROMOTED_COLUMNS
+    | FEATURE_ENCRYPTION;
 
 // --- TLV extensions -----------------------------------------------------------
 
@@ -175,8 +186,11 @@ impl Extension {
 ///
 /// Forgetting to register an extension here is not a subtle bug: the build refuses its own
 /// parts, loudly, at the commit that would have published them. It did, during S4.
-pub const SUPPORTED_EXTENSIONS: &[u16] =
-    &[crate::ext::EXT_S4_PARTITION, crate::ext::EXT_S5_LINEAGE];
+pub const SUPPORTED_EXTENSIONS: &[u16] = &[
+    crate::ext::EXT_S4_PARTITION,
+    crate::ext::EXT_S5_LINEAGE,
+    crate::ext::EXT_S14_ENCRYPTION,
+];
 
 /// Fixed reserved manifest words. Must be zero; a non-zero value means a writer
 /// put something there that this build cannot interpret, and we refuse rather
@@ -409,7 +423,7 @@ impl<'a> Cursor<'a> {
         self.pos
     }
 
-    fn take(&mut self, n: usize) -> Result<&'a [u8]> {
+    pub(crate) fn take(&mut self, n: usize) -> Result<&'a [u8]> {
         if self.remaining() < n {
             return Err(PrismError::Corrupt(format!(
                 "truncated: wanted {n} bytes at offset {}, only {} remain",
@@ -675,6 +689,31 @@ pub struct BlockRef {
 
 /// Frame one logical byte stream into checksummed blocks.
 pub fn frame_column(logical: &[u8], block_size: u32) -> (Vec<u8>, Vec<BlockRef>) {
+    frame_column_sealed(logical, block_size, None, "", "")
+        .expect("framing without a cipher cannot fail")
+}
+
+/// Frame one logical byte stream into checksummed blocks, **sealing each block** when a cipher is
+/// supplied ([D-095](../../../docs/DECISIONS.md)).
+///
+/// Two ordering choices matter and are deliberate:
+///
+/// - **The CRC covers the stored bytes, which are the ciphertext.** Invariant 10 says checksums
+///   cover stored bytes end to end, and keeping that literal buys something valuable: a flipped bit
+///   on disk or in a backup object is named as a **checksum failure without needing a key at all**,
+///   and only bytes that already passed their CRC are ever handed to the AEAD. That is what lets
+///   [D-094](../../../docs/DECISIONS.md) hydration verify a restored part's integrity before it can
+///   unwrap anything.
+/// - **`logical_offset` stays the plaintext offset.** Sealing changes a block's *stored* length but
+///   not which logical bytes it holds, so range mapping ([`blocks_for_range`]) is untouched and an
+///   encrypted store answers ranged reads exactly as a plaintext one does.
+pub fn frame_column_sealed(
+    logical: &[u8],
+    block_size: u32,
+    cipher: Option<&crate::crypto::BlockCipher>,
+    part_id: &str,
+    column: &str,
+) -> Result<(Vec<u8>, Vec<BlockRef>)> {
     let bs = block_size as usize;
     let mut file = Vec::with_capacity(logical.len() + FRAME_HEADER_BYTES);
     let mut refs = Vec::new();
@@ -687,25 +726,31 @@ pub fn frame_column(logical: &[u8], block_size: u32) -> (Vec<u8>, Vec<BlockRef>)
         logical.chunks(bs).collect()
     };
 
-    for (i, payload) in chunks.iter().enumerate() {
+    for (i, plain) in chunks.iter().enumerate() {
+        // The stored payload is the sealed payload when encryption is on; everything downstream —
+        // the CRC, the declared length, the file offsets — describes what is actually on disk.
+        let stored: std::borrow::Cow<'_, [u8]> = match cipher {
+            Some(c) => std::borrow::Cow::Owned(c.seal(part_id, column, i, plain)?),
+            None => std::borrow::Cow::Borrowed(*plain),
+        };
         let file_offset = file.len() as u64;
-        let crc = crc32(payload);
+        let crc = crc32(&stored);
         let mut w = Writer::new();
         w.u32(BLOCK_MAGIC);
         w.u32(i as u32);
         w.u64((i * bs) as u64);
-        w.u32(payload.len() as u32);
+        w.u32(stored.len() as u32);
         w.u32(crc);
         debug_assert_eq!(w.buf.len(), FRAME_HEADER_BYTES);
         file.extend_from_slice(&w.buf);
-        file.extend_from_slice(payload);
+        file.extend_from_slice(&stored);
         refs.push(BlockRef {
             file_offset,
-            payload_len: payload.len() as u32,
+            payload_len: stored.len() as u32,
             crc32: crc,
         });
     }
-    (file, refs)
+    Ok((file, refs))
 }
 
 /// Validate one framed block's raw file bytes and return its payload.
@@ -714,7 +759,6 @@ pub fn frame_column(logical: &[u8], block_size: u32) -> (Vec<u8>, Vec<BlockRef>)
 /// frame itself says, and then against the bytes. A block that passes this is a
 /// block whose payload is exactly what was written; a block that fails names
 /// itself, so damage is attributable to 64 KiB rather than to a column.
-#[allow(clippy::too_many_arguments)]
 pub fn read_block<'a>(
     raw: &'a [u8],
     index: usize,
@@ -723,6 +767,31 @@ pub fn read_block<'a>(
     part_id: &str,
     block_size: u32,
 ) -> Result<&'a [u8]> {
+    match read_block_sealed(raw, index, expect, column, part_id, block_size, None)? {
+        std::borrow::Cow::Borrowed(bytes) => Ok(bytes),
+        // Unreachable without a cipher, and cheaper to state than to panic on.
+        std::borrow::Cow::Owned(_) => Err(PrismError::Invariant(
+            "read_block returned owned bytes without a cipher".into(),
+        )),
+    }
+}
+
+/// Validate one framed block and, when a cipher is supplied, **open it after the checksum passes**.
+///
+/// The order is the guarantee: CRC first (so a flipped bit is a named checksum failure that needs
+/// no key), then authenticated decryption (so a wrong key, a moved block, or a forged tag is a
+/// distinct named corruption). Without a cipher this borrows the payload exactly as before — an
+/// unencrypted store pays nothing, not even a copy.
+#[allow(clippy::too_many_arguments)]
+pub fn read_block_sealed<'a>(
+    raw: &'a [u8],
+    index: usize,
+    expect: &BlockRef,
+    column: &str,
+    part_id: &str,
+    block_size: u32,
+    cipher: Option<&crate::crypto::BlockCipher>,
+) -> Result<std::borrow::Cow<'a, [u8]>> {
     let mut c = Cursor::new(raw);
     let magic = c.u32()?;
     if magic != BLOCK_MAGIC {
@@ -781,7 +850,14 @@ pub fn read_block<'a>(
             expected_offset + payload_len as u64
         )));
     }
-    Ok(payload)
+
+    // The stored bytes are intact. Only now is it worth asking whether they can be opened.
+    match cipher {
+        Some(c) => Ok(std::borrow::Cow::Owned(
+            c.open(part_id, column, index, payload)?,
+        )),
+        None => Ok(std::borrow::Cow::Borrowed(payload)),
+    }
 }
 
 /// Which blocks cover a logical byte range.
