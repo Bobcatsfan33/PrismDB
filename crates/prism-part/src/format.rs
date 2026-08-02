@@ -689,8 +689,28 @@ pub struct BlockRef {
 
 /// Frame one logical byte stream into checksummed blocks.
 pub fn frame_column(logical: &[u8], block_size: u32) -> (Vec<u8>, Vec<BlockRef>) {
-    frame_column_sealed(logical, block_size, None, "", "")
-        .expect("framing without a cipher cannot fail")
+    let framed = frame_column_sealed(logical, block_size, None, "", "")
+        .expect("framing without a cipher cannot fail");
+    (framed.file, framed.blocks)
+}
+
+/// What framing produced: the file bytes, the block references the manifest stores, and the
+/// references the same column *would* have had unsealed.
+pub struct FramedColumn {
+    /// The bytes written to disk — ciphertext when a cipher was supplied.
+    pub file: Vec<u8>,
+    /// What the manifest records: offsets, stored lengths, and CRCs over the **stored** bytes.
+    pub blocks: Vec<BlockRef>,
+    /// The same references computed over the **plaintext**.
+    ///
+    /// This exists for one reason, and it is not cosmetic. A part's id is content-addressed — the
+    /// same rows under the same generation must yield the same name — and it is derived from block
+    /// CRCs and lengths. Sealing puts a **random nonce** in every stored block, so a fingerprint
+    /// taken over stored bytes would make an encrypted part's id *non-deterministic*, quietly
+    /// destroying content addressing exactly where it is hardest to notice. The id is therefore
+    /// derived from these plaintext references instead. With no cipher they are identical to
+    /// [`Self::blocks`], so unencrypted part ids are bit-for-bit what they have always been.
+    pub plain_blocks: Vec<BlockRef>,
 }
 
 /// Frame one logical byte stream into checksummed blocks, **sealing each block** when a cipher is
@@ -713,10 +733,14 @@ pub fn frame_column_sealed(
     cipher: Option<&crate::crypto::BlockCipher>,
     part_id: &str,
     column: &str,
-) -> Result<(Vec<u8>, Vec<BlockRef>)> {
+) -> Result<FramedColumn> {
     let bs = block_size as usize;
     let mut file = Vec::with_capacity(logical.len() + FRAME_HEADER_BYTES);
     let mut refs = Vec::new();
+    let mut plain_refs = Vec::new();
+    // Tracked separately so `plain_blocks` is a faithful "as if unsealed" description, offsets
+    // included, rather than plaintext lengths pasted onto sealed offsets.
+    let mut plain_offset = 0u64;
 
     // A zero-length column is one zero-length block, not zero blocks: the reader
     // should never have to special-case "no blocks at all".
@@ -749,8 +773,22 @@ pub fn frame_column_sealed(
             payload_len: stored.len() as u32,
             crc32: crc,
         });
+        // The content-addressing fingerprint rides on these, never on the sealed bytes.
+        plain_refs.push(BlockRef {
+            file_offset: plain_offset,
+            payload_len: plain.len() as u32,
+            crc32: match cipher {
+                None => crc,
+                Some(_) => crc32(plain),
+            },
+        });
+        plain_offset += (FRAME_HEADER_BYTES + plain.len()) as u64;
     }
-    Ok((file, refs))
+    Ok(FramedColumn {
+        file,
+        blocks: refs,
+        plain_blocks: plain_refs,
+    })
 }
 
 /// Validate one framed block's raw file bytes and return its payload.
@@ -1124,5 +1162,101 @@ mod tests {
         let bytes = d.encode_vector(&v).unwrap();
         assert_eq!(bytes.len(), v.len() * 2);
         assert_eq!(d.decode_vector(&bytes, v.len()).unwrap(), v);
+    }
+
+    // --- sealed framing (S14, D-095) ------------------------------------------------------
+
+    fn test_cipher() -> crate::crypto::BlockCipher {
+        crate::crypto::BlockCipher::new(zeroize::Zeroizing::new([5u8; 32]), "key-v1")
+    }
+
+    #[test]
+    fn unsealed_framing_is_byte_identical_to_before() {
+        let data: Vec<u8> = (0..5000u32).map(|i| (i % 251) as u8).collect();
+        let (file, blocks) = frame_column(&data, 1024);
+        let framed = frame_column_sealed(&data, 1024, None, "p1", "body.data").unwrap();
+        assert_eq!(framed.file, file);
+        assert_eq!(framed.blocks, blocks);
+        // With no cipher the two reference sets are the same object, so an unencrypted part id is
+        // bit-for-bit what it has always been.
+        assert_eq!(framed.plain_blocks, blocks);
+    }
+
+    #[test]
+    fn a_sealed_column_round_trips_through_read_block() {
+        let c = test_cipher();
+        let data: Vec<u8> = (0..5000u32).map(|i| (i % 251) as u8).collect();
+        let framed = frame_column_sealed(&data, 1024, Some(&c), "p1", "body.data").unwrap();
+
+        let mut restored = Vec::new();
+        for (i, b) in framed.blocks.iter().enumerate() {
+            let start = b.file_offset as usize;
+            let end = start + FRAME_HEADER_BYTES + b.payload_len as usize;
+            let plain = read_block_sealed(
+                &framed.file[start..end],
+                i,
+                b,
+                "body.data",
+                "p1",
+                1024,
+                Some(&c),
+            )
+            .unwrap();
+            restored.extend_from_slice(&plain);
+        }
+        assert_eq!(restored, data);
+    }
+
+    #[test]
+    fn a_part_id_fingerprint_stays_deterministic_under_encryption() {
+        // The whole point: sealing puts a random nonce in every stored block, so the STORED refs
+        // differ between two framings of identical input — while the PLAINTEXT refs, which the part
+        // id is derived from, are identical. Without this split, encrypted part ids would be
+        // non-deterministic and content addressing would be quietly dead.
+        let c = test_cipher();
+        let data: Vec<u8> = (0..5000u32).map(|i| (i % 251) as u8).collect();
+        let a = frame_column_sealed(&data, 1024, Some(&c), "p1", "body.data").unwrap();
+        let b = frame_column_sealed(&data, 1024, Some(&c), "p1", "body.data").unwrap();
+
+        assert_ne!(
+            a.file, b.file,
+            "two sealings must not produce identical bytes"
+        );
+        assert_ne!(
+            a.blocks.iter().map(|r| r.crc32).collect::<Vec<_>>(),
+            b.blocks.iter().map(|r| r.crc32).collect::<Vec<_>>(),
+            "stored CRCs cover the nonce, so they must differ"
+        );
+        assert_eq!(
+            a.plain_blocks, b.plain_blocks,
+            "the plaintext references the part id rides on must be identical"
+        );
+
+        // And they equal what the same data frames to with no cipher at all, so an encrypted part
+        // and its plaintext twin share a content address.
+        let plain = frame_column_sealed(&data, 1024, None, "p1", "body.data").unwrap();
+        assert_eq!(a.plain_blocks, plain.plain_blocks);
+    }
+
+    #[test]
+    fn a_sealed_block_read_without_the_cipher_is_not_mistaken_for_plaintext() {
+        let c = test_cipher();
+        let data = b"the quick brown fox".to_vec();
+        let framed = frame_column_sealed(&data, 1024, Some(&c), "p1", "body.data").unwrap();
+        let b = &framed.blocks[0];
+        let end = FRAME_HEADER_BYTES + b.payload_len as usize;
+        // The CRC covers the ciphertext, so reading without a cipher passes the checksum and hands
+        // back sealed bytes — which is exactly why FEATURE_ENCRYPTION and the REQUIRED envelope
+        // extension exist: a reader must refuse the part before it ever gets here.
+        let raw = read_block(&framed.file[..end], 0, b, "body.data", "p1", 1024).unwrap();
+        assert_ne!(
+            raw,
+            data.as_slice(),
+            "sealed bytes must not equal the plaintext"
+        );
+        assert!(
+            raw.len() > data.len(),
+            "sealed bytes carry a nonce and a tag"
+        );
     }
 }
