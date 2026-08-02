@@ -33,7 +33,7 @@ native-tls = "=0.2.13"
 # advisories in its ring/webpki line. Unlike native-tls, rustls can require and
 # verify client certificates on a server, which is mandatory at this boundary.
 rustls = { version = "=0.23.35", default-features = false, features = ["ring", "std", "tls12"] }
-rustls-pki-types = { version = "=1.13.2", features = ["std"] }
+rustls-pki-types = { version = "=1.15.1", features = ["std"] }
 signal-hook = "=0.3.18"
 # The one hand-rolling exception the dependency charter makes, argued in D-095: a hash has one
 # publishable test vector and no state, while an AEAD has nonce management, constant-time tag
