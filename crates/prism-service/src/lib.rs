@@ -1205,11 +1205,19 @@ mod tests {
         }
     }
 
+    /// Fixture directories get their **own** counter.
+    ///
+    /// They used to share `REQUEST_SEQUENCE` with runtime request ids, so a fixture's directory
+    /// name depended on how many requests other concurrently-running tests happened to have made.
+    /// Unique, but **not reproducible by design** — and a fixture nobody can reproduce is a fixture
+    /// nobody can debug ([issue #34](https://github.com/Bobcatsfan33/PrismDB/issues/34)).
+    static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
     fn temp(tag: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
             "prism-service-{tag}-{}-{}",
             std::process::id(),
-            REQUEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+            FIXTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ))
     }
 
@@ -1230,6 +1238,49 @@ mod tests {
             "openssl {:?}: {}",
             arguments,
             String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// Assert the key file just written is one rustls will actually accept
+    /// ([issue #34](https://github.com/Bobcatsfan33/PrismDB/issues/34)). Checked at creation so the
+    /// fixture names itself, instead of surfacing hundreds of lines later as `failed to parse
+    /// private key` in whichever test happened to consume it.
+    fn assert_key_is_usable(dir: &Path, key_file: &str) {
+        let path = dir.join(key_file);
+        let bytes = fs::read(&path)
+            .unwrap_or_else(|e| panic!("fixture key {} could not be read: {e}", path.display()));
+        assert!(
+            !bytes.is_empty(),
+            "fixture key {} is empty; openssl exited zero but wrote nothing",
+            path.display()
+        );
+        let parsed = Command::new("openssl")
+            .args(["pkey", "-in", key_file, "-noout"])
+            .current_dir(dir)
+            .output()
+            .expect("run openssl pkey");
+        assert!(
+            parsed.status.success(),
+            "fixture key {} ({} bytes) does not parse: {}",
+            path.display(),
+            bytes.len(),
+            String::from_utf8_lossy(&parsed.stderr)
+        );
+
+        // `openssl pkey` is not a strict enough oracle on its own: LibreSSL happily parses an EC
+        // key written with EXPLICIT curve parameters, and rustls refuses exactly that form. So
+        // assert the named-curve OID is present, which is the property rustls actually requires and
+        // the precise regression the `ec_param_enc:named_curve` pin exists to prevent.
+        let asn1 = Command::new("openssl")
+            .args(["asn1parse", "-in", key_file])
+            .current_dir(dir)
+            .output()
+            .expect("run openssl asn1parse");
+        assert!(
+            String::from_utf8_lossy(&asn1.stdout).contains("prime256v1"),
+            "fixture key {} is not in NAMED-CURVE form; rustls will refuse it even though openssl \
+             parses it. The generator must pin `-pkeyopt ec_param_enc:named_curve`.",
+            path.display()
         );
     }
 
@@ -1260,6 +1311,7 @@ mod tests {
                 &cert,
             ],
         );
+        assert_key_is_usable(dir, &key);
     }
 
     fn generate_leaf(dir: &Path, prefix: &str, common_name: &str, ca_prefix: &str, usage: &str) {
@@ -1292,6 +1344,7 @@ mod tests {
                 &csr,
             ],
         );
+        assert_key_is_usable(dir, &key);
         fs::write(
             dir.join(&ext),
             format!(
