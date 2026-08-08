@@ -704,6 +704,7 @@ impl Engine {
                     reembedded_from: Some(key.generation.clone()),
                     ..Default::default()
                 },
+                encryption: None,
             };
             migrated_rows += rows.len();
             let m = PartWriter::write(
@@ -830,6 +831,7 @@ impl Engine {
                     redacted_at_ms: now_ms,
                     redaction_reason: reason.to_string(),
                 },
+                encryption: None,
             };
             let m = PartWriter::write(
                 &self.store.parts_dir(),

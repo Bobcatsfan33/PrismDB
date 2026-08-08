@@ -750,6 +750,27 @@ pub struct PartRows {
 
 pub struct PartWriter;
 
+/// How a part's blocks are sealed, and the envelope that records it
+/// ([D-095](../../../docs/DECISIONS.md)).
+///
+/// Carrying the cipher and the envelope together is deliberate: a part sealed under a DEK whose
+/// wrapped form is not written beside it is a part nobody can ever open again.
+#[derive(Clone)]
+pub struct PartEncryption {
+    pub cipher: std::sync::Arc<crate::crypto::BlockCipher>,
+    pub envelope: crate::ext::S14Ext,
+}
+
+impl std::fmt::Debug for PartEncryption {
+    /// Shows the envelope (ids and the *wrapped* DEK) and never the cipher's key material.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PartEncryption")
+            .field("key_id", &self.envelope.wrapping_key_id)
+            .field("dek_epoch", &self.envelope.dek_epoch)
+            .finish()
+    }
+}
+
 /// Everything about *where* and *how* a part is written, beyond its rows.
 #[derive(Clone, Debug, Default)]
 pub struct PartSpec {
@@ -764,6 +785,9 @@ pub struct PartSpec {
     /// Lineage and retention (S5). Default = a part written by an ordinary ingest, from bodies
     /// that are still here.
     pub lineage: crate::ext::S5Ext,
+    /// Seal this part's blocks under a DEK, and record the wrapped DEK in the manifest (S14).
+    /// `None` writes a plaintext part, byte-identical to what every earlier build produced.
+    pub encryption: Option<PartEncryption>,
 }
 
 /// One row on its way into a part.
@@ -1123,11 +1147,42 @@ impl PartWriter {
             )
             .collect();
 
-        // --- frame each column into checksummed blocks ---
+        // --- name the part, then frame it ---
+        //
+        // The id is content-addressed from the PLAINTEXT block references, and it has to exist
+        // before framing because sealing binds the part id in its associated data. Computing the
+        // references directly costs a CRC pass and no allocation of the framed file
+        // ([D-095](../../../docs/DECISIONS.md)).
+        let plain_refs: Vec<Vec<format::BlockRef>> = logical
+            .iter()
+            .map(|(_, _, bytes)| format::plain_block_refs(bytes, block_size))
+            .collect();
+
+        // The part id is derived from what is *in* the part, so writing the same
+        // rows under the same generation twice yields the same name. The
+        // sequence prefix keeps parts sortable by publication order and keeps
+        // two distinct batches with identical content from colliding.
+        let fingerprint: Vec<u8> = logical
+            .iter()
+            .zip(plain_refs.iter())
+            .flat_map(|((name, _, _), blocks)| {
+                let mut v = name.as_bytes().to_vec();
+                for b in blocks {
+                    v.extend_from_slice(&b.crc32.to_le_bytes());
+                    v.extend_from_slice(&b.payload_len.to_le_bytes());
+                }
+                v
+            })
+            .chain(generation_id.as_bytes().iter().copied())
+            .collect();
+        let part_id = format!("p{:08}-{}", seq, content_id(&fingerprint));
+
+        // Now the id exists, so blocks can be sealed against it.
+        let cipher = spec.encryption.as_ref().map(|e| e.cipher.as_ref());
         let mut framed: Vec<(&str, Vec<u8>)> = Vec::with_capacity(logical.len());
         let mut columns: Vec<ColumnMeta> = Vec::with_capacity(logical.len());
         for (name, file, bytes) in &logical {
-            let (file_bytes, blocks) = format::frame_column(bytes, block_size);
+            let f = format::frame_column_sealed(bytes, block_size, cipher, &part_id, name)?;
             columns.push(ColumnMeta {
                 name: (*name).to_string(),
                 file: (*file).to_string(),
@@ -1135,31 +1190,11 @@ impl PartWriter {
                 storage: ColumnStorage::Framed {
                     logical_bytes: bytes.len() as u64,
                     block_size,
-                    blocks,
+                    blocks: f.blocks,
                 },
             });
-            framed.push((file, file_bytes));
+            framed.push((file, f.file));
         }
-
-        // The part id is derived from what is *in* the part, so writing the same
-        // rows under the same generation twice yields the same name. The
-        // sequence prefix keeps parts sortable by publication order and keeps
-        // two distinct batches with identical content from colliding.
-        let fingerprint: Vec<u8> = columns
-            .iter()
-            .flat_map(|c| {
-                let mut v = c.name.as_bytes().to_vec();
-                if let ColumnStorage::Framed { blocks, .. } = &c.storage {
-                    for b in blocks {
-                        v.extend_from_slice(&b.crc32.to_le_bytes());
-                        v.extend_from_slice(&b.payload_len.to_le_bytes());
-                    }
-                }
-                v
-            })
-            .chain(generation_id.as_bytes().iter().copied())
-            .collect();
-        let part_id = format!("p{:08}-{}", seq, content_id(&fingerprint));
 
         let manifest = PartManifest {
             format_version: FORMAT_VERSION,
@@ -1175,6 +1210,11 @@ impl PartWriter {
                     0
                 } else {
                     crate::format::FEATURE_PROMOTED_COLUMNS
+                }
+                | if spec.encryption.is_some() {
+                    crate::format::FEATURE_ENCRYPTION
+                } else {
+                    0
                 },
             attribute_keys,
             extensions: {
@@ -1192,6 +1232,14 @@ impl PartWriter {
                     ext.push(Extension {
                         id: crate::ext::EXT_S5_LINEAGE,
                         bytes: spec.lineage.encode(),
+                    });
+                }
+                // REQUIRED: a reader that does not understand this must refuse the part rather than
+                // hand nonce-ciphertext-tag to a decoder as though it were a plaintext column.
+                if let Some(enc) = &spec.encryption {
+                    ext.push(Extension {
+                        id: crate::ext::EXT_S14_ENCRYPTION,
+                        bytes: enc.envelope.encode(),
                     });
                 }
                 ext

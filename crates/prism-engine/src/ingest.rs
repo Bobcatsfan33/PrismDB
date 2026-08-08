@@ -407,6 +407,7 @@ impl Engine {
                 partition: Some(key.clone()),
                 promote: self.store.config.promote.clone(),
                 lineage: Default::default(),
+                encryption: None,
             };
             let manifest = PartWriter::write(
                 &self.store.parts_dir(),
