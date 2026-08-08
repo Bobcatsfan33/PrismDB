@@ -566,8 +566,19 @@ impl PartManifest {
                 let bs = *block_size;
                 // The block directory must actually cover the logical stream —
                 // no gaps, no overlaps, no lies about how much data is here.
+                //
+                // A sealed block's *stored* payload is its plaintext plus a nonce and a tag
+                // ([D-095](../../../docs/DECISIONS.md)), so an encrypted column covers exactly that
+                // much more than it declares. The relationship stays exact — this is not a
+                // tolerance, it is a different constant — so a genuine gap or overlap is still
+                // caught to the byte in both modes.
+                let seal_overhead = if self.feature_flags & crate::format::FEATURE_ENCRYPTION != 0 {
+                    (blocks.len() * crate::crypto::SEAL_OVERHEAD) as u64
+                } else {
+                    0
+                };
                 let covered: u64 = blocks.iter().map(|b| b.payload_len as u64).sum();
-                if covered != *logical_bytes {
+                if covered != *logical_bytes + seal_overhead {
                     return Err(PrismError::Corrupt(format!(
                         "part {} column `{}`: blocks cover {covered} bytes but the column \
                          declares {logical_bytes}",
@@ -588,16 +599,25 @@ impl PartManifest {
                         blocks.len()
                     )));
                 }
+                // A sealed block stores its plaintext plus a nonce and a tag, so "a full block" and
+                // "the ceiling on a block" are both that much larger when the part is encrypted.
+                // The bounds stay exact in both modes.
+                let per_block = if seal_overhead > 0 {
+                    crate::crypto::SEAL_OVERHEAD as u32
+                } else {
+                    0
+                };
+                let full = bs + per_block;
                 for (i, b) in blocks.iter().enumerate() {
                     let is_last = i + 1 == blocks.len();
-                    if !is_last && b.payload_len != bs {
+                    if !is_last && b.payload_len != full {
                         return Err(PrismError::Corrupt(format!(
                             "part {} column `{}` block {i} is {} bytes; only the last block \
                              may be short",
                             self.part_id, c.name, b.payload_len
                         )));
                     }
-                    if b.payload_len > bs {
+                    if b.payload_len > full {
                         return Err(PrismError::Corrupt(format!(
                             "part {} column `{}` block {i} claims {} bytes, over the {bs}-byte \
                              block size",
@@ -1329,6 +1349,12 @@ pub struct PartReader {
     /// 64 KiB block costs 64 KiB. That gap is invisible to every logical counter,
     /// it is what the disk actually charges, and it is what decides the block size.
     io_bytes: std::cell::Cell<usize>,
+    /// The cipher that opens this part's blocks, when it is encrypted (S14,
+    /// [D-095](../../../docs/DECISIONS.md)).
+    ///
+    /// `None` for a plaintext part — and for an *encrypted* part opened without one, every read
+    /// refuses by name rather than returning ciphertext dressed as data.
+    cipher: Option<std::sync::Arc<crate::crypto::BlockCipher>>,
 }
 
 impl PartReader {
@@ -1359,7 +1385,34 @@ impl PartReader {
             manifest,
             dir: dir.to_path_buf(),
             io_bytes: std::cell::Cell::new(0),
+            cipher: None,
         })
+    }
+
+    /// Attach the cipher that opens this part's sealed blocks.
+    ///
+    /// The engine resolves it from the manifest's envelope — the explicit key id and wrapped DEK —
+    /// through the key service, and hands it here. Opening an encrypted part *without* one is not
+    /// an error at open time: the manifest still decodes, the block directory is still readable,
+    /// and integrity is still checkable, because the CRC covers the stored bytes. It becomes an
+    /// error the moment anyone asks for column data.
+    pub fn with_cipher(mut self, cipher: std::sync::Arc<crate::crypto::BlockCipher>) -> Self {
+        self.cipher = Some(cipher);
+        self
+    }
+
+    /// Whether this part's stored blocks are sealed.
+    pub fn is_encrypted(&self) -> bool {
+        self.manifest.feature_flags & crate::format::FEATURE_ENCRYPTION != 0
+    }
+
+    /// The encryption envelope this part carries, if any.
+    pub fn encryption_envelope(&self) -> Option<crate::ext::S14Ext> {
+        self.manifest
+            .extensions
+            .iter()
+            .find(|e| e.id == crate::ext::EXT_S14_ENCRYPTION)
+            .and_then(|e| crate::ext::S14Ext::decode(&e.bytes).ok())
     }
 
     /// Bytes this reader has physically read. Reset per part-open, and parts are
@@ -1456,8 +1509,22 @@ impl PartReader {
                         format!("part {part_id} column `{column}` block {i} of `{file}`")
                     })?;
                     self.io_bytes.set(self.io_bytes.get() + raw.len());
-                    let payload =
-                        format::read_block(raw, i, b, column, &self.manifest.part_id, bs)?;
+                    if self.is_encrypted() && self.cipher.is_none() {
+                        return Err(PrismError::Policy(format!(
+                            "part {} column `{column}` is encrypted and no key has been supplied; \
+                             refusing to return sealed bytes as column data",
+                            self.manifest.part_id
+                        )));
+                    }
+                    let payload = format::read_block_sealed(
+                        raw,
+                        i,
+                        b,
+                        column,
+                        &self.manifest.part_id,
+                        bs,
+                        self.cipher.as_deref(),
+                    )?;
 
                     // Slice the requested window out of this block.
                     //
