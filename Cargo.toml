@@ -27,7 +27,7 @@ repository = "https://github.com/Bobcatsfan33/PrismDB"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # 0.2.14+ requires Rust 1.80; Prism's declared MSRV is 1.75.
-native-tls = "=0.2.13"
+native-tls = "=0.2.18"
 # 0.23.35 declares Rust 1.71 compatibility, below PrismDB's Rust 1.75 MSRV. The
 # first 0.21 implementation was rejected before merge because cargo-audit found
 # advisories in its ring/webpki line. Unlike native-tls, rustls can require and
