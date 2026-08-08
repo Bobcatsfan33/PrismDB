@@ -20,7 +20,7 @@ use crate::search::Scored;
 use crate::storage::object::{LocalObjectStore, ObjectStore};
 use prism_part::catalog::GcReport;
 use prism_part::generation::Generation;
-use prism_part::partition::{Bucket, PartitionScheme};
+use prism_part::partition::{bucket_ordinal, PartitionScheme};
 use prism_part::store::StoreConfig;
 use prism_types::error::{PrismError, Result};
 use prism_types::{Counters, Event, MissingShard, Query, SearchResult};
@@ -292,15 +292,6 @@ impl ClusterCursor {
             ));
         }
         Ok(serde_json::from_slice(&bytes)?)
-    }
-}
-
-/// A stable ordinal for a bucket, disjoint across `Shared`/`Dedicated`, so a bucket maps to exactly
-/// one shard and two tenants in the same bucket always land together.
-fn bucket_ordinal(scheme: &PartitionScheme, b: &Bucket) -> u64 {
-    match b {
-        Bucket::Shared(n) => *n as u64,
-        Bucket::Dedicated(i) => scheme.buckets as u64 + *i as u64,
     }
 }
 

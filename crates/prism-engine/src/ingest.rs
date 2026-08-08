@@ -403,11 +403,14 @@ impl Engine {
         let mut new_ids: Vec<String> = Vec::new();
 
         for (key, rows) in by_partition {
+            // A fresh DEK per part; `None` on a plaintext store, which is the default.
+            let bucket_ordinal =
+                prism_part::partition::bucket_ordinal(&self.store.config.partitions, &key.bucket);
             let spec = PartSpec {
                 partition: Some(key.clone()),
                 promote: self.store.config.promote.clone(),
                 lineage: Default::default(),
-                encryption: None,
+                encryption: self.part_encryption_for(bucket_ordinal, 1)?,
             };
             let manifest = PartWriter::write(
                 &self.store.parts_dir(),

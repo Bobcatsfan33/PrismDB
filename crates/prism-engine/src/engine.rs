@@ -25,7 +25,22 @@ pub struct Engine {
     owner_epoch: AtomicU64,
     /// A process-unique id tagging this engine's ownership acquisitions.
     writer_id: String,
+    /// The key service, when this store is encrypted ([D-095](../../../docs/DECISIONS.md)).
+    ///
+    /// `None` is a plaintext store — the default, and byte-identical to every earlier build. The
+    /// flag is **explicit**: a store is encrypted because it was configured to be, never because a
+    /// part happened to carry a feature bit.
+    keys: Option<Arc<dyn crate::keys::KeyProvider>>,
+    /// Opened DEKs, bounded and clearable.
+    dek_cache: crate::keys::DekCache,
 }
+
+/// How many tenant/bucket DEKs stay resident at once.
+///
+/// **Policy** ([C-3](../../../docs/DECISIONS.md)): an unbounded key cache is an unbounded amount of
+/// key material in memory. A shard serves a bounded set of tenant buckets, so a small cache covers
+/// the working set; exceeding it costs an unwrap, never a wrong answer.
+pub const DEK_CACHE_ENTRIES: usize = 64;
 
 impl Engine {
     /// The default cold-tier store: a cache over a local backend rooted at the store, so a cold
@@ -55,6 +70,8 @@ impl Engine {
             cold,
             owner_epoch: AtomicU64::new(0),
             writer_id: Self::writer_id(),
+            keys: None,
+            dek_cache: crate::keys::DekCache::new(DEK_CACHE_ENTRIES),
         })
     }
 
@@ -67,6 +84,8 @@ impl Engine {
             cold,
             owner_epoch: AtomicU64::new(0),
             writer_id: Self::writer_id(),
+            keys: None,
+            dek_cache: crate::keys::DekCache::new(DEK_CACHE_ENTRIES),
         })
     }
 
@@ -110,6 +129,107 @@ impl Engine {
         self
     }
 
+    /// Turn on envelope encryption for this store by supplying the key service.
+    ///
+    /// Explicit by construction: there is no ambient default and no inference from stored bytes.
+    pub fn with_keys(mut self, keys: Arc<dyn crate::keys::KeyProvider>) -> Self {
+        self.keys = Some(keys);
+        self
+    }
+
+    pub fn keys(&self) -> Option<&Arc<dyn crate::keys::KeyProvider>> {
+        self.keys.as_ref()
+    }
+
+    /// Resolve the cipher that opens a part, from the envelope the part itself carries.
+    ///
+    /// The key id comes from the part, is used **as given**, and is never inferred: a part that
+    /// names a key this deployment does not hold is a named refusal, not an invitation to try the
+    /// keys we do have. A plaintext part needs nothing and returns `None`.
+    pub fn cipher_for(
+        &self,
+        reader: &prism_part::part::PartReader,
+    ) -> Result<Option<std::sync::Arc<prism_part::crypto::BlockCipher>>> {
+        if !reader.is_encrypted() {
+            return Ok(None);
+        }
+        let envelope = reader.encryption_envelope().ok_or_else(|| {
+            prism_types::error::PrismError::Corrupt(format!(
+                "part {} sets the encryption feature but carries no envelope",
+                reader.manifest.part_id
+            ))
+        })?;
+        if envelope.algorithm != prism_part::crypto::AEAD_XCHACHA20_POLY1305 {
+            return Err(prism_types::error::PrismError::Corrupt(format!(
+                "part {} was sealed with AEAD id {}, which this build does not implement",
+                reader.manifest.part_id, envelope.algorithm
+            )));
+        }
+        let keys = self.keys.as_ref().ok_or_else(|| {
+            prism_types::error::PrismError::Policy(format!(
+                "part {} is encrypted under key `{}` but this store has no key service configured",
+                reader.manifest.part_id, envelope.wrapping_key_id
+            ))
+        })?;
+        // Cached per (key id, epoch): one unwrap serves every part sealed under that DEK.
+        let cache_key = format!("{}#{}", envelope.wrapping_key_id, envelope.dek_epoch);
+        self.dek_cache
+            .get_or_open(&cache_key, || {
+                let dek = keys.unwrap(&envelope.wrapping_key_id, &envelope.wrapped_dek)?;
+                Ok(prism_part::crypto::BlockCipher::new(
+                    dek,
+                    envelope.wrapping_key_id.clone(),
+                ))
+            })
+            .map(Some)
+    }
+
+    /// Open a part and attach its cipher if it is encrypted.
+    pub fn open_part(&self, part_id: &str) -> Result<prism_part::part::PartReader> {
+        let reader = PartReader::open(&self.store.part_dir(part_id))?;
+        match self.cipher_for(&reader)? {
+            Some(c) => Ok(reader.with_cipher(c)),
+            None => Ok(reader),
+        }
+    }
+
+    /// Mint the encryption for a new part in `bucket`, or `None` for a plaintext store.
+    ///
+    /// A fresh DEK per part keeps the blast radius of one compromised key to one part, and costs
+    /// only a wrap. The envelope records the **explicit** wrapping key id the provider used and the
+    /// **bucket ordinal** rather than tenant names, so raw disk access does not disclose which
+    /// tenants exist while [D-094](../../../docs/DECISIONS.md)'s routing check keeps working —
+    /// routing was always a function of the bucket.
+    pub fn part_encryption_for(
+        &self,
+        bucket_ordinal: u64,
+        dek_epoch: u64,
+    ) -> Result<Option<prism_part::part::PartEncryption>> {
+        let Some(keys) = self.keys.as_ref() else {
+            return Ok(None);
+        };
+        let dek = prism_part::crypto::generate_dek()?;
+        let (wrapping_key_id, wrapped_dek) = keys.wrap(&dek)?;
+        Ok(Some(prism_part::part::PartEncryption {
+            cipher: std::sync::Arc::new(prism_part::crypto::BlockCipher::new(
+                dek,
+                wrapping_key_id.clone(),
+            )),
+            envelope: prism_part::ext::S14Ext {
+                algorithm: prism_part::crypto::AEAD_XCHACHA20_POLY1305,
+                wrapping_key_id,
+                dek_epoch,
+                wrapped_dek,
+                bucket_ordinal,
+            },
+        }))
+    }
+
+    /// Drop every resident DEK, so a revocation takes effect against this running process.
+    pub fn clear_key_cache(&self) -> Result<()> {
+        self.dek_cache.clear()
+    }
+
     /// Override the cold-tier object store (a fresh cache, a fault-injecting backend, or an
     /// `S3ObjectStore` for the remote gate). Used by the answer-invariance gate to force cache
     /// states and inject remote faults.
@@ -137,10 +257,7 @@ impl Engine {
     /// distinction is the S4 gate: a tenant-A query must never touch a byte of another tenant's
     /// partition.
     pub fn open_parts(&self, snap: &Snapshot) -> Result<Vec<PartReader>> {
-        snap.part_ids()
-            .iter()
-            .map(|p| PartReader::open(&self.store.part_dir(p)))
-            .collect()
+        snap.part_ids().iter().map(|p| self.open_part(p)).collect()
     }
 
     /// Open only the parts a query could possibly need — **pruned in the catalog, before a
@@ -164,7 +281,7 @@ impl Engine {
         let pruned = snap.parts.len() - ids.len();
         let readers = ids
             .iter()
-            .map(|p| PartReader::open(&self.store.part_dir(p)))
+            .map(|p| self.open_part(p))
             .collect::<Result<Vec<_>>>()?;
         Ok((readers, pruned))
     }

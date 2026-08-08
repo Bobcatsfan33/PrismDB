@@ -101,8 +101,21 @@ impl Engine {
             for (i, b) in blocks.iter().enumerate().take(last + 1).skip(first) {
                 let block_len = FRAME_HEADER_BYTES + b.payload_len as usize;
                 let raw = self.fetch_cold_block(&key, b.file_offset, block_len)?;
-                let payload =
-                    format::read_block(&raw, i, b, "rerank_vectors", &m.part_id, block_size)?;
+                // The sealed reader, not the plain one. This path fetches bytes from the object
+                // store rather than the part's mmap, so it does not go through `PartReader`'s own
+                // read — and skipping decryption here would not error: the CRC covers the STORED
+                // bytes, so a sealed block passes its checksum and is then decoded as vectors.
+                // That is the silent misread the encryption feature bit exists to prevent, and it
+                // has to be prevented on every path that reads a part's bytes, not just the mmap.
+                let payload = format::read_block_sealed(
+                    &raw,
+                    i,
+                    b,
+                    "rerank_vectors",
+                    &m.part_id,
+                    block_size,
+                    reader.cipher().map(|c| c.as_ref()),
+                )?;
                 let block_start = (i as u64) * block_size as u64;
                 let from = offset.saturating_sub(block_start) as usize;
                 let to = ((end - block_start) as usize).min(payload.len());

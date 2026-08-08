@@ -139,6 +139,20 @@ pub struct PartitionKey {
     pub generation: String,
 }
 
+/// A stable ordinal for a bucket, disjoint across `Shared`/`Dedicated`.
+///
+/// One definition, three consumers: cluster routing, the restore path's placement check
+/// ([D-094](../../../docs/DECISIONS.md)), and the encryption envelope's `bucket_ordinal`
+/// ([D-095](../../../docs/DECISIONS.md)). They must agree — a part is refused at restore when its
+/// bucket does not route here, and that check is only meaningful if "which bucket" means the same
+/// thing everywhere it is computed.
+pub fn bucket_ordinal(scheme: &PartitionScheme, b: &Bucket) -> u64 {
+    match b {
+        Bucket::Shared(n) => *n as u64,
+        Bucket::Dedicated(i) => scheme.buckets as u64 + *i as u64,
+    }
+}
+
 impl PartitionKey {
     /// A directory-safe, sortable name.
     pub fn dir(&self) -> String {

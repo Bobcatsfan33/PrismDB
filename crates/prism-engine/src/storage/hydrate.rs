@@ -25,7 +25,7 @@
 use crate::engine::Engine;
 use prism_part::generation::Generation;
 use prism_part::part::PartReader;
-use prism_part::partition::{Bucket, PartitionScheme};
+use prism_part::partition::{bucket_ordinal, PartitionScheme};
 use prism_types::error::{PrismError, Result};
 use prism_types::hash::{hex, sha256};
 use serde::{Deserialize, Serialize};
@@ -94,11 +94,7 @@ impl ShardPlacement {
         if self.shard_count == 0 {
             return false;
         }
-        let bucket = self.scheme.bucket_of(tenant);
-        let ordinal = match bucket {
-            Bucket::Shared(n) => n as u64,
-            Bucket::Dedicated(i) => self.scheme.buckets as u64 + i as u64,
-        };
+        let ordinal = bucket_ordinal(&self.scheme, &self.scheme.bucket_of(tenant));
         (ordinal % self.shard_count as u64) as usize == self.shard_id
     }
 }

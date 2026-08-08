@@ -1401,6 +1401,15 @@ impl PartReader {
         self
     }
 
+    /// The cipher attached to this reader, if any.
+    ///
+    /// Exists so paths that read a part's bytes from somewhere other than its mmap — the cold tier
+    /// over the object store — decrypt with the same key the reader would, instead of quietly
+    /// decoding ciphertext as data.
+    pub fn cipher(&self) -> Option<&std::sync::Arc<crate::crypto::BlockCipher>> {
+        self.cipher.as_ref()
+    }
+
     /// Whether this part's stored blocks are sealed.
     pub fn is_encrypted(&self) -> bool {
         self.manifest.feature_flags & crate::format::FEATURE_ENCRYPTION != 0
