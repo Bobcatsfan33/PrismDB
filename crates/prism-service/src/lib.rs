@@ -1205,11 +1205,19 @@ mod tests {
         }
     }
 
+    /// Fixture directories get their **own** counter.
+    ///
+    /// They used to share `REQUEST_SEQUENCE` with runtime request ids, so a fixture's directory
+    /// name depended on how many requests other concurrently-running tests happened to have made.
+    /// Unique, but **not reproducible by design** — and a fixture nobody can reproduce is a fixture
+    /// nobody can debug ([issue #34](https://github.com/Bobcatsfan33/PrismDB/issues/34)).
+    static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
     fn temp(tag: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
             "prism-service-{tag}-{}-{}",
             std::process::id(),
-            REQUEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+            FIXTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ))
     }
 
@@ -1233,12 +1241,51 @@ mod tests {
         );
     }
 
+    const KEY_ATTEMPTS: usize = 8;
+
+    /// Run `openssl`, then keep the key **only if rustls could actually use it**
+    /// ([issue #34](https://github.com/Bobcatsfan33/PrismDB/issues/34)).
+    ///
+    /// A short private scalar is chance and is retried: LibreSSL emits 31 bytes whenever the value
+    /// has a leading zero (~1 key in 300) and `ring` requires exactly 32. Explicit curve parameters
+    /// are a generator defect and fail loudly, because retrying would hide a dropped
+    /// `ec_param_enc:named_curve` pin.
+    fn openssl_key(dir: &Path, key_file: &str, arguments: &[&str]) {
+        for _ in 0..KEY_ATTEMPTS {
+            openssl(dir, arguments);
+            let pem = fs::read_to_string(dir.join(key_file))
+                .unwrap_or_else(|e| panic!("fixture key {key_file} could not be read: {e}"));
+            assert!(
+                !pem.is_empty(),
+                "fixture key {key_file} is empty; openssl exited zero but wrote nothing"
+            );
+            let asn1 = Command::new("openssl")
+                .args(["asn1parse", "-in", key_file])
+                .current_dir(dir)
+                .output()
+                .expect("run openssl asn1parse");
+            assert!(
+                String::from_utf8_lossy(&asn1.stdout).contains("prime256v1"),
+                "fixture key {key_file} is not in NAMED-CURVE form; rustls refuses that even \
+                 though openssl parses it. The generator must pin `ec_param_enc:named_curve`."
+            );
+            if prism_part::testkeys::is_ring_compatible_p256(&pem) {
+                return;
+            }
+        }
+        panic!(
+            "fixture key {key_file} still had a short private scalar after {KEY_ATTEMPTS} \
+             attempts; that is far past chance and means the generator is broken"
+        );
+    }
+
     fn generate_ca(dir: &Path, prefix: &str) {
         let key = format!("{prefix}-key.pem");
         let cert = format!("{prefix}.pem");
         let subject = format!("/CN={prefix}");
-        openssl(
+        openssl_key(
             dir,
+            &key,
             &[
                 "req",
                 "-x509",
@@ -1271,8 +1318,9 @@ mod tests {
         let ca_key = format!("{ca_prefix}-key.pem");
         let ca_serial = format!("{ca_prefix}.srl");
         let subject = format!("/CN={common_name}");
-        openssl(
+        openssl_key(
             dir,
+            &key,
             &[
                 "req",
                 "-new",

@@ -1268,11 +1268,21 @@ mod tests {
     use std::process::Command;
     use std::sync::mpsc;
 
+    /// Fixture directories get their **own** counter.
+    ///
+    /// They used to share [`REQUEST_SEQUENCE`] with runtime RPC request ids, which meant a
+    /// fixture's directory name depended on how many RPC calls other concurrently-running tests
+    /// happened to have made. The names stayed unique — `fetch_add` sees to that — but they were
+    /// **not reproducible by design**, and a fixture nobody can reproduce is a fixture nobody can
+    /// debug when it misbehaves ([issue #34](https://github.com/Bobcatsfan33/PrismDB/issues/34)).
+    /// Removing the coupling is the point; uniqueness was never the problem.
+    static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
     fn temp(tag: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
             "prism-rpc-{tag}-{}-{}",
             std::process::id(),
-            REQUEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+            FIXTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ))
     }
 
@@ -1316,12 +1326,62 @@ mod tests {
         );
     }
 
+    /// How many times a generator will retry a key whose scalar came out short.
+    ///
+    /// The short case is ~1 in 300, so two retries already leave a ~1-in-27-million residue; the
+    /// bound exists so a genuinely broken generator fails loudly instead of spinning.
+    const KEY_ATTEMPTS: usize = 8;
+
+    /// Run `openssl`, then keep the key **only if rustls could actually use it**
+    /// ([issue #34](https://github.com/Bobcatsfan33/PrismDB/issues/34)).
+    ///
+    /// Two failure modes, deliberately handled differently:
+    ///
+    /// * **A short private scalar is chance, so it is retried.** LibreSSL emits a 31-byte scalar
+    ///   whenever the value has a leading zero — about 1 key in 300 — and `ring` requires exactly
+    ///   32. Regenerating draws a new key; there is nothing to fix.
+    /// * **Explicit curve parameters are a generator defect, so they fail loudly.** That is the
+    ///   `ec_param_enc:named_curve` pin having been dropped, and retrying would just hide it.
+    fn openssl_key(dir: &Path, key_file: &str, args: &[&str]) {
+        for _ in 0..KEY_ATTEMPTS {
+            openssl(dir, args);
+            let pem = fs::read_to_string(dir.join(key_file))
+                .unwrap_or_else(|e| panic!("fixture key {key_file} could not be read: {e}"));
+            assert!(
+                !pem.is_empty(),
+                "fixture key {key_file} is empty; openssl exited zero but wrote nothing"
+            );
+            assert!(
+                pem.contains("BEGIN PRIVATE KEY"),
+                "fixture key {key_file} is not a PKCS#8 private key"
+            );
+            let asn1 = Command::new("openssl")
+                .args(["asn1parse", "-in", key_file])
+                .current_dir(dir)
+                .output()
+                .expect("run openssl asn1parse");
+            assert!(
+                String::from_utf8_lossy(&asn1.stdout).contains("prime256v1"),
+                "fixture key {key_file} is not in NAMED-CURVE form; rustls refuses that even \
+                 though openssl parses it. The generator must pin `ec_param_enc:named_curve`."
+            );
+            if prism_part::testkeys::is_ring_compatible_p256(&pem) {
+                return;
+            }
+        }
+        panic!(
+            "fixture key {key_file} still had a short private scalar after {KEY_ATTEMPTS} \
+             attempts; that is far past chance and means the generator is broken"
+        );
+    }
+
     fn generate_ca(dir: &Path, prefix: &str) {
         let key = format!("{prefix}-key.pem");
         let cert = format!("{prefix}.pem");
         let subject = format!("/CN={prefix}");
-        openssl(
+        openssl_key(
             dir,
+            &key,
             &[
                 "req",
                 "-x509",
@@ -1354,8 +1414,9 @@ mod tests {
         let ca_key = format!("{ca_prefix}-key.pem");
         let ca_serial = format!("{ca_prefix}.srl");
         let subject = format!("/CN={common_name}");
-        openssl(
+        openssl_key(
             dir,
+            &key,
             &[
                 "req",
                 "-new",
