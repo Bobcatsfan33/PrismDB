@@ -170,6 +170,7 @@ impl Engine {
         let reader = PartReader::open(&dir)
             .map_err(|e| PrismError::Invariant(format!("cannot back up part `{part_id}`: {e}")))?;
         let backend = self.cold.backend();
+        let encrypted = reader.is_encrypted();
 
         let mut files = Vec::new();
         for name in part_files(&dir)? {
@@ -177,10 +178,14 @@ impl Engine {
             let len = bytes.len() as u64;
             let key = part_key(part_id, &name);
 
-            // Idempotent by size, exactly as `publish_part_cold` is: the default local backend is
-            // rooted at the store, so the part write already put the bytes at this key and this is a
-            // single HEAD; a remote backend receives them.
-            if backend.head(&key)? != Some(len) {
+            // Idempotent by size, exactly as `publish_part_cold` is — and with exactly the same
+            // restriction. A content address names **logical content, not stored bytes**
+            // ([D-095](../../../../docs/DECISIONS.md)): two sealings of one logical part share an
+            // address and a size while differing in every byte, so for an **encrypted** part
+            // "same key, same length" does not mean "same object". Encrypted parts always upload;
+            // otherwise a backup could silently retain a ciphertext no live DEK opens, and the
+            // receipt's SHA-256 would then indict the restore rather than the backup.
+            if encrypted || backend.head(&key)? != Some(len) {
                 backend.put(&key, &bytes)?;
             }
             match backend.head(&key)? {

@@ -237,10 +237,20 @@ impl Engine {
         let key = format!("parts/{part_id}/rerank.vec");
         let backend = self.cold.backend();
 
-        // Upload only if the backend does not already hold the object at the right size — idempotent
-        // by construction, since the cold tier is content-addressed. The local backend already has
-        // it (the part write wrote straight into the object key's path); a remote backend gets it.
-        if backend.head(&key)? != Some(want) {
+        // Upload only if the backend does not already hold the object at the right size.
+        //
+        // **That shortcut is sound only for a PLAINTEXT part.** Its justification was "idempotent by
+        // construction, since the cold tier is content-addressed" — and since
+        // [D-095](../../../../docs/DECISIONS.md), a content address names **logical content, not
+        // stored bytes**. Two sealings of the same logical part share an address *and* a size
+        // (sealing is length-deterministic) while differing in every byte, so for an encrypted part
+        // "same key, same length" no longer implies "same object", and skipping the upload could
+        // leave a stale ciphertext the local envelope's DEK cannot open. Encrypted parts therefore
+        // always upload.
+        let encrypted = PartReader::open(&self.store.part_dir(part_id))
+            .map(|r| r.is_encrypted())
+            .unwrap_or(false);
+        if encrypted || backend.head(&key)? != Some(want) {
             backend.put(&key, &bytes)?;
         }
 

@@ -72,6 +72,36 @@ epochs mid-life ([D-076](DECISIONS.md)). The cost is 24 bytes per block: 0.15% a
 block size, and the thing it buys is that there is no nonce-reuse invariant for a future sprint to
 get wrong.
 
+## 4a. Two verification paths, and they are not interchangeable
+
+Encryption splits what used to be one idea into two, and conflating them is how a keyless path ends
+up claiming a guarantee it cannot deliver:
+
+| | **Stored-byte integrity** | **Logical identity** |
+|---|---|---|
+| What it answers | "are these the bytes that were written here?" | "is this the same data?" |
+| Mechanism | per-block CRC-32; per-file SHA-256 in a backup receipt | the part's content address |
+| Needs the key? | **No** | **Yes** — the address names the plaintext |
+| Used by | restore verification, cache verification, GC, corruption reporting | naming a part, deduplication, merge identity |
+
+**A content address names logical content, not stored bytes.** An encrypted part and its plaintext
+twin share an address; so do two sealings of the same data under different DEKs or nonces, which are
+byte-identical in *no* position. That is the correct semantics — an address is a fact about data —
+but it means **"same content address" must never be read as "same file"**.
+
+Two consequences are load-bearing and are enforced in code:
+
+- **No keyless path may claim content-address verification.** Hydration verifies a restored part
+  before it can unwrap anything, and what it verifies is *stored-byte integrity* — the receipt's
+  SHA-256 over the ciphertext. It is not, and must not be described as, a check that the restored
+  part *is the right data*; that check requires the key and happens when the AEAD tag is verified on
+  read.
+- **Size and address together are not an identity test for encrypted parts.** Sealing is
+  length-deterministic, so two sealings of one logical part share both an address *and* a byte
+  length. Any "already present, skip the upload" shortcut keyed on those would be sound for
+  plaintext and wrong for ciphertext, and could leave a stale object no live DEK opens.
+  `publish_part_cold` and `backup_part` therefore always upload an encrypted part.
+
 ## 5. Coverage — the whole D-094 path, not just the part files
 
 Encryption follows the data everywhere it is durable:
