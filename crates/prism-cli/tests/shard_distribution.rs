@@ -56,52 +56,49 @@ fn openssl(dir: &Path, args: &[&str]) {
     );
 }
 
-/// Assert the key file just written is one rustls will actually accept
-/// ([issue #34](https://github.com/Bobcatsfan33/PrismDB/issues/34)). Checked at creation so the
-/// fixture names itself, instead of surfacing later as `failed to parse private key` inside
-/// whichever `prism` subprocess happened to consume it — which, across a process boundary, is even
-/// harder to attribute than it is in-process.
-fn assert_key_is_usable(dir: &Path, key_file: &str) {
-    let path = dir.join(key_file);
-    let bytes = std::fs::read(&path)
-        .unwrap_or_else(|e| panic!("fixture key {} could not be read: {e}", path.display()));
-    assert!(
-        !bytes.is_empty(),
-        "fixture key {} is empty; openssl exited zero but wrote nothing",
-        path.display()
-    );
-    let parsed = Command::new("openssl")
-        .args(["pkey", "-in", key_file, "-noout"])
-        .current_dir(dir)
-        .output()
-        .expect("run openssl pkey");
-    // `openssl pkey` is not a strict enough oracle on its own: LibreSSL happily parses an EC key
-    // written with EXPLICIT curve parameters, and rustls refuses exactly that form. So assert the
-    // named-curve OID is present, which is the property rustls actually requires and the precise
-    // regression the `ec_param_enc:named_curve` pin exists to prevent.
-    let asn1 = Command::new("openssl")
-        .args(["asn1parse", "-in", key_file])
-        .current_dir(dir)
-        .output()
-        .expect("run openssl asn1parse");
-    assert!(
-        String::from_utf8_lossy(&asn1.stdout).contains("prime256v1"),
-        "fixture key {} is not in NAMED-CURVE form; rustls will refuse it even though openssl \
-         parses it. The generator must pin `-pkeyopt ec_param_enc:named_curve`.",
-        path.display()
-    );
-    assert!(
-        parsed.status.success(),
-        "fixture key {} ({} bytes) does not parse: {}",
-        path.display(),
-        bytes.len(),
-        String::from_utf8_lossy(&parsed.stderr)
+const KEY_ATTEMPTS: usize = 8;
+
+/// Run `openssl`, then keep the key **only if rustls could actually use it**
+/// ([issue #34](https://github.com/Bobcatsfan33/PrismDB/issues/34)).
+///
+/// A short private scalar is chance and is retried: LibreSSL emits 31 bytes whenever the value has
+/// a leading zero (~1 key in 300) and `ring` requires exactly 32. Explicit curve parameters are a
+/// generator defect and fail loudly, because retrying would hide a dropped
+/// `ec_param_enc:named_curve` pin. Across a process boundary this matters even more: the `prism`
+/// subprocess would otherwise die with an opaque TLS error nothing here could attribute.
+fn openssl_key(dir: &Path, key_file: &str, args: &[&str]) {
+    for _ in 0..KEY_ATTEMPTS {
+        openssl(dir, args);
+        let pem = std::fs::read_to_string(dir.join(key_file))
+            .unwrap_or_else(|e| panic!("fixture key {key_file} could not be read: {e}"));
+        assert!(
+            !pem.is_empty(),
+            "fixture key {key_file} is empty; openssl exited zero but wrote nothing"
+        );
+        let asn1 = Command::new("openssl")
+            .args(["asn1parse", "-in", key_file])
+            .current_dir(dir)
+            .output()
+            .expect("run openssl asn1parse");
+        assert!(
+            String::from_utf8_lossy(&asn1.stdout).contains("prime256v1"),
+            "fixture key {key_file} is not in NAMED-CURVE form; rustls refuses that even though \
+             openssl parses it. The generator must pin `ec_param_enc:named_curve`."
+        );
+        if prism_part::testkeys::is_ring_compatible_p256(&pem) {
+            return;
+        }
+    }
+    panic!(
+        "fixture key {key_file} still had a short private scalar after {KEY_ATTEMPTS} attempts; \
+         that is far past chance and means the generator is broken"
     );
 }
 
 fn generate_ca(dir: &Path, prefix: &str) {
-    openssl(
+    openssl_key(
         dir,
+        &format!("{prefix}-key.pem"),
         &[
             "req",
             "-x509",
@@ -123,12 +120,12 @@ fn generate_ca(dir: &Path, prefix: &str) {
             &format!("{prefix}.pem"),
         ],
     );
-    assert_key_is_usable(dir, &format!("{prefix}-key.pem"));
 }
 
 fn generate_leaf(dir: &Path, prefix: &str, common_name: &str, ca_prefix: &str, usage: &str) {
-    openssl(
+    openssl_key(
         dir,
+        &format!("{prefix}-key.pem"),
         &[
             "req",
             "-new",
@@ -148,7 +145,6 @@ fn generate_leaf(dir: &Path, prefix: &str, common_name: &str, ca_prefix: &str, u
             &format!("{prefix}.csr"),
         ],
     );
-    assert_key_is_usable(dir, &format!("{prefix}-key.pem"));
     std::fs::write(
         dir.join(format!("{prefix}.ext")),
         format!(

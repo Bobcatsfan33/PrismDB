@@ -1326,49 +1326,52 @@ mod tests {
         );
     }
 
-    /// Assert the key file just written is one rustls will actually accept
+    /// How many times a generator will retry a key whose scalar came out short.
+    ///
+    /// The short case is ~1 in 300, so two retries already leave a ~1-in-27-million residue; the
+    /// bound exists so a genuinely broken generator fails loudly instead of spinning.
+    const KEY_ATTEMPTS: usize = 8;
+
+    /// Run `openssl`, then keep the key **only if rustls could actually use it**
     /// ([issue #34](https://github.com/Bobcatsfan33/PrismDB/issues/34)).
     ///
-    /// Without this, a key that is empty, truncated, or in a form rustls rejects travels silently
-    /// until some later test tries to build a TLS config out of it — and the failure surfaces
-    /// hundreds of lines away as `failed to parse private key`, in whichever unlucky test happened
-    /// to consume the fixture. Checking at the moment of creation makes the fixture name itself.
-    fn assert_key_is_usable(dir: &Path, key_file: &str) {
-        let path = dir.join(key_file);
-        let bytes = fs::read(&path)
-            .unwrap_or_else(|e| panic!("fixture key {} could not be read: {e}", path.display()));
-        assert!(
-            !bytes.is_empty(),
-            "fixture key {} is empty; openssl exited zero but wrote nothing",
-            path.display()
-        );
-        let parsed = Command::new("openssl")
-            .args(["pkey", "-in", key_file, "-noout"])
-            .current_dir(dir)
-            .output()
-            .expect("run openssl pkey");
-        assert!(
-            parsed.status.success(),
-            "fixture key {} ({} bytes) does not parse: {}",
-            path.display(),
-            bytes.len(),
-            String::from_utf8_lossy(&parsed.stderr)
-        );
-
-        // `openssl pkey` is not a strict enough oracle on its own: LibreSSL happily parses an EC
-        // key written with EXPLICIT curve parameters, and rustls refuses exactly that form. So
-        // assert the named-curve OID is present, which is the property rustls actually requires and
-        // the precise regression the `ec_param_enc:named_curve` pin exists to prevent.
-        let asn1 = Command::new("openssl")
-            .args(["asn1parse", "-in", key_file])
-            .current_dir(dir)
-            .output()
-            .expect("run openssl asn1parse");
-        assert!(
-            String::from_utf8_lossy(&asn1.stdout).contains("prime256v1"),
-            "fixture key {} is not in NAMED-CURVE form; rustls will refuse it even though openssl \
-             parses it. The generator must pin `-pkeyopt ec_param_enc:named_curve`.",
-            path.display()
+    /// Two failure modes, deliberately handled differently:
+    ///
+    /// * **A short private scalar is chance, so it is retried.** LibreSSL emits a 31-byte scalar
+    ///   whenever the value has a leading zero — about 1 key in 300 — and `ring` requires exactly
+    ///   32. Regenerating draws a new key; there is nothing to fix.
+    /// * **Explicit curve parameters are a generator defect, so they fail loudly.** That is the
+    ///   `ec_param_enc:named_curve` pin having been dropped, and retrying would just hide it.
+    fn openssl_key(dir: &Path, key_file: &str, args: &[&str]) {
+        for _ in 0..KEY_ATTEMPTS {
+            openssl(dir, args);
+            let pem = fs::read_to_string(dir.join(key_file))
+                .unwrap_or_else(|e| panic!("fixture key {key_file} could not be read: {e}"));
+            assert!(
+                !pem.is_empty(),
+                "fixture key {key_file} is empty; openssl exited zero but wrote nothing"
+            );
+            assert!(
+                pem.contains("BEGIN PRIVATE KEY"),
+                "fixture key {key_file} is not a PKCS#8 private key"
+            );
+            let asn1 = Command::new("openssl")
+                .args(["asn1parse", "-in", key_file])
+                .current_dir(dir)
+                .output()
+                .expect("run openssl asn1parse");
+            assert!(
+                String::from_utf8_lossy(&asn1.stdout).contains("prime256v1"),
+                "fixture key {key_file} is not in NAMED-CURVE form; rustls refuses that even \
+                 though openssl parses it. The generator must pin `ec_param_enc:named_curve`."
+            );
+            if prism_part::testkeys::is_ring_compatible_p256(&pem) {
+                return;
+            }
+        }
+        panic!(
+            "fixture key {key_file} still had a short private scalar after {KEY_ATTEMPTS} \
+             attempts; that is far past chance and means the generator is broken"
         );
     }
 
@@ -1376,8 +1379,9 @@ mod tests {
         let key = format!("{prefix}-key.pem");
         let cert = format!("{prefix}.pem");
         let subject = format!("/CN={prefix}");
-        openssl(
+        openssl_key(
             dir,
+            &key,
             &[
                 "req",
                 "-x509",
@@ -1399,7 +1403,6 @@ mod tests {
                 &cert,
             ],
         );
-        assert_key_is_usable(dir, &key);
     }
 
     fn generate_leaf(dir: &Path, prefix: &str, common_name: &str, ca_prefix: &str, usage: &str) {
@@ -1411,8 +1414,9 @@ mod tests {
         let ca_key = format!("{ca_prefix}-key.pem");
         let ca_serial = format!("{ca_prefix}.srl");
         let subject = format!("/CN={common_name}");
-        openssl(
+        openssl_key(
             dir,
+            &key,
             &[
                 "req",
                 "-new",
@@ -1432,7 +1436,6 @@ mod tests {
                 &csr,
             ],
         );
-        assert_key_is_usable(dir, &key);
         fs::write(
             dir.join(&ext),
             format!(
