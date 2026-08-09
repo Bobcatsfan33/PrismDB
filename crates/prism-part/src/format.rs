@@ -97,8 +97,20 @@ pub const DEFAULT_BLOCK_SIZE: u32 = 16 * 1024;
 /// they are all this, forever.
 pub const BLOCK_SIZE: u32 = 64 * 1024;
 
-/// `PBLK` — the frame marker at the head of every block.
+/// `PBLK` — the frame marker at the head of every plaintext block.
 pub const BLOCK_MAGIC: u32 = 0x4B4C_4250;
+
+/// `PSLK` — the frame marker at the head of every **sealed** block
+/// ([D-095](../../../docs/DECISIONS.md)).
+///
+/// **This is what makes sealed bytes unreachable as plaintext by construction.** Relying on the
+/// manifest's feature bit only protects readers that consult the manifest; the cold-tier path does
+/// not, because it fetches bytes from the object store rather than the part's mmap — and it decoded
+/// ciphertext as vectors without erroring, because the CRC covers the *stored* bytes and a sealed
+/// block passes its own checksum. Marking the frame itself means any reader, present or future,
+/// that reaches a sealed block without a cipher gets a **named refusal** rather than bytes that
+/// happen to validate. The declaration travels with the data instead of beside it.
+pub const SEALED_BLOCK_MAGIC: u32 = 0x4B4C_5350;
 
 /// Frame header: magic + block_index + logical_offset + payload_len + crc32.
 pub const FRAME_HEADER_BYTES: usize = 4 + 4 + 8 + 4 + 4;
@@ -785,7 +797,11 @@ pub fn frame_column_sealed(
         let file_offset = file.len() as u64;
         let crc = crc32(&stored);
         let mut w = Writer::new();
-        w.u32(BLOCK_MAGIC);
+        w.u32(if cipher.is_some() {
+            SEALED_BLOCK_MAGIC
+        } else {
+            BLOCK_MAGIC
+        });
         w.u32(i as u32);
         w.u64((i * bs) as u64);
         w.u32(stored.len() as u32);
@@ -857,10 +873,28 @@ pub fn read_block_sealed<'a>(
 ) -> Result<std::borrow::Cow<'a, [u8]>> {
     let mut c = Cursor::new(raw);
     let magic = c.u32()?;
-    if magic != BLOCK_MAGIC {
-        return Err(PrismError::Corrupt(format!(
-            "part {part_id} column `{column}` block {index}: bad frame magic {magic:#010x}"
-        )));
+    match (magic, cipher.is_some()) {
+        (BLOCK_MAGIC, false) | (SEALED_BLOCK_MAGIC, true) => {}
+        // A sealed block reached a reader with no key. This is the branch that makes the bypass
+        // impossible: it fires before the checksum, before the payload is sliced, and regardless of
+        // whether the caller ever looked at the manifest.
+        (SEALED_BLOCK_MAGIC, false) => {
+            return Err(PrismError::Policy(format!(
+                "part {part_id} column `{column}` block {index} is sealed and no key was supplied;                  refusing to return ciphertext as column data"
+            )))
+        }
+        // A plaintext block reached a reader holding a key. A part is sealed or it is not, so this
+        // is an inconsistency, not a mode to tolerate.
+        (BLOCK_MAGIC, true) => {
+            return Err(PrismError::Corrupt(format!(
+                "part {part_id} column `{column}` block {index} is not sealed, but this part was                  opened with a key; the part and its envelope disagree"
+            )))
+        }
+        _ => {
+            return Err(PrismError::Corrupt(format!(
+                "part {part_id} column `{column}` block {index}: bad frame magic {magic:#010x}"
+            )))
+        }
     }
     let idx = c.u32()? as usize;
     if idx != index {
@@ -1285,18 +1319,17 @@ mod tests {
         let framed = frame_column_sealed(&data, 1024, Some(&c), "p1", "body.data").unwrap();
         let b = &framed.blocks[0];
         let end = FRAME_HEADER_BYTES + b.payload_len as usize;
-        // The CRC covers the ciphertext, so reading without a cipher passes the checksum and hands
-        // back sealed bytes — which is exactly why FEATURE_ENCRYPTION and the REQUIRED envelope
-        // extension exist: a reader must refuse the part before it ever gets here.
-        let raw = read_block(&framed.file[..end], 0, b, "body.data", "p1", 1024).unwrap();
-        assert_ne!(
-            raw,
-            data.as_slice(),
-            "sealed bytes must not equal the plaintext"
-        );
+        // The stored bytes are ciphertext and longer than the plaintext, and the ONLY way to
+        // observe them is through a reader holding the key. This test previously asserted that the
+        // plain path returned those sealed bytes successfully — which is precisely the behaviour
+        // now forbidden, and precisely how the cold tier silently decoded ciphertext as vectors.
         assert!(
-            raw.len() > data.len(),
+            b.payload_len as usize > data.len(),
             "sealed bytes carry a nonce and a tag"
         );
+        let opened =
+            read_block_sealed(&framed.file[..end], 0, b, "body.data", "p1", 1024, Some(&c))
+                .unwrap();
+        assert_eq!(&*opened, data.as_slice());
     }
 }
