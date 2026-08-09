@@ -1313,6 +1313,49 @@ mod tests {
     }
 
     #[test]
+    fn the_plain_read_path_refuses_a_sealed_block_by_name() {
+        // THE STRUCTURAL GATE. `read_block` is the lowest level that serves bytes, and a caller
+        // that reaches it without going through `PartReader` must not receive ciphertext. Before
+        // the sealed frame magic this call SUCCEEDED and returned nonce-ciphertext-tag, which
+        // passed its CRC and was decoded as data — that is exactly how the cold-tier path silently
+        // reordered results. Proven red by reverting the writer to `BLOCK_MAGIC`.
+        let c = test_cipher();
+        let data = b"the quick brown fox".to_vec();
+        let framed = frame_column_sealed(&data, 1024, Some(&c), "p1", "body.data").unwrap();
+        let b = &framed.blocks[0];
+        let end = FRAME_HEADER_BYTES + b.payload_len as usize;
+
+        let err = read_block(&framed.file[..end], 0, b, "body.data", "p1", 1024).unwrap_err();
+        assert!(
+            matches!(err, PrismError::Policy(_)),
+            "a sealed block on the plain path must be a policy refusal: {err}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("sealed") && msg.contains("no key was supplied"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn a_plaintext_block_read_with_a_cipher_is_refused_as_an_inconsistency() {
+        let c = test_cipher();
+        let (file, blocks) = frame_column(b"plain bytes", 1024);
+        let end = FRAME_HEADER_BYTES + blocks[0].payload_len as usize;
+        let err = read_block_sealed(
+            &file[..end],
+            0,
+            &blocks[0],
+            "body.data",
+            "p1",
+            1024,
+            Some(&c),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("disagree"), "{err}");
+    }
+
+    #[test]
     fn a_sealed_block_read_without_the_cipher_is_not_mistaken_for_plaintext() {
         let c = test_cipher();
         let data = b"the quick brown fox".to_vec();
