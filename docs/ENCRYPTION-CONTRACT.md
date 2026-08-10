@@ -138,6 +138,22 @@ Hydration's routing check ([D-094](DECISIONS.md)'s wrong-tenant refusal) uses th
 ordinal**, which is exactly what routing is a function of, so the check keeps working without the
 plaintext tenant names it never actually needed.
 
+> **Where this is done, and where it is not — measured, not assumed.** The **backup receipt** is
+> closed: an encrypted store's `BACKUP.json` names no tenant, and the gate greps the receipt's bytes
+> for every tenant the part holds. Two surfaces are **still plaintext and are not claimed otherwise**:
+>
+> - the **part manifest**'s tenant list and `TenantStats` (`manifest.bin`, which must stay readable
+>   without a key because it carries the envelope — the sensitive *fields* within it are what still
+>   need sealing);
+> - the **catalog mirror** snapshot in the object store, whose `PartEntry::Located` carries
+>   `tenants` so a part can be pruned without being opened.
+>
+> So DATA-01 today reads: raw bucket or disk access still discloses **which tenants exist and which
+> share a bucket**, while disclosing **no row content** — that part is closed, and the encrypted
+> D-094 drill asserts no event body appears in any object under `parts/`, `wal/`, `catalog/` or
+> `generations/`. Closing the remaining two is metadata work, not row-confidentiality work, and it
+> is listed unticked below rather than folded into a claim it has not earned.
+
 ## 7. Key material never appears anywhere it can be read later
 
 Plaintext DEKs live in a **bounded cache, zeroized on drop**, and nowhere else. Key material — DEKs
@@ -213,19 +229,37 @@ PKI), and no gate in this repository claims otherwise.
 
 ## Implementation checklist
 
-- [ ] `chacha20poly1305` pinned (`=`) and MSRV-1.75 clean; `zeroize` stays pinned at 1.8.1
-- [ ] `KeyProvider` trait: `wrap`, `unwrap`, `key_id`, with identical error taxonomy across backends
-- [ ] Software keystore backend with an **injectable fault surface** (unreachable, revoked, denied,
+- [x] `chacha20poly1305` pinned (`=`) and MSRV-1.75 clean; `zeroize` stays pinned at 1.8.1
+- [x] `KeyProvider` trait: `wrap`, `unwrap`, `key_id`, with identical error taxonomy across backends
+- [x] Software keystore backend with an **injectable fault surface** (unreachable, revoked, denied,
       throttled) so staging exercises the same branches KMS would take
-- [ ] Bounded DEK cache, zeroized on drop, never logged
-- [ ] `FEATURE_ENCRYPTION` added to `SUPPORTED_FEATURES`; `EXT_S14_ENCRYPTION` registered
-- [ ] Per-block AEAD with AAD = part id ‖ column ‖ block index ‖ key id; 192-bit random nonce stored
-- [ ] Manifest and backup-receipt sensitive fields encrypted; bucket ordinal stays plaintext
-- [ ] Remote WAL payload encryption
-- [ ] Rotation: expand / activate / rewrap / retire, with retire refused while envelopes need the key
-- [ ] Gates: cross-tenant decryption refused with real ciphertexts; key loss/revocation fails closed;
+- [x] Bounded DEK cache, zeroized on drop, never logged
+- [x] `FEATURE_ENCRYPTION` added to `SUPPORTED_FEATURES`; `EXT_S14_ENCRYPTION` registered
+- [x] Per-block AEAD with AAD = part id ‖ column ‖ block index ‖ **DEK label**; 192-bit random nonce
+      stored. *Amended from "key id" during implementation:* the AAD's key component names the
+      **DEK**, not the wrapping key. Binding it to the wrapping key made §9 rotation structurally
+      impossible — every block failed its tag the instant its envelope was rewrapped. Key
+      *wrapping* still binds the wrapping key id, because there the key in question really is the
+      wrapping key.
+- [x] **Backup-receipt** sensitive fields encrypted; bucket ordinal stays plaintext
+- [ ] **Manifest** sensitive fields encrypted (tenant list, `TenantStats`) — see the DATA-01 note
+      in §6; the receipt is closed, the manifest is not
+- [ ] **Catalog mirror** `PartEntry` tenant list encrypted or ordinal-ised — same note
+- [x] Remote WAL payload encryption — **and the local admission log too**, which the coverage table
+      did not name. The local WAL holds the same acked-but-unpublished rows on node-local disk, so
+      §5's "plaintext never touches disk" would have been false with only the remote one sealed.
+- [x] Rotation: expand / activate / rewrap / retire, with retire refused while envelopes need the
+      key — counting **published parts and the admission log**, because an acked record holds a
+      wrapped DEK too
+- [x] Gates: cross-tenant decryption refused with real ciphertexts; key loss/revocation fails closed;
       restore through current **and** retired-but-authorized key; KMS-unreachable hydration
       (refuses by name, no partial state, clean retry); feature-flag rollback for never-encrypted
       stores; the full [D-094](DECISIONS.md) drill green **with encryption enabled**
+- [x] CLI key service (`PRISM_STAGING_KEYSTORE_FILE`) — added because without it `prism hydrate`
+      could never restore an encrypted store, so the drill could not stay process-isolated and no
+      deployment could operate the feature at all
 - [ ] Unsafe-posture inventory updated for whatever the implementation proves refusable
-- [ ] CRYPTO-01 and DATA-01 gap text records exactly what was exercised, and against which backend
+- [x] DATA-01 gap text records exactly what was exercised, and against which backend (§6)
+- [ ] CRYPTO-01 gap text
+- [ ] **Live-KMS run** — every gate above was exercised against the **software keystore**. It proves
+      the code path; it does not prove the custody, and no receipt in this repository says otherwise.

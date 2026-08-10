@@ -304,6 +304,7 @@ dependencies = [
  "serde",
  "serde_json",
  "signal-hook",
+ "zeroize",
 ]
 
 [[package]]

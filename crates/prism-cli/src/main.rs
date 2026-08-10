@@ -5,6 +5,7 @@
 //! is a result you cannot trust.
 
 mod args;
+mod keystore;
 
 use args::Args;
 use prism_engine::bench::{self, BenchOpts};
@@ -273,6 +274,12 @@ fn open(a: &Args) -> Result<Engine> {
     let mut engine = Engine::open(&path_of(a)?)?;
     if let Some(plane) = model_plane_from_env(engine.store.config.dim)? {
         engine = engine.with_plane(plane);
+    }
+    // The key service, when this process was given one. Wired here rather than per command so that
+    // every path which opens a store -- hydrate, recover, search, fsck -- gets it: an encrypted
+    // store that only some subcommands can open is worse than one none of them can.
+    if let Some(keys) = keystore::from_env()? {
+        engine = engine.with_keys(keys);
     }
     Ok(match cold_from_env()? {
         Some(cold) => engine.with_cold(cold),
