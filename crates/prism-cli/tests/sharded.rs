@@ -15,7 +15,7 @@ use prism_engine::sharded::Cluster;
 use prism_engine::Engine;
 use prism_part::store::{StoreConfig, STORE_VERSION};
 use prism_types::{Query, SearchResult};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -569,4 +569,184 @@ fn a_tenant_hashes_to_the_same_bucket_at_every_shard_count() {
         assert!(c2.shard_index(t) < 2);
         assert!(c4.shard_index(t) < 4);
     }
+}
+
+// -------------------------------------------------------------------------------------------------
+// The merge-sensitivity family (S12 evidence hardening)
+// -------------------------------------------------------------------------------------------------
+
+/// **Every narrow-rerank shape, against a single-engine ground truth, collecting every failure.**
+///
+/// The cross-shard merge claim used to rest on one variant of one test. A mutation sweep showed why
+/// that was thin: the canonical merge defect — each shard contributing its *local* finalists instead
+/// of the coordinator reconstructing the **global** candidate set ([query §20](../../../../docs/QUERY-CONTRACT.md)) —
+/// was invisible to `plain`, `budget-starved` and `threshold` at the wide default width, and fired
+/// only at `rerank=12`. At a wide width the per-shard top-`rerank` still contains the global
+/// top-`rerank`, so the defect hides; **narrowing the width is what makes it observable**, because
+/// then a shard's local finalists genuinely differ from the global set.
+///
+/// So this family holds the narrow-rerank regime across *every* query shape, and does three things
+/// the single variant did not:
+///
+/// 1. **It collects every failure instead of aborting at the first.** An abort tells you one variant
+///    diverged and leaves the sensitivity of everything after it unknown — which is exactly the gap
+///    that made this family necessary.
+/// 2. **It proves each variant executed.** A silently-skipped variant is a phantom gate.
+/// 3. **It proves each variant actually exercised the merge** — the armed-trap discipline. A
+///    cross-tenant query whose whole answer happens to live on one shard has not merged anything, so
+///    counting it as merge evidence would be self-deception. A (variant, shard-count) pair is
+///    **armed** only when the ground-truth answer's rows are owned by two or more distinct shards at
+///    that shard count, and the family requires a floor of armed pairs.
+#[test]
+fn the_cross_shard_merge_is_a_layout_across_every_narrow_rerank_shape() {
+    let corpus = || prism_engine::corpus::generate(prism_engine::corpus::Kind::Zipf, 3000, 5);
+
+    let single = Engine::init(&tmp("ms-single"), config()).unwrap();
+    single.ingest(corpus(), TS).unwrap();
+    let clusters: Vec<(usize, Cluster)> = [1usize, 2, 4]
+        .iter()
+        .map(|&n| {
+            let c = Cluster::init(&tmp(&format!("ms-{n}")), n, config()).unwrap();
+            c.ingest(corpus(), TS).unwrap();
+            (n, c)
+        })
+        .collect();
+
+    // The narrow-rerank regime, across every shape. `rerank`/`k` are deliberately small: this is the
+    // width at which a per-shard-finalists merge stops agreeing with a global one.
+    let narrow = || {
+        let mut q = cross_tenant_query(None);
+        q.rerank = 12;
+        q.k = 8;
+        q
+    };
+    let variants: Vec<(&str, Query)> = vec![
+        ("narrow-plain", narrow()),
+        ("narrow-threshold", {
+            let mut q = narrow();
+            q.threshold = Some(0.3);
+            q
+        }),
+        ("narrow-budget-starved", {
+            let mut q = narrow();
+            q.fetch_budget_bytes = Some(8 * 64 * 4);
+            q
+        }),
+        ("narrow-plan-interleaved", {
+            let mut q = narrow();
+            q.plan = Some("interleaved".into());
+            q
+        }),
+        ("narrow-plan-scalar-first", {
+            let mut q = narrow();
+            q.plan = Some("scalar-first".into());
+            q
+        }),
+        ("narrow-plan-semantic-first", {
+            let mut q = narrow();
+            q.plan = Some("semantic-first".into());
+            q
+        }),
+        ("narrow-route-cpu", {
+            let mut q = narrow();
+            q.force_route = Some("cpu".into());
+            q
+        }),
+        ("narrow-route-gpu-reference", {
+            let mut q = narrow();
+            q.force_route = Some("gpu-reference".into());
+            q
+        }),
+        ("narrow-group-by", {
+            let mut q = narrow();
+            q.group_k = Some(4);
+            q
+        }),
+    ];
+
+    let mut failures: Vec<String> = Vec::new();
+    let mut executed = 0usize;
+    let mut armed_pairs = 0usize;
+    let mut armed_variants: BTreeSet<&str> = BTreeSet::new();
+
+    for (tag, q) in &variants {
+        let g = single.search(q).unwrap();
+        executed += 1;
+        assert!(
+            !g.hits.is_empty(),
+            "ground truth for `{tag}` is empty -- the variant proves nothing"
+        );
+
+        for (n, c) in &clusters {
+            // ARMED TRAP: did this pair actually make the coordinator merge across shards?
+            //
+            // The condition is that the **corpus is spread over more than one shard** at this shard
+            // count while the query is cross-tenant (`tenant: None`), because that is what forces the
+            // coordinator to fan out round 1 to every shard and reconstruct a global candidate set
+            // from more than one contribution. It is deliberately NOT "the top-k rows come from more
+            // than one shard": the first version of this trap asserted that and fired immediately
+            // with **zero** armed pairs, because at `k=8` this corpus's cross-tenant answer is
+            // dominated by a single tenant and therefore sits on a single shard — while the merge it
+            // came out of had still combined candidates from every shard. Arming on the answer's
+            // spread would have measured the corpus, not the mechanism.
+            let corpus_spread: BTreeSet<usize> = TENANTS.iter().map(|t| c.shard_index(t)).collect();
+            let answer_owners: BTreeSet<usize> = g
+                .hits
+                .iter()
+                .map(|h| c.shard_index(&h.event.tenant_id))
+                .collect();
+            if *n > 1 && corpus_spread.len() > 1 {
+                armed_pairs += 1;
+                armed_variants.insert(tag);
+            }
+            let owners = answer_owners;
+
+            // Collect, never abort: the sensitivity of every later variant must stay knowable.
+            match c.search(q) {
+                Err(e) => failures.push(format!("`{tag}` at {n} shards errored: {e}")),
+                Ok(cr) => {
+                    if hit_fp(&cr) != hit_fp(&g) {
+                        failures.push(format!(
+                            "`{tag}` SEARCH diverged at {n} shards (owners={:?})\n     cluster: {:?}\n      single: {:?}",
+                            owners,
+                            hit_fp(&cr),
+                            hit_fp(&g)
+                        ));
+                    }
+                    if cr.counters.fetch_budget_exhausted != g.counters.fetch_budget_exhausted {
+                        failures.push(format!(
+                            "`{tag}` budget-exhaustion flag diverged at {n} shards"
+                        ));
+                    }
+                    if q.group_k.is_some() && group_repr(&cr) != group_repr(&g) {
+                        failures.push(format!("`{tag}` GROUP BY diverged at {n} shards"));
+                    }
+                }
+            }
+        }
+    }
+
+    assert_eq!(
+        executed,
+        variants.len(),
+        "not every variant executed -- a skipped variant is a phantom gate"
+    );
+    // The family must genuinely exercise the merge, on more than one shape. Two independent armed
+    // variants is the floor: it is exactly the bar the single-variant evidence failed to clear.
+    assert!(
+        armed_variants.len() >= 2 && armed_pairs >= 4,
+        "the family did not exercise the cross-shard merge widely enough: {} armed variant(s) \
+         ({:?}) over {armed_pairs} armed (variant, shard-count) pair(s). A cross-tenant query whose \
+         whole answer lives on one shard has merged nothing, and counting it as merge evidence \
+         would be self-deception.",
+        armed_variants.len(),
+        armed_variants
+    );
+    assert!(
+        failures.is_empty(),
+        "the cross-shard merge is not a layout -- {} divergence(s) across {} armed variant(s):\n  - {}",
+        failures.len(),
+        armed_variants.len(),
+        failures.join("\n  - ")
+    );
 }

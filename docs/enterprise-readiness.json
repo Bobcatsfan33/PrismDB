@@ -303,6 +303,20 @@
       "evidence": []
     },
     {
+      "id": "EXT-SCALE",
+      "title": "Multi-host shard scaling: the D-071 near-linear claim",
+      "status": "open",
+      "blocking": true,
+      "ownerRole": "Engineering and SRE",
+      "acceptanceCriteria": "D-071's shared-nothing scaling claim is measured on FOUR OR MORE REAL HOSTS, one shard per host, over a shared durable object store, against the targets declared before measurement in testing/evidence/s12-verdict-spec.md (>= 3.5x end-to-end 1->4). A CI runner cannot honestly measure this and must not be used to: the shipped in-process configuration fans out concurrently but the host's CPU cores and memory bandwidth are fixed regardless of shard count, so its measured 1.05x-1.6x is an Amdahl ceiling of the harness rather than a property of the design -- it lower-bounds the real number and cannot confirm or falsify it. The measurement is deliberately NOT funded before a design partner needs it; until then the claim is unproven rather than either supported or refuted. Distribution CORRECTNESS (sharding is a layout at 1/2/4, the two-round global-candidate-set merge, partial failure, hedging) and the commit-RTT authority primitive are proven separately and do not depend on this gate.",
+      "evidence": [
+        "testing/evidence/s12-verdict-spec.md",
+        "testing/evidence/s12-scaling.json",
+        "crates/prism-cli/tests/scaling.rs",
+        "docs/QUERY-CONTRACT.md"
+      ]
+    },
+    {
       "id": "EXT-KMS",
       "title": "Production key custody: envelope encryption against a real KMS/HSM",
       "status": "open",

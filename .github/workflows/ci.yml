@@ -1,5 +1,8 @@
 name: ci
 
+# Reading a run's output when `gh run view --log` comes back empty, and why a branch can have no
+# runs at all: docs/CI-FORENSICS.md.
+
 on:
   push:
     branches: [main]
