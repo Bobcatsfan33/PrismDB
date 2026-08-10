@@ -28,11 +28,13 @@
 //! only written *at publication* — has no record of these events, so they are not
 //! mistaken for replays and suppressed. Exactly once.
 
+use crate::keys::{DekCache, KeyProvider};
 use crate::storage::object::{cas_publish, CasOutcome, ObjectStore};
+use prism_part::crypto::{generate_dek, BlockCipher, AEAD_XCHACHA20_POLY1305};
 use prism_part::io;
 use prism_types::error::{PrismError, Result};
 use prism_types::event::Event;
-use prism_types::hash::crc32;
+use prism_types::hash::{crc32, hex, sha256};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::OpenOptions;
@@ -52,6 +54,214 @@ pub struct WalRecord {
     pub created_at_ms: i64,
 }
 
+// --- envelope encryption (S14, [D-095](../../../docs/DECISIONS.md)) -----------------------------
+//
+// The WAL is the one place an admitted event is durable and **not yet a part**. Between the ack and
+// the catalog commit the event exists nowhere else, so an encrypted store whose WAL is plaintext
+// has a window — bounded by publication latency, unbounded by a crash — in which its rows sit on
+// disk and in the authoritative bucket in the clear. Encryption follows the data, so it follows it
+// here ([contract §5](../../../docs/ENCRYPTION-CONTRACT.md)).
+
+/// Domain separation for admission-log payloads. NUL-prefixed, exactly as key wrapping and the
+/// backup receipt are, so a sealed WAL record can never be substituted for a data block or a
+/// wrapped DEK, whatever an attacker gets to choose.
+const WAL_DOMAIN: &str = "\u{0}prism-admission-wal";
+
+/// The AAD slot that binds a payload to **its own record id**.
+///
+/// Carried in the string slot rather than the block index because a record id is a `u64` and a
+/// block index is a `usize`: on a 32-bit target the index would truncate, and two records whose ids
+/// differ only above 2^32 would become substitutable for each other. A string cannot truncate.
+fn wal_column(record_id: u64) -> String {
+    format!("\u{0}wal-record-{record_id}")
+}
+
+/// The version of the sealed-record envelope. Present in every sealed frame, and **its presence is
+/// what distinguishes a sealed frame from a plaintext one** — a plaintext record has no such field,
+/// and a sealed record has no `events` field, so neither can be read as the other by accident.
+const SEALED_WAL_VERSION: u16 = 1;
+
+/// What a sealed record says about the key that opens it. No key material: only the *wrapped* DEK.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalEnvelope {
+    pub algorithm: u16,
+    /// The **explicit** id of the wrapping key. Never inferred, never defaulted.
+    pub wrapping_key_id: String,
+    pub dek_epoch: u64,
+    pub wrapped_dek: Vec<u8>,
+}
+
+/// The wire form of a sealed record.
+///
+/// `record_id` stays in the clear because it is exactly what the log must read *before* it can
+/// unwrap anything: the floor comparison that decides what recovery replays, the compaction filter,
+/// and the immutable remote key are all functions of the id alone. Everything else — the events,
+/// the source, the offset — is ciphertext.
+#[derive(Debug, Serialize, Deserialize)]
+struct SealedWalRecord {
+    sealed_wal: u16,
+    record_id: u64,
+    algorithm: u16,
+    wrapping_key_id: String,
+    dek_epoch: u64,
+    wrapped_dek: Vec<u8>,
+    ciphertext: Vec<u8>,
+}
+
+/// The key material an encrypted admission log seals under, and the cache that opens what it finds.
+///
+/// **One DEK per log instance, not one per record.** The ack path is latency-critical and a wrap is
+/// a call to the key service; minting once at open costs one wrap per process rather than one per
+/// batch. That is safe here precisely because the nonce is random and 192 bits wide
+/// ([contract §4](../../../docs/ENCRYPTION-CONTRACT.md)): sealing many records under one DEK needs
+/// no counter and no coordination between the writers that successive ownership epochs create.
+pub struct WalCrypto {
+    keys: Arc<dyn KeyProvider>,
+    cache: DekCache,
+    sealing: Arc<BlockCipher>,
+    envelope: WalEnvelope,
+}
+
+impl std::fmt::Debug for WalCrypto {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WalCrypto")
+            .field("wrapping_key_id", &self.envelope.wrapping_key_id)
+            .field("dek_epoch", &self.envelope.dek_epoch)
+            .finish()
+    }
+}
+
+/// How many distinct WAL DEKs stay resident. Recovery may meet records from several predecessor
+/// processes, each with its own DEK; bounded because an unbounded key cache is an unbounded amount
+/// of key material in memory.
+const WAL_DEK_CACHE_ENTRIES: usize = 16;
+
+impl WalCrypto {
+    /// Mint this log's DEK and wrap it under the key service's active key.
+    pub fn new(keys: Arc<dyn KeyProvider>) -> Result<Self> {
+        let dek = generate_dek()?;
+        let (wrapping_key_id, wrapped_dek) = keys.wrap(&dek)?;
+        let sealing = Arc::new(BlockCipher::new(dek, wrapping_key_id.clone()));
+        Ok(Self {
+            keys,
+            cache: DekCache::new(WAL_DEK_CACHE_ENTRIES),
+            sealing,
+            envelope: WalEnvelope {
+                algorithm: AEAD_XCHACHA20_POLY1305,
+                wrapping_key_id,
+                dek_epoch: 1,
+                wrapped_dek,
+            },
+        })
+    }
+
+    /// The cipher that opens a record sealed under `envelope`.
+    ///
+    /// Keyed on the wrapped DEK's digest as well as the key id, because a log written across
+    /// several process lifetimes holds several DEKs wrapped under the *same* key id — caching on
+    /// the id alone would open every one of them with the first DEK it saw.
+    fn open_cipher(&self, envelope: &WalEnvelope) -> Result<Arc<BlockCipher>> {
+        if envelope.algorithm != AEAD_XCHACHA20_POLY1305 {
+            return Err(PrismError::Corrupt(format!(
+                "admission log record was sealed with AEAD id {}, which this build does not \
+                 implement",
+                envelope.algorithm
+            )));
+        }
+        let cache_key = format!(
+            "{}#{}#{}",
+            envelope.wrapping_key_id,
+            envelope.dek_epoch,
+            hex(&sha256(&envelope.wrapped_dek))
+        );
+        self.cache.get_or_open(&cache_key, || {
+            let dek = self
+                .keys
+                .unwrap(&envelope.wrapping_key_id, &envelope.wrapped_dek)?;
+            Ok(BlockCipher::new(dek, envelope.wrapping_key_id.clone()))
+        })
+    }
+}
+
+/// Serialize one record for the log: plaintext when there is no key service, sealed when there is.
+///
+/// A store with no key service produces **byte-identical** frames to the ones it produced before
+/// encryption existed — the plaintext branch is the original line, untouched.
+fn encode_record(rec: &WalRecord, crypto: Option<&WalCrypto>) -> Result<Vec<u8>> {
+    let Some(crypto) = crypto else {
+        return Ok(serde_json::to_vec(rec)?);
+    };
+    let ciphertext = crypto.sealing.seal(
+        WAL_DOMAIN,
+        &wal_column(rec.record_id),
+        0,
+        &serde_json::to_vec(rec)?,
+    )?;
+    Ok(serde_json::to_vec(&SealedWalRecord {
+        sealed_wal: SEALED_WAL_VERSION,
+        record_id: rec.record_id,
+        algorithm: crypto.envelope.algorithm,
+        wrapping_key_id: crypto.envelope.wrapping_key_id.clone(),
+        dek_epoch: crypto.envelope.dek_epoch,
+        wrapped_dek: crypto.envelope.wrapped_dek.clone(),
+        ciphertext,
+    })?)
+}
+
+/// Read one record back, opening it when it is sealed.
+///
+/// A sealed record met with no key service is a **named refusal**, never a skip and never an empty
+/// batch: silently dropping an acknowledged record is the one thing a WAL exists to prevent.
+fn decode_record(bytes: &[u8], crypto: Option<&WalCrypto>) -> Result<WalRecord> {
+    // A sealed frame carries `sealed_wal` and no `events`; a plaintext frame carries `events` and
+    // no `sealed_wal`. Neither parses as the other, so the discrimination cannot go wrong quietly.
+    let Ok(sealed) = serde_json::from_slice::<SealedWalRecord>(bytes) else {
+        return Ok(serde_json::from_slice::<WalRecord>(bytes)?);
+    };
+    if sealed.sealed_wal != SEALED_WAL_VERSION {
+        return Err(PrismError::Corrupt(format!(
+            "admission log record {} declares sealed-envelope version {}, which this build does \
+             not implement",
+            sealed.record_id, sealed.sealed_wal
+        )));
+    }
+    let crypto = crypto.ok_or_else(|| {
+        PrismError::Policy(format!(
+            "admission log record {} is sealed under key `{}` but this store has no key service \
+             configured; an acknowledged record cannot be read, and must not be skipped",
+            sealed.record_id, sealed.wrapping_key_id
+        ))
+    })?;
+    let envelope = WalEnvelope {
+        algorithm: sealed.algorithm,
+        wrapping_key_id: sealed.wrapping_key_id,
+        dek_epoch: sealed.dek_epoch,
+        wrapped_dek: sealed.wrapped_dek,
+    };
+    let cipher = crypto.open_cipher(&envelope)?;
+    let plain = cipher.open(
+        WAL_DOMAIN,
+        &wal_column(sealed.record_id),
+        0,
+        &sealed.ciphertext,
+    )?;
+    let rec: WalRecord = serde_json::from_slice(&plain).map_err(|e| {
+        PrismError::Corrupt(format!(
+            "admission log record {} decrypted but will not parse: {e}",
+            sealed.record_id
+        ))
+    })?;
+    // The AAD already binds the payload to this id; this catches the same substitution at the
+    // application layer, where the error can say which two ids were involved.
+    if rec.record_id != sealed.record_id {
+        return Err(PrismError::Corrupt(format!(
+            "admission log record sealed as {} decrypted to record {}",
+            sealed.record_id, rec.record_id
+        )));
+    }
+    Ok(rec)
+}
+
 /// The on-disk frame. A record that is torn — half-written when the power went —
 /// must be *ignored*, not half-applied, and a checksum plus a length prefix is
 /// what makes that decidable.
@@ -64,6 +274,9 @@ const REMOTE_RECORD_SEQUENCE_MASK: u64 = u32::MAX as u64;
 pub struct Wal {
     path: PathBuf,
     applied_path: PathBuf,
+    /// Present exactly when the store is encrypted. Explicit by construction — there is no ambient
+    /// default and nothing is inferred from the bytes already on disk.
+    crypto: Option<Arc<WalCrypto>>,
 }
 
 /// The record-id **allocator** — a monotonic counter that survives compaction (deriving the next id
@@ -82,7 +295,14 @@ impl Wal {
         Ok(Wal {
             path: dir.join("admission.wal"),
             applied_path: dir.join("applied.json"),
+            crypto: None,
         })
+    }
+
+    /// Seal every record this log writes from now on.
+    pub fn with_crypto(mut self, crypto: Arc<WalCrypto>) -> Self {
+        self.crypto = Some(crypto);
+        self
     }
 
     fn allocator(&self) -> Result<Allocator> {
@@ -128,7 +348,7 @@ impl Wal {
                 rec.record_id, alloc.next_id
             )));
         }
-        let json = serde_json::to_vec(&rec)?;
+        let json = encode_record(rec, self.crypto.as_deref())?;
 
         let mut frame = Vec::with_capacity(FRAME_HEADER + json.len());
         frame.extend_from_slice(&(json.len() as u32).to_le_bytes());
@@ -182,8 +402,11 @@ impl Wal {
             if crc32(json) != want_crc {
                 break;
             }
-            match serde_json::from_slice::<WalRecord>(json) {
+            match decode_record(json, self.crypto.as_deref()) {
                 Ok(r) => out.push(r),
+                // A sealed record we cannot open is a refusal in its own right and must reach the
+                // caller as itself; only a genuine parse failure becomes a byte-named corruption.
+                Err(e @ (PrismError::Policy(_) | PrismError::Corrupt(_))) => return Err(e),
                 Err(e) => {
                     return Err(PrismError::Corrupt(format!(
                         "admission log record at byte {pos} will not parse: {e}"
@@ -226,7 +449,10 @@ impl Wal {
 
         let mut buf = Vec::new();
         for r in &keep {
-            let json = serde_json::to_vec(r)?;
+            // Re-encode through the same path an append takes. Compaction rewrites the whole log,
+            // so a plain `to_vec` here would quietly turn every surviving sealed record back into
+            // plaintext on disk — encryption undone by a maintenance operation nobody was watching.
+            let json = encode_record(r, self.crypto.as_deref())?;
             buf.extend_from_slice(&(json.len() as u32).to_le_bytes());
             buf.extend_from_slice(&crc32(&json).to_le_bytes());
             buf.extend_from_slice(&json);
@@ -244,6 +470,7 @@ impl Wal {
 pub struct RemoteWal {
     store: Arc<dyn ObjectStore>,
     prefix: String,
+    crypto: Option<Arc<WalCrypto>>,
 }
 
 impl RemoteWal {
@@ -251,7 +478,18 @@ impl RemoteWal {
         Self {
             store,
             prefix: format!("wal/shard-{shard_id}/records/"),
+            crypto: None,
         }
+    }
+
+    /// Seal every payload this log makes durable.
+    ///
+    /// The remote log is the one the contract names outright: its objects live in the shared
+    /// authoritative bucket, so a plaintext payload here is readable by anyone with bucket access
+    /// and no node-local disk at all.
+    pub fn with_crypto(mut self, crypto: Arc<WalCrypto>) -> Self {
+        self.crypto = Some(crypto);
+        self
     }
 
     fn key(&self, record_id: u64) -> String {
@@ -293,7 +531,7 @@ impl RemoteWal {
 
     pub fn append(&self, record: &WalRecord) -> Result<()> {
         let key = self.key(record.record_id);
-        let bytes = serde_json::to_vec(record)?;
+        let bytes = encode_record(record, self.crypto.as_deref())?;
         match cas_publish(self.store.as_ref(), &key, &bytes)? {
             CasOutcome::Created | CasOutcome::AlreadyOurs => {}
             CasOutcome::Conflict => {
@@ -335,7 +573,7 @@ impl RemoteWal {
                     "replicated admission WAL key `{key}` will not parse: {error}"
                 ))
             })?;
-            let record: WalRecord = serde_json::from_slice(&self.store.get(&key)?)?;
+            let record = decode_record(&self.store.get(&key)?, self.crypto.as_deref())?;
             if record.record_id != key_id {
                 return Err(PrismError::Corrupt(format!(
                     "replicated admission WAL key id {key_id} does not match body id {}",

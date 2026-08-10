@@ -71,15 +71,39 @@ impl Ingestor {
     }
 
     fn open_shared(engine: Arc<Engine>) -> Result<Self> {
+        Self::open_shared_with(engine, None)
+    }
+
+    /// The admission log's key material, minted once per ingestor when the store is encrypted.
+    ///
+    /// Both logs share one [`WalCrypto`], so a record is sealed under the same DEK locally and
+    /// remotely. That is what lets the replacement node in the D-094 drill open the remote log it
+    /// inherited from a predecessor it never shared a process with.
+    fn wal_crypto(engine: &Engine) -> Result<Option<Arc<crate::wal::WalCrypto>>> {
+        match engine.keys() {
+            None => Ok(None),
+            Some(keys) => Ok(Some(Arc::new(crate::wal::WalCrypto::new(Arc::clone(
+                keys,
+            ))?))),
+        }
+    }
+
+    fn open_shared_with(engine: Arc<Engine>, remote_wal: Option<RemoteWal>) -> Result<Self> {
         let root = engine.store.root.clone();
-        let wal = Wal::open(&root.join("wal"))?;
+        let crypto = Self::wal_crypto(&engine)?;
+        let mut wal = Wal::open(&root.join("wal"))?;
+        let mut remote_wal = remote_wal;
+        if let Some(crypto) = &crypto {
+            wal = wal.with_crypto(Arc::clone(crypto));
+            remote_wal = remote_wal.map(|r| r.with_crypto(Arc::clone(crypto)));
+        }
         prism_part::io::ensure_dir(&root.join("admission"))?;
         Ok(Ingestor {
             wal,
             quotas: QuotaEnforcer::new(),
             dict_path: root.join("admission/key-dictionary.json"),
             idem_path: root.join("admission/idempotency.json"),
-            remote_wal: None,
+            remote_wal,
             engine,
         })
     }
@@ -93,9 +117,10 @@ impl Ingestor {
         let engine = Arc::new(engine);
         engine.acquire_ownership()?;
         let remote_wal = RemoteWal::new(Arc::clone(engine.cold.backend()), shard_id);
-        let mut ingestor = Self::open_shared(engine)?;
-        ingestor.remote_wal = Some(remote_wal);
-        Ok(ingestor)
+        // Built here rather than assigned afterwards: the remote log must be handed the same
+        // WalCrypto the local one got, and a field assigned after construction is exactly how it
+        // would end up sealing locally and publishing plaintext remotely.
+        Self::open_shared_with(engine, Some(remote_wal))
     }
 
     pub fn key_dictionary(&self) -> Result<KeyDictionary> {
