@@ -15,7 +15,9 @@ now has a signed, supported distribution: a digest-pinned non-root image, a Stat
 per-shard identity and default-deny networking, startup gates that refuse a non-member topology, a
 shared trust bundle, or a non-durable write target, and an admission policy requiring an approved
 digest under the exact approved workflow identity. These components do not turn the database core
-into a complete supported product: migration and version policy, encryption and key lifecycle,
+into a complete supported product: migration and version policy, production key custody and
+lifecycle (per-tenant envelope encryption is implemented and gated, but every gate ran against the
+software keystore, which proves the code path and not the custody — blocking gate `EXT-KMS`),
 backup/hydration and RPO/RTO, load-derived SLOs, independent-host scaling/fault evidence,
 independent penetration testing, support, and organizational assurance remain required.
 
