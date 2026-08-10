@@ -498,6 +498,29 @@ jobs:
           AWS_ACCESS_KEY_ID: minioadmin
           AWS_SECRET_ACCESS_KEY: minioadmin
 
+      # **D-071's falsification clause, measured here rather than remembered.** D-071 promotes the
+      # CAS catalog from mirror to authority and stakes that on one number: the per-commit authority
+      # round-trip is cheap enough that consensus is not needed. The targets were declared BEFORE
+      # measurement (testing/evidence/s12-verdict-spec.md), so this cannot be tuned to pass.
+      #
+      # It had been run once by hand with its numbers committed — a snapshot of one afternoon, not a
+      # standing check, while the primitive it measures (`cas_publish`) sits on the write path and
+      # can regress silently. `--ignored` because it is a benchmark that needs a real object store;
+      # unmeasurable is a failure here, never a quiet pass.
+      #
+      # If it goes red the answer is NOT to relax the target: missing it is D-071's own trigger to
+      # reconsider the CAS authority in favour of Raft, which is an architectural decision and not
+      # one a CI run gets to make. The scaling half of the S12 verdict stays a manual benchmark —
+      # it needs multiple hosts to mean anything, and this runner is one.
+      - run: >
+          cargo test --release -p prism-cli --test scaling
+          commit_rtt_meets_the_d071_authority_targets
+          -- --ignored --exact --nocapture
+        env:
+          PRISM_S3_ENDPOINT: 127.0.0.1:9000
+          AWS_ACCESS_KEY_ID: minioadmin
+          AWS_SECRET_ACCESS_KEY: minioadmin
+
   layout:
     name: charter C-4 — the answer is a function of the data, not the layout
     runs-on: ubuntu-latest

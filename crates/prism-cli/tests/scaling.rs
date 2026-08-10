@@ -199,6 +199,7 @@ fn measure_commit_rtt() -> serde_json::Value {
         std::process::id(),
         N.fetch_add(1, Ordering::SeqCst)
     );
+    let store_endpoint = endpoint.clone();
     let cfg = S3Config {
         endpoint,
         region: std::env::var("PRISM_S3_REGION").unwrap_or_else(|_| "us-east-1".into()),
@@ -235,9 +236,80 @@ fn measure_commit_rtt() -> serde_json::Value {
     let p50 = quantile(&times, 0.50);
     let p99 = quantile(&times, 0.99);
     serde_json::json!({
-        "measured": true, "backend": "local-MinIO (127.0.0.1, digest-pinned 09-07)",
+        // The backend is REPORTED, not assumed. It used to be the hardcoded string
+        // "local-MinIO (127.0.0.1, digest-pinned 09-07)", which is a receipt describing whatever the
+        // author last ran rather than what produced these numbers — the backend-conditional receipt
+        // discipline (storage §5) exists precisely so a number cannot be read against the wrong
+        // backend. Now it names the endpoint that actually answered.
+        "measured": true,
+        "backend": backend_tag(&store_endpoint),
         "commits": k, "p50_ms": p50, "p99_ms": p99, "achieved_rate_per_s": rate,
         "target_p50_ms": 25.0, "target_p99_ms": 100.0, "target_rate_per_s": 20.0,
         "pass": p50 <= 25.0 && p99 <= 100.0 && rate >= 20.0
     })
+}
+
+/// Name the object store these numbers came from. A loopback endpoint is a **development** store and
+/// says so: its RTT is not a claim about a production S3, and a receipt that let the two be confused
+/// would be worse than no receipt.
+fn backend_tag(endpoint: &str) -> String {
+    let host = endpoint.split(':').next().unwrap_or(endpoint);
+    if host == "127.0.0.1" || host == "localhost" || host == "::1" {
+        format!("local development object store at {endpoint} (loopback; NOT production S3)")
+    } else {
+        format!("object store at {endpoint}")
+    }
+}
+
+/// **D-071's falsification clause, as a CI gate** ([D-071](../../../docs/DECISIONS.md)).
+///
+/// D-071 promotes the CAS catalog from mirror to *authority*, and stakes that on one measurable
+/// claim: the per-commit authority round-trip is cheap enough that a consensus protocol is not
+/// needed. The targets were declared **before** measurement in
+/// [`s12-verdict-spec.md`](../../../testing/evidence/s12-verdict-spec.md), so this cannot be tuned
+/// to pass.
+///
+/// It ran once by hand and its numbers were committed. That is a snapshot of one afternoon, not a
+/// standing check: the primitive it measures — `cas_publish` — is on the write path and can regress
+/// silently. This runs it in CI, against a real object store, and **fails loudly** if the targets
+/// stop being met.
+///
+/// **If this ever goes red, the answer is not to relax the target.** The target is the trigger
+/// D-071 wrote for itself: missing it is the signal to consider the Raft alternative, which is an
+/// architectural decision and not a thing a test run gets to make.
+#[test]
+#[ignore]
+fn commit_rtt_meets_the_d071_authority_targets() {
+    let rtt = measure_commit_rtt();
+
+    // Unmeasurable is a FAILURE, never a quiet pass. A gate that reports "not measured" and exits
+    // green is the phantom-gate shape: it would go on certifying D-071's premise while measuring
+    // nothing at all.
+    assert_eq!(
+        rtt["measured"],
+        serde_json::json!(true),
+        "commit-RTT was not measured -- this gate needs a real object store. Set PRISM_S3_ENDPOINT \
+         (CI supplies digest-pinned MinIO). Reason: {}",
+        rtt["reason"]
+    );
+
+    let p50 = rtt["p50_ms"].as_f64().unwrap();
+    let p99 = rtt["p99_ms"].as_f64().unwrap();
+    let rate = rtt["achieved_rate_per_s"].as_f64().unwrap();
+    assert!(
+        rtt["commits"].as_u64().unwrap() >= 100,
+        "too few commits to quantile meaningfully: {rtt}"
+    );
+    assert!(
+        rtt["pass"] == serde_json::json!(true),
+        "D-071's commit-RTT targets are NOT met against {}: p50 {p50:.3}ms (target <= {}), \
+         p99 {p99:.3}ms (target <= {}), {rate:.1} commits/s (target >= {}). Do not relax the \
+         target -- missing it is D-071's own trigger to reconsider the CAS authority in favour of \
+         consensus, which is an architectural decision.",
+        rtt["backend"].as_str().unwrap_or("?"),
+        rtt["target_p50_ms"],
+        rtt["target_p99_ms"],
+        rtt["target_rate_per_s"],
+    );
+    eprintln!("commit-RTT gate: {rtt}");
 }
