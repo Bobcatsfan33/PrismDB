@@ -227,6 +227,39 @@ PKI), and no gate in this repository claims otherwise.
 
 ---
 
+## 12. Gate checklist — what every encryption gate owes, permanently
+
+These are standing requirements on *any* future encryption gate, not a list that was satisfied once.
+
+**Every encryption gate must include at least one query that touches two or more encrypted parts.**
+
+Not a style preference — this is a defect that shipped. A **fresh DEK is minted per part**, so many
+parts share one wrapping key id and one DEK epoch while holding entirely different keys. The
+resident-key cache was keyed `{wrapping_key_id}#{dek_epoch}`, which does not identify a DEK, so the
+first part's key was handed to every part opened after it. Any read spanning two encrypted parts
+failed outright.
+
+It survived a full sprint of gates because **every one of them filtered to a single tenant and so
+opened a single part** — the cache was never asked a second question. It was found only when a
+rotation gate happened to enumerate every part in the store, and it was found as a
+`failed authenticated decryption` on an unrelated assertion. A single-part fixture cannot see this
+class of bug at all, and neither can a gate that only *writes* several parts without reading across
+them.
+
+So a gate that exercises one part exercises the encryption of one part. Concretely, a gate owes:
+
+- a read spanning **≥ 2 encrypted parts** in one process, through one resident-key cache;
+- an assertion that the fixture **really did** produce more than one part, and that those parts
+  really do carry **distinct wrapped DEKs** — otherwise the gate silently stops covering the case
+  the day the corpus or the partition scheme changes shape.
+
+`a_query_spanning_several_encrypted_parts_opens_each_under_its_own_dek` is the reference shape.
+
+The cache key now includes `sha256(wrapped_dek)`, which does identify the DEK and is derivable
+without unwrapping anything.
+
+---
+
 ## Implementation checklist
 
 - [x] `chacha20poly1305` pinned (`=`) and MSRV-1.75 clean; `zeroize` stays pinned at 1.8.1

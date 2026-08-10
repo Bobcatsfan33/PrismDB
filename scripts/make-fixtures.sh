@@ -13,6 +13,13 @@
 # value is that nothing since has touched it. If this script ever rewrites it,
 # the compatibility test becomes a tautology.
 #
+# v3 IS still regenerated below, and that is a known, logged limitation rather
+# than a settled decision: it means v3 is not evidence of anything a future
+# writer must reproduce, and a byte-for-byte rollback gate cannot be written
+# against it. When v3 stabilizes it joins v1 and v2 in the never-regenerated
+# class and that gate comes back -- issue #39, and the module header of
+# crates/prism-engine/tests/encryption_rollback.rs.
+#
 # Run this only when the format version is bumped or the corpus deliberately
 # changes. If it produces a diff on an unchanged format, that is a bug, not a
 # refresh: something non-deterministic got into the write path.

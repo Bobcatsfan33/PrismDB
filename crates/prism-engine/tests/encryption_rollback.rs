@@ -16,6 +16,13 @@
 //! rebuild-and-diff would be asserting something the fixture corpus was never designed to hold.
 //! What it *can* hold is that nothing S14 added shows up in any of them, and that is what is
 //! checked.
+//!
+//! That gate was written, failed for exactly this reason, and was **deleted rather than parked
+//! behind `#[ignore]`** — a disabled test is a claim nobody is checking. It is logged as
+//! [issue #39](https://github.com/Bobcatsfan33/PrismDB/issues/39): when format v3 stabilizes, its
+//! bytes get frozen like v1/v2 and the byte-for-byte gate comes back against the frozen copy. A
+//! regenerable fixture is one refresh away from the S2 failure the README records — a drift check
+//! that regenerates what it is checking, and so passes by construction while testing nothing.
 
 use prism_engine::keys::{KeyProvider, SoftwareKeystore};
 use prism_engine::Engine;

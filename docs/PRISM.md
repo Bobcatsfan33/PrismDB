@@ -211,7 +211,7 @@ Representative agent-telemetry corpora (real selectivity, text lengths, tenant s
 Curated schemas/adapters for LLM calls, agent steps, tool calls, policy decisions, security events; saved hybrid queries (injection variants, drift, failure cascades, conversation cohorts); retention/cost controls, usage reports, recall/latency dashboards; runbooks (incident, migration, stuck merge, corrupt object, GPU loss, catalog recovery); design-partner migrations off the two-system seam, measuring removed application complexity.
 **Gate:** partners retain and query full agreed telemetry with no application-side joins; operators complete all drills from docs alone; launch report shows user outcomes, not just engine numbers.
 
-**Review checklist, every sprint (adopted):** does a crash expose untested state? can adversarial bytes cause unbounded allocation or tenant leakage? is every generation explicit? is approximate behavior measured against exact? are bytes scanned/rerank bytes/write amplification observable? are old format fixtures preserved or versioned? is cancellation/backpressure bounded? is the benchmark end-to-end?
+**Review checklist, every sprint (adopted):** does a crash expose untested state? can adversarial bytes cause unbounded allocation or tenant leakage? is every generation explicit? is approximate behavior measured against exact? are bytes scanned/rerank bytes/write amplification observable? are old format fixtures preserved or versioned? is cancellation/backpressure bounded? is the benchmark end-to-end? **does every encryption gate read across two or more encrypted parts** ([encryption §12](ENCRYPTION-CONTRACT.md)) — a per-part DEK means a single-part fixture cannot see a key-resolution bug at all, and one shipped exactly that way?
 
 ---
 

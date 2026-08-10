@@ -134,10 +134,17 @@
         "docs/SHARD-TRANSPORT.md",
         "docs/PUBLIC-READ-SERVICE.md",
         "docs/STORAGE-CONTRACT.md",
-        "SECURITY.md"
+        "docs/ENCRYPTION-CONTRACT.md",
+        "SECURITY.md",
+        "crates/prism-part/src/crypto.rs",
+        "crates/prism-engine/src/keys.rs",
+        "crates/prism-engine/tests/encrypted_store.rs",
+        "crates/prism-engine/tests/rewrap.rs",
+        "crates/prism-cli/src/keystore.rs"
       ],
       "gaps": [
-        "Per-tenant envelope encryption and production KMS/HSM lifecycle are not implemented."
+        "Per-tenant envelope encryption is implemented and gated, but EVERY gate was exercised against the software keystore. That proves the code path and does not prove key custody: no run against a production KMS/HSM exists, so the production key lifecycle -- ceremony, custody, multi-region replication -- remains unproven. Tracked as external gate EXT-KMS; no receipt in this repository may be read as custody evidence until it closes.",
+        "Rotation is implemented as expand/activate/rewrap/retire and gated end to end, but only against software-keystore key versions; no rotation has been performed against a real KMS key version."
       ]
     },
     {
@@ -145,9 +152,17 @@
       "title": "Data protection, privacy, retention, and deletion",
       "status": "partial",
       "frameworks": ["csa-ccm-caiq-4.1", "csa-ai-caiq-1.0.2", "nist-ai-rmf-1.0"],
-      "evidence": ["docs/QUERY-CONTRACT.md", "docs/MODEL-GOVERNANCE.md", "docs/INGESTION-CONTRACT.md"],
+      "evidence": [
+        "docs/QUERY-CONTRACT.md",
+        "docs/MODEL-GOVERNANCE.md",
+        "docs/INGESTION-CONTRACT.md",
+        "docs/ENCRYPTION-CONTRACT.md",
+        "crates/prism-engine/tests/encrypted_backup.rs",
+        "crates/prism-cli/tests/encrypted_drill.rs"
+      ],
       "gaps": [
-        "Versioned redact-before-embedding, production retention/deletion, residency, and raw-disk metadata confidentiality remain open."
+        "Versioned redact-before-embedding, production retention/deletion, and residency remain open.",
+        "Raw-disk metadata confidentiality is PARTIALLY closed. Row content is sealed on every durable surface and the encrypted disaster drill asserts no event body appears in any object under parts/, wal/, catalog/ or generations/. Metadata is not: the part manifest's tenant list and TenantStats, and the catalog mirror's PartEntry tenant names, are still plaintext, so raw bucket or disk access still discloses which tenants exist and which share a bucket."
       ]
     },
     {
@@ -285,6 +300,15 @@
       "blocking": true,
       "ownerRole": "GRC and Legal",
       "acceptanceCriteria": "Buyer-required SIG/CAIQ, DPA, subprocessor/residency disclosure, and applicable SOC 2 or ISO 27001 evidence approved.",
+      "evidence": []
+    },
+    {
+      "id": "EXT-KMS",
+      "title": "Production key custody: envelope encryption against a real KMS/HSM",
+      "status": "open",
+      "blocking": true,
+      "ownerRole": "Security Engineering and SRE",
+      "acceptanceCriteria": "The encryption gate suite is re-run with a production KMS/HSM KeyProvider in place of the software keystore, and the receipts name that backend. It must cover, against real key versions: wrap and unwrap on the ingest and read paths; a full expand/activate/rewrap/retire rotation with retire refused while live envelopes still need the key; restore through a retired-but-authorized previous key; and the D-094 disaster drill end to end with encryption enabled. The named failure modes -- unreachable, denied, throttled, revoked -- must be produced by the real key service rather than injected by the software keystore's fault surface, and each must still fail closed with no partial state and retry cleanly. A region-wide KMS outage is a recovery blocker by design, so the deployment's multi-region key replication posture is recorded as an operator-side decision rather than a software guarantee. Until this gate closes, no receipt in this repository may be read as evidence of key custody: the software-keystore runs prove the code path only, and the key ceremony itself remains external.",
       "evidence": []
     }
   ]
