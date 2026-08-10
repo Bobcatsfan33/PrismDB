@@ -358,6 +358,63 @@ jobs:
       # independent-host and customer-scale RPO/RTO claims stay with EXT-DR and P14.
       - run: cargo test --release -p prism-cli --test hydration -- --nocapture
 
+  encryption-gates:
+    name: encryption gates — nothing legible at rest, rotation without rewrites, rollback intact
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # These tests also run inside `tests (debug)` and `tests (release)`. The duplication is the
+      # point: envelope encryption is a claim a reader should be able to check from the checks list
+      # without knowing which workspace job happens to contain it. Everything here is specified in
+      # docs/ENCRYPTION-CONTRACT.md, and each step below names the section it enforces.
+      #
+      # Per-block AEAD, the AAD that stops a block being moved, and the wrapped-DEK envelope the
+      # manifest carries (§3, §4). A part sealed under one tenant's key cannot be opened with
+      # another's, and a sealed block handed to the plaintext read path is refused rather than
+      # decoded into plausible bytes.
+      - run: cargo test --release -p prism-part --test encrypted_part -- --nocapture
+      # Answer-invariance (§the contract's opening fact): a query over an encrypted store and the
+      # same query over the same data unencrypted return byte-identical results. Also carries the
+      # §12 checklist gate below.
+      - run: cargo test --release -p prism-engine --test encrypted_store -- --nocapture
+      # §12, called out by name because it is the one that regresses silently. A fresh DEK is
+      # minted per part, so many parts share one wrapping key id while holding different keys; a
+      # resident-key cache keyed on the wrapping key hands the first part's DEK to every part after
+      # it. It fails closed on the AEAD tag rather than returning wrong rows, but any read spanning
+      # two encrypted parts fails outright — and a single-tenant fixture opens one part and never
+      # sees it. Every encryption gate owes a read across >= 2 encrypted parts.
+      - run: >
+          cargo test --release -p prism-engine --test encrypted_store
+          a_query_spanning_several_encrypted_parts_opens_each_under_its_own_dek
+          -- --exact --nocapture
+      # §5 coverage: the admission log is the one place an admitted event is durable and not yet a
+      # part, locally and in the shared bucket. A sealed record that cannot be opened is a named
+      # refusal, never a skip — silently dropping an acked record is what a WAL exists to prevent.
+      - run: cargo test --release -p prism-engine --test encrypted_wal -- --nocapture
+      # §6: the backup receipt is designed to be read without a key, which makes it the easiest
+      # place to leave the DATA-01 metadata gap open. Its tenant list is sealed and the bucket
+      # ordinal stays plaintext, so the wrong-shard refusal keeps working with no key at all.
+      - run: cargo test --release -p prism-engine --test encrypted_backup -- --nocapture
+      # §9 rotation: expand / activate / rewrap / retire. Rewrapping touches wrapped-DEK envelopes
+      # and NEVER part bytes — the gate compares every column file byte-for-byte across it — and
+      # retire is refused while any live envelope, part or WAL record, still needs the key.
+      - run: cargo test --release -p prism-engine --test rewrap -- --nocapture
+      # §8 fail-closed WITHOUT corruption: decryption sits inside the D-094 staging boundary
+      # (decrypt, verify, then rename), so an unreachable, denied, revoked or absent key service
+      # refuses with nothing installed and CURRENT untouched, and a retry needs no cleanup.
+      - run: cargo test --release -p prism-engine --test encrypted_hydration -- --nocapture
+      # §10: the feature flag rolls back. A never-encrypted store carries no feature bit, no
+      # extension and no new bytes, and the committed compat fixtures are byte-identical to
+      # themselves after being read — a store that rewrites itself on open cannot be rolled back to.
+      - run: cargo test --release -p prism-engine --test encryption_rollback -- --nocapture
+      # The capstone: the full D-094 drill with encryption enabled, through the real `prism` binary
+      # and the CLI's own key service, asserting no event body appears in any object under parts/,
+      # wal/, catalog/ or generations/. Its key custody is the SOFTWARE KEYSTORE (§11) — this proves
+      # the code path, not the custody, and the live-KMS run stays external gate EXT-KMS.
+      - run: cargo test --release -p prism-cli --test encrypted_drill -- --nocapture
+
   merge-scheduler:
     name: the S10 gate — size-tiered merges, bounded steady state, answers unchanged
     runs-on: ubuntu-latest
