@@ -1335,6 +1335,53 @@ impl PartWriter {
     }
 }
 
+/// Replace the wrapped-DEK envelope in a published part's manifest, in place, on disk
+/// (S14 rotation, [encryption contract §9](../../../docs/ENCRYPTION-CONTRACT.md)).
+///
+/// **Immutable parts stay immutable.** This is the one operation that writes to a published part
+/// directory, and the reason it is allowed to exist is that it changes *nothing about the part*:
+/// not a column file, not a block, not a nonce, not the content address, not the plaintext under
+/// the seal. It re-encrypts a 32-byte key under a different wrapping key and puts the result back
+/// in the manifest. A rotation that had to rewrite part bytes would make key rotation cost a full
+/// re-ingest, which is how deployments end up never rotating.
+///
+/// Refuses a part that is not encrypted or carries no envelope, rather than adding one: a store is
+/// encrypted because it was configured to be ([contract §10](../../../docs/ENCRYPTION-CONTRACT.md)),
+/// and a rewrap is not the place that decision gets made.
+///
+/// Atomic, so a crash mid-rewrap leaves either the old envelope or the new one. Both are openable
+/// for as long as both keys are accepted for unwrap, which is exactly what the *expand* step of the
+/// rotation establishes before any rewrap runs — that is what makes the operation resumable.
+pub fn rewrap_part_envelope(dir: &Path, envelope: &crate::ext::S14Ext) -> Result<()> {
+    let path = dir.join(MANIFEST_FILE);
+    let mut manifest = PartManifest::decode(&io::read_file(&path)?)?;
+    if manifest.feature_flags & crate::format::FEATURE_ENCRYPTION == 0 {
+        return Err(PrismError::Invalid(format!(
+            "refusing to rewrap part `{}`: it is not encrypted, and a rewrap does not turn \
+             encryption on",
+            manifest.part_id
+        )));
+    }
+    let slot = manifest
+        .extensions
+        .iter_mut()
+        .find(|e| e.id == crate::ext::EXT_S14_ENCRYPTION)
+        .ok_or_else(|| {
+            PrismError::Corrupt(format!(
+                "part `{}` sets the encryption feature but carries no envelope to rewrap",
+                manifest.part_id
+            ))
+        })?;
+    slot.bytes = envelope.encode();
+
+    let bytes = manifest.encode()?;
+    // Decode what we are about to write. A manifest that will not read back is one a rename would
+    // make permanent, and this part is live.
+    PartManifest::decode(&bytes)?.validate_structure()?;
+    io::write_atomic(&path, &bytes)?;
+    Ok(())
+}
+
 /// Reads a part, in either format.
 ///
 /// Opens column files lazily so that a part eliminated by pruning costs exactly

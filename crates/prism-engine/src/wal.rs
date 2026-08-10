@@ -418,6 +418,35 @@ impl Wal {
         Ok(out)
     }
 
+    /// Every wrapping key some record in this log still needs, **without opening one**.
+    ///
+    /// A sealed frame names its wrapping key in the clear precisely so this question is answerable
+    /// without the key it is asking about — which is what lets the retire guard refuse *before* an
+    /// operator has made the log unreadable, rather than discovering it afterwards.
+    pub fn wrapping_key_ids(&self) -> Result<std::collections::BTreeSet<String>> {
+        let mut out = std::collections::BTreeSet::new();
+        if !self.path.exists() {
+            return Ok(out);
+        }
+        let bytes = std::fs::read(&self.path)?;
+        let mut pos = 0usize;
+        while pos + FRAME_HEADER <= bytes.len() {
+            let len =
+                u32::from_le_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]])
+                    as usize;
+            let start = pos + FRAME_HEADER;
+            let end = match start.checked_add(len) {
+                Some(e) if e <= bytes.len() => e,
+                _ => break,
+            };
+            if let Ok(sealed) = serde_json::from_slice::<SealedWalRecord>(&bytes[start..end]) {
+                out.insert(sealed.wrapping_key_id);
+            }
+            pos = end;
+        }
+        Ok(out)
+    }
+
     /// Records not yet reflected in the committed snapshot — those with id **greater than the
     /// snapshot's `applied_wal_record` floor**. **This is what recovery replays** ([D-077](../../../docs/DECISIONS.md)):
     /// because the floor is set atomically with publication, a record at or below it is already

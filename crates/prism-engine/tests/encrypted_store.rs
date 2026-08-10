@@ -91,6 +91,75 @@ fn an_encrypted_store_answers_exactly_as_a_plaintext_one_does() {
 }
 
 #[test]
+fn a_query_spanning_several_encrypted_parts_opens_each_under_its_own_dek() {
+    // Every part is sealed under its **own** freshly minted DEK, so many parts share one wrapping
+    // key id and one epoch while holding entirely different keys. A resident-key cache keyed on the
+    // wrapping key therefore hands the first part's DEK to every part after it. That fails closed
+    // on the AEAD tag rather than returning wrong rows -- but it makes any read touching more than
+    // one encrypted part fail outright, and a fixture with a single part never sees it.
+    let plain_root = tmp("multi-plain");
+    let enc_root = tmp("multi-enc");
+
+    let plain = Engine::init(&plain_root, config()).unwrap();
+    plain.ingest(events(), 1_760_000_000_000).unwrap();
+
+    let keystore: Arc<dyn KeyProvider> = Arc::new(SoftwareKeystore::new("key-v1", [11u8; 32]));
+    let enc = Engine::init(&enc_root, config())
+        .unwrap()
+        .with_keys(Arc::clone(&keystore));
+    enc.ingest(events(), 1_760_000_000_000).unwrap();
+
+    let ids = enc.snapshot().unwrap().part_ids();
+    assert!(
+        ids.len() > 1,
+        "this gate is only meaningful across several parts, and the fixture has {}",
+        ids.len()
+    );
+
+    // Distinct DEKs under one wrapping key id: precisely the shape the cache key must survive.
+    let deks: std::collections::BTreeSet<Vec<u8>> = ids
+        .iter()
+        .map(|id| {
+            let e = enc.open_part(id).unwrap().encryption_envelope().unwrap();
+            assert_eq!(
+                e.wrapping_key_id, "key-v1",
+                "one wrapping key for all parts"
+            );
+            e.wrapped_dek
+        })
+        .collect();
+    assert_eq!(deks.len(), ids.len(), "each part must carry its own DEK");
+
+    // One engine, one resident-key cache, every tenant read in turn.
+    for tenant in ["t1", "t2", "t3", "t4", "t5"] {
+        let q = |e: &Engine| {
+            e.search(&Query {
+                text: "the tool call timed out retrying".into(),
+                k: 15,
+                tenant: Some(tenant.into()),
+                rerank: 40,
+                ..Default::default()
+            })
+            .map(|r| {
+                r.hits
+                    .into_iter()
+                    .map(|h| h.event.event_id)
+                    .collect::<Vec<_>>()
+            })
+        };
+        assert_eq!(
+            q(&enc).unwrap_or_else(|e| panic!("tenant {tenant} failed to read: {e}")),
+            q(&plain).unwrap(),
+            "tenant {tenant} must answer identically on the encrypted store"
+        );
+    }
+
+    for r in [plain_root, enc_root] {
+        let _ = std::fs::remove_dir_all(r);
+    }
+}
+
+#[test]
 fn a_store_without_the_key_service_cannot_read_its_own_encrypted_parts() {
     let root = tmp("nokeys");
     let keystore: Arc<dyn KeyProvider> = Arc::new(SoftwareKeystore::new("key-v1", [11u8; 32]));

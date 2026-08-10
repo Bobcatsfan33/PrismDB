@@ -37,6 +37,25 @@ pub const TAG_BYTES: usize = 16;
 /// What sealing adds to a block: the stored nonce plus the tag.
 pub const SEAL_OVERHEAD: usize = NONCE_BYTES + TAG_BYTES;
 
+/// The label a **part's** block cipher carries into its associated data.
+///
+/// **This names the DEK, not the wrapping key, and the distinction is load-bearing.** The AAD's
+/// "key" component exists so a block sealed under one key cannot be opened as a block sealed under
+/// another. For a *data block* the key in question is the DEK — the wrapping key never touches the
+/// block, only the 32 bytes that open it.
+///
+/// Binding the block AAD to the wrapping key id instead would make [rotation §9](../../../docs/ENCRYPTION-CONTRACT.md)
+/// structurally impossible: rewrapping changes which key holds the DEK, so every block in the store
+/// would fail its tag the moment its envelope was rewrapped — and "rewrapping never rewrites part
+/// bytes" would be a promise the format could not keep. A DEK's identity is stable across every
+/// rewrap, by construction, because a rewrap does not change the DEK.
+///
+/// Key *wrapping* is the opposite case and keeps using the wrapping key id ([`wrap_dek`]): there the
+/// key in question really is the wrapping key, and re-labelling a wrapped DEK must fail the tag.
+pub fn dek_label(dek_epoch: u64) -> String {
+    format!("dek-epoch-{dek_epoch}")
+}
+
 /// Generate a fresh 256-bit DEK from the operating system's CSPRNG.
 ///
 /// Not from [`prism_types::rng`]: a key drawn from the reproducible seeded generator would be

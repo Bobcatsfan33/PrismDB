@@ -10,6 +10,24 @@ use std::sync::Arc;
 /// Distinguishes ownership acquisitions of two engines opened in the same process/millisecond.
 static WRITER_NONCE: AtomicU64 = AtomicU64::new(0);
 
+/// What one rewrap pass did ([encryption contract §9](../../docs/ENCRYPTION-CONTRACT.md)).
+///
+/// Names the backend, because a rotation exercised against a software keystore has proven the code
+/// and not the custody, and a receipt that does not say which is one nobody can act on.
+#[derive(Clone, Debug, Default)]
+pub struct RewrapReport {
+    pub backend: String,
+    pub active_key_id: String,
+    /// Live encrypted parts considered.
+    pub examined: usize,
+    /// Parts whose envelope was re-encrypted under the active key.
+    pub rewrapped: Vec<String>,
+    /// Parts already wrapped under the active key — the resumability evidence.
+    pub already_current: Vec<String>,
+    /// Parts carrying no envelope at all. Left alone: a rewrap does not turn encryption on.
+    pub plaintext: Vec<String>,
+}
+
 pub struct Engine {
     pub store: Store,
     pub plane: Arc<dyn ModelPlane>,
@@ -171,14 +189,29 @@ impl Engine {
                 reader.manifest.part_id, envelope.wrapping_key_id
             ))
         })?;
-        // Cached per (key id, epoch): one unwrap serves every part sealed under that DEK.
-        let cache_key = format!("{}#{}", envelope.wrapping_key_id, envelope.dek_epoch);
+        // Cached per **DEK**, not per wrapping key.
+        //
+        // A fresh DEK is minted for every part, so many parts share one wrapping key id and one
+        // epoch while holding entirely different DEKs. Keying the cache on the wrapping key alone
+        // therefore handed the first part's DEK to every subsequent part — which failed closed on
+        // the AEAD tag rather than returning wrong rows, but made any query touching more than one
+        // encrypted part fail outright. The wrapped DEK's digest is what actually identifies the
+        // key, and it is derivable without unwrapping anything.
+        let cache_key = format!(
+            "{}#{}#{}",
+            envelope.wrapping_key_id,
+            envelope.dek_epoch,
+            prism_types::hash::hex(&prism_types::hash::sha256(&envelope.wrapped_dek))
+        );
         self.dek_cache
             .get_or_open(&cache_key, || {
                 let dek = keys.unwrap(&envelope.wrapping_key_id, &envelope.wrapped_dek)?;
+                // Labelled by the DEK, never by the wrapping key: the label goes into every block's
+                // AAD, and a label that moved when the envelope was rewrapped would fail the tag on
+                // every block in the store the moment a rotation ran.
                 Ok(prism_part::crypto::BlockCipher::new(
                     dek,
-                    envelope.wrapping_key_id.clone(),
+                    prism_part::crypto::dek_label(envelope.dek_epoch),
                 ))
             })
             .map(Some)
@@ -213,7 +246,7 @@ impl Engine {
         Ok(Some(prism_part::part::PartEncryption {
             cipher: std::sync::Arc::new(prism_part::crypto::BlockCipher::new(
                 dek,
-                wrapping_key_id.clone(),
+                prism_part::crypto::dek_label(dek_epoch),
             )),
             envelope: prism_part::ext::S14Ext {
                 algorithm: prism_part::crypto::AEAD_XCHACHA20_POLY1305,
@@ -228,6 +261,114 @@ impl Engine {
     /// Drop every resident DEK, so a revocation takes effect against this running process.
     pub fn clear_key_cache(&self) -> Result<()> {
         self.dek_cache.clear()
+    }
+
+    /// **Rewrap**: re-encrypt every live part's wrapped DEK under the key service's active key
+    /// ([encryption contract §9](../../../docs/ENCRYPTION-CONTRACT.md)).
+    ///
+    /// The third step of expand → activate → rewrap → retire, and the only one that touches stored
+    /// state. It touches **envelopes and never part bytes**: no column file is opened, no block is
+    /// decrypted or re-encrypted, no nonce changes, and no content address moves. What changes is a
+    /// 32-byte key's wrapping, which is the whole point — a rotation that had to rewrite part bytes
+    /// would cost a full re-ingest, and a rotation that costs a re-ingest is one that never happens.
+    ///
+    /// **Idempotent and resumable.** A part already wrapped under the active key is skipped, so
+    /// re-running after a crash resumes rather than redoes; and because *expand* left both keys
+    /// accepted for unwrap before any rewrap ran, a half-rewrapped store is fully readable
+    /// throughout.
+    pub fn rewrap_to_active_key(&self) -> Result<RewrapReport> {
+        let keys = self.keys.as_ref().ok_or_else(|| {
+            prism_types::error::PrismError::Policy(
+                "cannot rewrap: this store has no key service configured".into(),
+            )
+        })?;
+        let active_key_id = keys.active_key_id()?;
+        let mut report = RewrapReport {
+            backend: keys.backend().to_string(),
+            active_key_id: active_key_id.clone(),
+            ..Default::default()
+        };
+
+        for part_id in self.snapshot()?.part_ids() {
+            let dir = self.store.part_dir(&part_id);
+            let reader = PartReader::open(&dir)?;
+            if !reader.is_encrypted() {
+                report.plaintext.push(part_id);
+                continue;
+            }
+            let envelope = reader.encryption_envelope().ok_or_else(|| {
+                prism_types::error::PrismError::Corrupt(format!(
+                    "part {part_id} sets the encryption feature but carries no envelope"
+                ))
+            })?;
+            report.examined += 1;
+            if envelope.wrapping_key_id == active_key_id {
+                report.already_current.push(part_id);
+                continue;
+            }
+
+            // Unwrap under the id the part names -- as given, never probed -- and wrap under the
+            // active key. The DEK itself is unchanged, so every block this part holds stays sealed
+            // under exactly the key that sealed it.
+            let dek = keys.unwrap(&envelope.wrapping_key_id, &envelope.wrapped_dek)?;
+            let (wrapping_key_id, wrapped_dek) = keys.wrap(&dek)?;
+            prism_part::part::rewrap_part_envelope(
+                &dir,
+                &prism_part::ext::S14Ext {
+                    wrapping_key_id,
+                    wrapped_dek,
+                    ..envelope
+                },
+            )?;
+            report.rewrapped.push(part_id);
+        }
+
+        // The cache is keyed on the *old* envelope's key id, so a resident entry would keep serving
+        // reads that no longer reflect what is on disk. Correct either way, but a rewrap that left
+        // stale key state resident is the kind of thing that only shows up after a retire.
+        self.dek_cache.clear()?;
+        Ok(report)
+    }
+
+    /// Every wrapping key some live envelope still needs, and how many envelopes need it.
+    ///
+    /// Counts **published parts and the local admission log**, because both hold wrapped DEKs and
+    /// both are things a retire could make unreadable. The WAL is scanned without opening a single
+    /// record: a sealed frame names its wrapping key in the clear precisely so this question is
+    /// answerable without the key it is asking about.
+    pub fn wrapping_keys_in_use(&self) -> Result<std::collections::BTreeMap<String, usize>> {
+        let mut counts: std::collections::BTreeMap<String, usize> = Default::default();
+        for part_id in self.snapshot()?.part_ids() {
+            let reader = PartReader::open(&self.store.part_dir(&part_id))?;
+            if let Some(envelope) = reader.encryption_envelope() {
+                *counts.entry(envelope.wrapping_key_id).or_default() += 1;
+            }
+        }
+        let wal_dir = self.store.root.join("wal");
+        if crate::wal::exists(&wal_dir) {
+            for key_id in crate::wal::Wal::open(&wal_dir)?.wrapping_key_ids()? {
+                *counts.entry(key_id).or_default() += 1;
+            }
+        }
+        Ok(counts)
+    }
+
+    /// Refuse to retire a wrapping key while any live envelope still needs it
+    /// ([encryption contract §9](../../../docs/ENCRYPTION-CONTRACT.md)).
+    ///
+    /// The same shape as refusing to retire a generation a retained snapshot still names: the
+    /// software will not let an operator make its own data unreadable by a single command, and the
+    /// refusal names how many envelopes are in the way so the answer is "run the rewrap", not
+    /// "try harder".
+    pub fn assert_key_retirable(&self, key_id: &str) -> Result<()> {
+        match self.wrapping_keys_in_use()?.get(key_id) {
+            None | Some(0) => Ok(()),
+            Some(n) => Err(prism_types::error::PrismError::Invalid(format!(
+                "refusing to retire wrapping key `{key_id}`: {n} live envelope(s) still need it to \
+                 unwrap. Rewrap them under the active key first — retiring now would make data \
+                 this store is serving unreadable."
+            ))),
+        }
     }
 
     /// Override the cold-tier object store (a fresh cache, a fault-injecting backend, or an
