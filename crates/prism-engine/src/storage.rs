@@ -71,8 +71,8 @@ pub mod ownership;
 pub mod s3;
 pub mod sigv4;
 pub use hydrate::{
-    BackedFile, BackupReport, HydrationPlan, HydrationReport, PartBackup, ShardPlacement,
-    BACKUP_MANIFEST_FILE,
+    BackedFile, BackupReport, HydrationPlan, HydrationReport, PartBackup, ReceiptTenants,
+    SealedTenants, ShardPlacement, BACKUP_MANIFEST_FILE,
 };
 pub use object::{
     BlockCache, CacheStats, CachedObjectStore, FaultConfig, FaultStore, LocalObjectStore,

@@ -85,6 +85,15 @@ pub fn unwrap_dek(
 const WRAP_DOMAIN: &str = "\u{0}prism-key-wrap";
 const WRAP_COLUMN: &str = "\u{0}dek";
 
+/// The reserved column name under which a backup receipt's tenant list is sealed
+/// ([encryption contract §6](../../../docs/ENCRYPTION-CONTRACT.md)).
+///
+/// NUL-prefixed for the same reason [`WRAP_COLUMN`] is: a real column is named after a field
+/// (`body.data`, `attr.gen_ai.system`) and can never begin with a NUL, so a sealed tenant list can
+/// never be substituted for a data block, nor a data block for it. The AAD already binds the part
+/// id, so a receipt's tenant list is also non-transplantable between parts.
+pub const RECEIPT_TENANTS_COLUMN: &str = "\u{0}backup-receipt-tenants";
+
 /// A cipher over a data encryption key held in memory.
 ///
 /// The plaintext key exists here and nowhere else — never in a manifest, a receipt, a log, a metric,

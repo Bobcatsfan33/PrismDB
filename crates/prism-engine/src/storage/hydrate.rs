@@ -46,21 +46,151 @@ pub struct BackedFile {
     pub sha256: String,
 }
 
+/// The tenant list of an encrypted part's receipt: ciphertext, plus the plaintext facts the restore
+/// path must read *before* it can unwrap anything ([encryption contract §6](../../../../docs/ENCRYPTION-CONTRACT.md)).
+///
+/// The DEK here is the **part's own**, carried in wrapped form. Reusing it rather than minting a
+/// second key means a receipt introduces no key material that did not already exist, and that the
+/// receipt is openable by exactly the principal who could already read the part — no more, no less.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SealedTenants {
+    /// Which placement this part belongs to. **This is what routing is a function of**, so the
+    /// wrong-shard refusal keeps working with no key at all — see [`ShardPlacement::owns_ordinal`].
+    pub bucket_ordinal: u64,
+    /// Versioned, so a cipher this build does not implement is refused rather than guessed.
+    pub algorithm: u16,
+    /// The **explicit** id of the wrapping key. Never inferred, never defaulted.
+    pub wrapping_key_id: String,
+    pub dek_epoch: u64,
+    /// The part's DEK, wrapped. Useless without the key service.
+    pub wrapped_dek: Vec<u8>,
+    /// The tenant names, sealed under [`prism_part::crypto::RECEIPT_TENANTS_COLUMN`].
+    pub ciphertext: Vec<u8>,
+}
+
+/// How a receipt names the tenants whose rows a part holds.
+///
+/// Two cases, not one field plus a flag: "encrypted, but the plaintext list is still populated" is
+/// the exact bug this closes, and a borrowed view that cannot express it is a better guarantee than
+/// a rule somebody has to remember.
+#[derive(Clone, Copy, Debug)]
+pub enum ReceiptTenants<'a> {
+    /// An unencrypted store: the names ride in the clear, exactly as they always did.
+    Plain(&'a [String]),
+    /// An encrypted store: the names are ciphertext and only the ordinal is legible.
+    Sealed(&'a SealedTenants),
+}
+
 /// A part's backup receipt — the set of files that together *are* the part, plus the compatibility
 /// facts a restore must check before installing it.
+///
+/// **The tenant fields are private on purpose.** A receipt is the one artifact of an encrypted store
+/// that is *designed* to be read without a key, which makes it the easiest place to leak the
+/// DATA-01 metadata gap back open. Construction goes through [`PartBackup::plain`] or
+/// [`PartBackup::sealed`], so there is no way to write a receipt that is both.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PartBackup {
     pub part_id: String,
     /// The generation this part's vectors were embedded under. A restore set that cannot produce
     /// this exact generation is refused — never mix generations ([D-072](../../../../docs/DECISIONS.md)).
     pub generation_id: String,
-    /// The tenants whose rows this part holds — checked against the shard's own placement so a part
-    /// that belongs to another shard is refused rather than opened.
-    pub tenants: Vec<String>,
+    /// The tenants whose rows this part holds, **in the clear** — populated only for an unencrypted
+    /// store. Left empty when the names are sealed, and `default` on read so a receipt written
+    /// before encryption existed still parses and still restores.
+    #[serde(default)]
+    tenants: Vec<String>,
+    /// Present exactly when the store is encrypted. Skipped on write when absent, so a plaintext
+    /// store's receipt is byte-identical to the one it wrote before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sealed_tenants: Option<SealedTenants>,
     pub files: Vec<BackedFile>,
 }
 
 impl PartBackup {
+    /// The receipt of an unencrypted part.
+    pub fn plain(
+        part_id: impl Into<String>,
+        generation_id: impl Into<String>,
+        tenants: Vec<String>,
+        files: Vec<BackedFile>,
+    ) -> Self {
+        Self {
+            part_id: part_id.into(),
+            generation_id: generation_id.into(),
+            tenants,
+            sealed_tenants: None,
+            files,
+        }
+    }
+
+    /// The receipt of an encrypted part: no tenant named in the clear.
+    pub fn sealed(
+        part_id: impl Into<String>,
+        generation_id: impl Into<String>,
+        sealed: SealedTenants,
+        files: Vec<BackedFile>,
+    ) -> Self {
+        Self {
+            part_id: part_id.into(),
+            generation_id: generation_id.into(),
+            tenants: Vec::new(),
+            sealed_tenants: Some(sealed),
+            files,
+        }
+    }
+
+    /// How this receipt names its tenants.
+    ///
+    /// A receipt carrying both forms is corrupt, not a merge: it would mean the writer sealed the
+    /// names and then also wrote them out, which is the leak itself.
+    pub fn tenants(&self) -> Result<ReceiptTenants<'_>> {
+        match &self.sealed_tenants {
+            Some(_) if !self.tenants.is_empty() => Err(PrismError::Corrupt(format!(
+                "backup receipt for part `{}` carries {} tenant name(s) in plaintext *and* a sealed \
+                 tenant list; a receipt that seals its tenants and then also names them has \
+                 defeated the sealing",
+                self.part_id,
+                self.tenants.len()
+            ))),
+            Some(s) => Ok(ReceiptTenants::Sealed(s)),
+            None => Ok(ReceiptTenants::Plain(&self.tenants)),
+        }
+    }
+
+    /// The tenant names this part holds, opening the sealed list when there is one.
+    ///
+    /// Needs the key for an encrypted part, and says so by failing rather than by returning the
+    /// empty list — "no tenants" and "I cannot read the tenants" are different facts.
+    pub fn open_tenants(
+        &self,
+        cipher: Option<&prism_part::crypto::BlockCipher>,
+    ) -> Result<Vec<String>> {
+        match self.tenants()? {
+            ReceiptTenants::Plain(t) => Ok(t.to_vec()),
+            ReceiptTenants::Sealed(s) => {
+                let cipher = cipher.ok_or_else(|| {
+                    PrismError::Policy(format!(
+                        "the tenant list of part `{}`'s backup receipt is sealed under key `{}`; \
+                         reading it needs the key service",
+                        self.part_id, s.wrapping_key_id
+                    ))
+                })?;
+                let plain = cipher.open(
+                    &self.part_id,
+                    prism_part::crypto::RECEIPT_TENANTS_COLUMN,
+                    0,
+                    &s.ciphertext,
+                )?;
+                serde_json::from_slice(&plain).map_err(|e| {
+                    PrismError::Corrupt(format!(
+                        "the sealed tenant list of part `{}` decrypted but will not parse: {e}",
+                        self.part_id
+                    ))
+                })
+            }
+        }
+    }
+
     /// Total backed-up bytes, for the recovery-time receipt.
     pub fn total_bytes(&self) -> u64 {
         self.files.iter().map(|f| f.len).sum()
@@ -88,14 +218,23 @@ pub struct ShardPlacement {
 }
 
 impl ShardPlacement {
-    /// The same routing the cluster uses: a function of the bucket, not the tenant, so a whole
-    /// bucket lives on one shard.
-    pub fn owns(&self, tenant: &str) -> bool {
+    /// Routing, on the bucket ordinal alone.
+    ///
+    /// **This is the whole reason the envelope stores an ordinal rather than tenant names.** The
+    /// restore path must decide "does this part belong here?" *before* it has unwrapped anything —
+    /// and routing was never a function of the tenant name, only of the bucket that name hashes to.
+    /// So the wrong-shard refusal loses nothing by going keyless.
+    pub fn owns_ordinal(&self, ordinal: u64) -> bool {
         if self.shard_count == 0 {
             return false;
         }
-        let ordinal = bucket_ordinal(&self.scheme, &self.scheme.bucket_of(tenant));
         (ordinal % self.shard_count as u64) as usize == self.shard_id
+    }
+
+    /// The same routing the cluster uses: a function of the bucket, not the tenant, so a whole
+    /// bucket lives on one shard.
+    pub fn owns(&self, tenant: &str) -> bool {
+        self.owns_ordinal(bucket_ordinal(&self.scheme, &self.scheme.bucket_of(tenant)))
     }
 }
 
@@ -206,11 +345,47 @@ impl Engine {
             });
         }
 
-        let receipt = PartBackup {
-            part_id: part_id.to_string(),
-            generation_id: reader.manifest.generation_id.clone(),
-            tenants: reader.manifest.tenants.clone(),
-            files,
+        // The tenant list is the DATA-01 gap in receipt form: a receipt is *designed* to be read
+        // without a key, so an encrypted store that names its tenants here has disclosed which
+        // tenants exist and which share a bucket to anyone holding the bucket — without decrypting
+        // a row. Seal it, and keep exactly the ordinal the routing check needs (§6).
+        let generation_id = reader.manifest.generation_id.clone();
+        let sealing: Option<std::sync::Arc<prism_part::crypto::BlockCipher>> =
+            self.cipher_for(&reader)?;
+        let receipt = match sealing {
+            None => PartBackup::plain(
+                part_id,
+                generation_id,
+                reader.manifest.tenants.clone(),
+                files,
+            ),
+            Some(cipher) => {
+                let envelope = reader.encryption_envelope().ok_or_else(|| {
+                    PrismError::Corrupt(format!(
+                        "part `{part_id}` is encrypted but carries no envelope to back up"
+                    ))
+                })?;
+                let plain = serde_json::to_vec(&reader.manifest.tenants)?;
+                let ciphertext = cipher.seal(
+                    part_id,
+                    prism_part::crypto::RECEIPT_TENANTS_COLUMN,
+                    0,
+                    &plain,
+                )?;
+                PartBackup::sealed(
+                    part_id,
+                    generation_id,
+                    SealedTenants {
+                        bucket_ordinal: envelope.bucket_ordinal,
+                        algorithm: envelope.algorithm,
+                        wrapping_key_id: envelope.wrapping_key_id,
+                        dek_epoch: envelope.dek_epoch,
+                        wrapped_dek: envelope.wrapped_dek,
+                        ciphertext,
+                    },
+                    files,
+                )
+            }
         };
 
         // A crash here leaves a complete file set with no receipt: still "not backed up", still
@@ -319,14 +494,35 @@ impl Engine {
                     receipt.part_id
                 )));
             }
+            // The wrong-shard refusal, and it is **keyless in both forms**. A plaintext receipt
+            // routes on its tenant names; a sealed one routes on the bucket ordinal, which is what
+            // routing was always a function of. Encryption must not cost this check — a restore
+            // that installed a foreign shard's parts because it could not read their tenant names
+            // would be the DATA-01 fix buying a routing fault.
             if let Some(p) = placement {
-                if let Some(foreign) = receipt.tenants.iter().find(|t| !p.owns(t)) {
-                    return Err(PrismError::Invariant(format!(
-                        "refusing to hydrate part `{part_id}`: it holds tenant `{foreign}`, which \
-                         does not route to shard {} of {} — a part that arrived at the wrong shard \
-                         is a routing fault, not a part to restore",
-                        p.shard_id, p.shard_count
-                    )));
+                match receipt.tenants()? {
+                    ReceiptTenants::Plain(tenants) => {
+                        if let Some(foreign) = tenants.iter().find(|t| !p.owns(t)) {
+                            return Err(PrismError::Invariant(format!(
+                                "refusing to hydrate part `{part_id}`: it holds tenant \
+                                 `{foreign}`, which does not route to shard {} of {} — a part that \
+                                 arrived at the wrong shard is a routing fault, not a part to \
+                                 restore",
+                                p.shard_id, p.shard_count
+                            )));
+                        }
+                    }
+                    ReceiptTenants::Sealed(s) => {
+                        if !p.owns_ordinal(s.bucket_ordinal) {
+                            return Err(PrismError::Invariant(format!(
+                                "refusing to hydrate part `{part_id}`: it belongs to bucket \
+                                 ordinal {}, which does not route to shard {} of {} — a part that \
+                                 arrived at the wrong shard is a routing fault, not a part to \
+                                 restore",
+                                s.bucket_ordinal, p.shard_id, p.shard_count
+                            )));
+                        }
+                    }
                 }
             }
             wanted_generations.insert(receipt.generation_id.clone());
