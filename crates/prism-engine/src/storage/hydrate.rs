@@ -637,12 +637,40 @@ impl Engine {
 
             // A staged part must open before it is installed: the receipt proves the bytes are the
             // bytes that were backed up, and this proves they are a readable part (invariant 2).
-            PartReader::open(&staging).map_err(|e| {
+            let staged = PartReader::open(&staging).map_err(|e| {
                 PrismError::Corrupt(format!(
                     "hydrated part `{}` verified byte-for-byte but does not open as a part: {e}",
                     receipt.part_id
                 ))
             })?;
+
+            // **Decrypt, verify, then rename** — decryption sits *inside* the D-094 staging
+            // boundary ([encryption contract §8](../../../../docs/ENCRYPTION-CONTRACT.md)).
+            //
+            // What the receipt proved is *stored-byte integrity*: these are the bytes that were
+            // backed up. It did not, and could not, prove they are the right data — that check
+            // needs the key and happens when the AEAD tag is verified on read (§4a). Doing it here,
+            // in staging, is what makes the failure clean: a key service that is unreachable,
+            // denied, revoked, or simply does not hold this part's key refuses **before a single
+            // directory has been renamed into place**, so there is no partially-decrypted state to
+            // unwind and a retry after access returns starts from an untouched store.
+            //
+            // Deferring it to first query would install a store `CURRENT` names and nothing can
+            // serve — the same failure the generation ordering below exists to prevent.
+            if staged.is_encrypted() {
+                let cipher = self.cipher_for(&staged)?.ok_or_else(|| {
+                    PrismError::Corrupt(format!(
+                        "hydrated part `{}` sets the encryption feature but carries no envelope",
+                        receipt.part_id
+                    ))
+                })?;
+                staged.with_cipher(cipher).verify().map_err(|e| {
+                    PrismError::Corrupt(format!(
+                        "hydrated part `{}` restored byte-for-byte but will not decrypt: {e}",
+                        receipt.part_id
+                    ))
+                })?;
+            }
 
             let final_dir = self.store.part_dir(&receipt.part_id);
             if final_dir.exists() {
