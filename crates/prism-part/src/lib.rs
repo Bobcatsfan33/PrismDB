@@ -25,6 +25,7 @@ pub mod mmap;
 pub mod part;
 pub mod partition;
 pub mod store;
+pub mod tenant;
 pub mod testkeys;
 
 pub use catalog::{Catalog, PartEntry, Snapshot};
