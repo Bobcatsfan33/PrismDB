@@ -6,7 +6,7 @@
 //! remote-durable admission log; the read-only constructor remains incapable of mutation.
 
 use crate::ingestor::{IngestReport2, Ingestor};
-use crate::search::{ShardCandidate, ShardScored};
+use crate::search::{ShardCandidates, ShardScored};
 use crate::sharded::{Cluster, ReadShard};
 use crate::Engine;
 use prism_part::catalog::Snapshot;
@@ -28,7 +28,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-pub const SHARD_RPC_PROTOCOL_VERSION: u16 = 3;
+pub const SHARD_RPC_PROTOCOL_VERSION: u16 = 4;
 pub const MAX_SHARD_RPC_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_SHARD_RPC_SELECTIONS: usize = 10_000;
 pub const MAX_SHARD_RPC_CONNECTIONS: usize = 64;
@@ -106,7 +106,7 @@ enum RpcPayload {
     Snapshot(Snapshot),
     Validated(String),
     Search(Box<SearchResult>),
-    Candidates(Vec<ShardCandidate>),
+    Candidates(ShardCandidates),
     Rerank(Vec<ShardScored>),
     Materialize(Vec<(Event, u32)>),
     Ingest(IngestReport2),
@@ -786,7 +786,7 @@ impl TlsShardClient {
         }
     }
 
-    pub fn candidates(&self, snapshot: Snapshot, query: Query) -> Result<Vec<ShardCandidate>> {
+    pub fn candidates(&self, snapshot: Snapshot, query: Query) -> Result<ShardCandidates> {
         match self.call(RpcOperation::Candidates { snapshot, query })? {
             RpcPayload::Candidates(candidates) => Ok(candidates),
             _ => Err(invalid_transport(
@@ -914,7 +914,7 @@ impl ReadShard for TlsShardClient {
         TlsShardClient::validate_snapshot(self, snapshot.clone())
     }
 
-    fn candidates(&self, snapshot: &Snapshot, query: &Query) -> Result<Vec<ShardCandidate>> {
+    fn candidates(&self, snapshot: &Snapshot, query: &Query) -> Result<ShardCandidates> {
         TlsShardClient::candidates(self, snapshot.clone(), query.clone())
     }
 
@@ -1992,8 +1992,9 @@ mod tests {
         let complete = client.search_at(snapshot.clone(), query.clone()).unwrap();
         assert!(!complete.hits.is_empty());
         let candidates = client.candidates(snapshot.clone(), query.clone()).unwrap();
-        assert!(!candidates.is_empty());
+        assert!(!candidates.candidates.is_empty());
         let selected: Vec<_> = candidates
+            .candidates
             .iter()
             .map(|candidate| (candidate.part_id.clone(), candidate.row))
             .collect();

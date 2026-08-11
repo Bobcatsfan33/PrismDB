@@ -38,7 +38,7 @@ pub(crate) trait ReadShard: Sync {
         &self,
         snapshot: &prism_part::catalog::Snapshot,
         query: &Query,
-    ) -> Result<Vec<crate::search::ShardCandidate>>;
+    ) -> Result<crate::search::ShardCandidates>;
     fn rerank(
         &self,
         snapshot: &prism_part::catalog::Snapshot,
@@ -69,7 +69,7 @@ impl ReadShard for Engine {
         &self,
         snapshot: &prism_part::catalog::Snapshot,
         query: &Query,
-    ) -> Result<Vec<crate::search::ShardCandidate>> {
+    ) -> Result<crate::search::ShardCandidates> {
         self.search_candidates(snapshot, query)
     }
 
@@ -665,6 +665,7 @@ impl Cluster {
         // Hedging bookkeeping (D-079): total fragments in flight (the blast radius) and hedges issued.
         let mut inflight = 0usize;
         let mut hedges = 0usize;
+        let mut threshold_overfetch = 0usize;
 
         // --- round 1: candidates from every shard, merged to the global set ---
         // (dist, event_id, shard, part_id, row)
@@ -675,7 +676,7 @@ impl Cluster {
         // in shard order afterwards, so the merge is byte-identical to a sequential fan-out (the sort
         // erases arrival order regardless). A 1-shard cluster spawns one thread — negligible overhead.
         let initially_missing: BTreeSet<usize> = missing.iter().map(|entry| entry.shard).collect();
-        let round1: Vec<(usize, Result<Vec<crate::search::ShardCandidate>>)> =
+        let round1: Vec<(usize, Result<crate::search::ShardCandidates>)> =
             std::thread::scope(|scope| {
                 let handles: Vec<_> = shards
                     .iter()
@@ -714,7 +715,14 @@ impl Cluster {
                     maybe_hedge(si, &cands, &mut inflight, &mut hedges, || {
                         shards[si].candidates(&snaps[si], q)
                     })?;
-                    for cand in cands {
+                    // **Fold in the shard's counter contribution.** The overfetch is produced by the
+                    // candidate collector inside each shard (§22); a coordinator that built its
+                    // counters from scratch reported 0 for every cluster query while the contract
+                    // called the number monitored. Summing is the right fold: each shard bounds its
+                    // own candidates by `2(1−τ)+ε`, so the query's overfetch is the total the exact τ
+                    // will prune back.
+                    threshold_overfetch += cands.threshold_overfetch;
+                    for cand in cands.candidates {
                         global.push((cand.dist, cand.event_id, si, cand.part_id, cand.row));
                     }
                 }
@@ -850,6 +858,7 @@ impl Cluster {
             exact_bytes_fetched,
             object_requests,
             hedges_issued: hedges,
+            threshold_overfetch,
             ..Default::default()
         };
 

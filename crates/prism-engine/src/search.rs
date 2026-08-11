@@ -176,6 +176,21 @@ pub struct ShardCandidate {
     pub row: usize,
 }
 
+/// What one shard contributes to round 1: its bounded candidates **and the counter contribution the
+/// coordinator must fold in**.
+///
+/// The counter is here rather than derived later because it cannot be: `threshold_overfetch` is
+/// produced by the candidate collector inside the shard ([query §22](../../../docs/QUERY-CONTRACT.md)),
+/// and a coordinator that built its counters from scratch reported **0 for every cluster query**
+/// while §22 called the overfetch a monitored number. A number that is only true on the single-node
+/// path is worse than no number, because the dashboard cannot tell which path produced it.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ShardCandidates {
+    pub candidates: Vec<ShardCandidate>,
+    /// Candidates the relaxed threshold bound admitted that the exact τ will prune (§22).
+    pub threshold_overfetch: usize,
+}
+
 /// A round-2 exact score from a shard: the exact rerank score, the `event_id`, the `(part_id, row)`
 /// handle, and the exact vector (which the coordinator needs only for a semantic `GROUP BY`).
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -1260,11 +1275,14 @@ impl Engine {
         &self,
         snap: &prism_part::catalog::Snapshot,
         q: &Query,
-    ) -> Result<Vec<ShardCandidate>> {
+    ) -> Result<ShardCandidates> {
         match self.candidate_phase(snap, q)? {
             CandidatePhase::Done(r) => {
                 if r.hits.is_empty() && r.bridge.is_none() {
-                    Ok(Vec::new())
+                    Ok(ShardCandidates {
+                        candidates: Vec::new(),
+                        threshold_overfetch: r.counters.threshold_overfetch,
+                    })
                 } else {
                     Err(PrismError::Invalid(
                         "a cross-tenant cluster query that spans two embedding spaces (a bridge) is \
@@ -1291,16 +1309,19 @@ impl Engine {
                         eid.insert((*pi, *row), id);
                     }
                 }
-                Ok(cs
-                    .candidates
-                    .iter()
-                    .map(|cand| ShardCandidate {
-                        dist: cand.dist,
-                        event_id: eid[&(cand.part as usize, cand.row as usize)].clone(),
-                        part_id: eligible[cand.part as usize].manifest.part_id.clone(),
-                        row: cand.row as usize,
-                    })
-                    .collect())
+                Ok(ShardCandidates {
+                    threshold_overfetch: cs.counters.threshold_overfetch,
+                    candidates: cs
+                        .candidates
+                        .iter()
+                        .map(|cand| ShardCandidate {
+                            dist: cand.dist,
+                            event_id: eid[&(cand.part as usize, cand.row as usize)].clone(),
+                            part_id: eligible[cand.part as usize].manifest.part_id.clone(),
+                            row: cand.row as usize,
+                        })
+                        .collect(),
+                })
             }
         }
     }

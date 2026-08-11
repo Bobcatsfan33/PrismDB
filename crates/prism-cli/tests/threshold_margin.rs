@@ -28,6 +28,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static N: AtomicU64 = AtomicU64::new(0);
 
+/// `inject_threshold_margin` is a **process-global** seam, and cargo runs the tests in this binary
+/// in parallel — so a test that forces a margin corrupts any concurrent test's measurement. Every
+/// test here takes this lock for its whole body. Found the honest way: the aggregation gate below
+/// passed alone and failed in-file, which is the signature of exactly this hazard.
+static SEAM: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn tmp(tag: &str) -> PathBuf {
     let n = N.fetch_add(1, Ordering::SeqCst);
     let p = std::env::temp_dir().join(format!("prism-thm-{}-{}-{}", tag, std::process::id(), n));
@@ -98,6 +104,7 @@ fn fp(r: &SearchResult) -> Vec<(String, u32)> {
 
 #[test]
 fn a_threshold_query_is_bounded_by_the_threshold_and_the_mechanism_holds_at_injected_margins() {
+    let _seam = SEAM.lock().unwrap_or_else(|e| e.into_inner());
     // Always start and end with the injection seam disarmed, so no other test in this binary — and no
     // stage of this one — inherits a forced margin.
     prism_engine::search::inject_threshold_margin(None, None);
@@ -244,6 +251,7 @@ fn a_threshold_query_is_bounded_by_the_threshold_and_the_mechanism_holds_at_inje
 /// the under-`k` regime, so it asserts that it is, rather than assuming a fixture keeps it there.
 #[test]
 fn the_exact_threshold_prune_is_observable_in_both_regimes_at_every_shard_count() {
+    let _seam = SEAM.lock().unwrap_or_else(|e| e.into_inner());
     prism_engine::search::inject_threshold_margin(None, None);
 
     let n_hot = 60usize;
@@ -364,4 +372,55 @@ fn the_exact_threshold_prune_is_observable_in_both_regimes_at_every_shard_count(
         failures.len(),
         failures.join("\n  - ")
     );
+}
+
+/// **The overfetch counter is true in a cluster, not just on a single engine** ([query §22](../../../../docs/QUERY-CONTRACT.md)).
+///
+/// §22 calls `threshold_overfetch` a **monitored number** — the observable that makes ε's adequacy
+/// checkable rather than hoped for. It was true only single-node: the collector produces it inside
+/// each shard, and the coordinator built its counters with `..Default::default()`, so **every cluster
+/// query reported 0**. A number that silently depends on which path produced it is worse than no
+/// number, because a dashboard cannot tell the difference — the overfetch would have read as
+/// "margin is never exercised" for exactly the deployment shape the margin exists for.
+///
+/// The fold is a sum: each shard bounds its own candidates by `2(1−τ) + ε` (D-074), so the query's
+/// overfetch is the total the exact τ prunes back. Sharding is a layout, so the total must equal the
+/// single engine's over the identical corpus — at every shard count.
+#[test]
+fn the_threshold_overfetch_counter_is_aggregated_across_shards() {
+    let _seam = SEAM.lock().unwrap_or_else(|e| e.into_inner());
+    prism_engine::search::inject_threshold_margin(None, None);
+    let n_hot = 60usize;
+    let tau = 0.5f32;
+
+    let single = Engine::init(&tmp("agg-single"), config()).unwrap();
+    single.ingest(corpus(n_hot), TS).unwrap();
+    let expected = single
+        .search(&threshold_query(tau))
+        .unwrap()
+        .counters
+        .threshold_overfetch;
+
+    // ARMED: the counter must be nonzero, or "equal" would be satisfied by two zeros and this test
+    // would certify the very bug it exists to catch.
+    assert!(
+        expected > 0,
+        "not armed: the single engine overfetched nothing on this corpus, so 0 == 0 would pass \
+         while the coordinator still reported nothing"
+    );
+
+    for n in [1usize, 2, 4] {
+        let cluster = Cluster::init(&tmp(&format!("agg-{n}")), n, config()).unwrap();
+        cluster.ingest(corpus(n_hot), TS).unwrap();
+        let got = cluster
+            .search(&threshold_query(tau))
+            .unwrap()
+            .counters
+            .threshold_overfetch;
+        assert_eq!(
+            got, expected,
+            "{n}-shard: threshold_overfetch is {got}, single engine reports {expected} — the \
+             coordinator is not folding in each shard's contribution"
+        );
+    }
 }
