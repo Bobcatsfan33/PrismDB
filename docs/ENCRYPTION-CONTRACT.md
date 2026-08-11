@@ -154,6 +154,41 @@ plaintext tenant names it never actually needed.
 > `generations/`. Closing the remaining two is metadata work, not row-confidentiality work, and it
 > is listed unticked below rather than folded into a claim it has not earned.
 
+## 6a. Tenant identity at rest is a keyed token ([D-096](DECISIONS.md))
+
+§6 named two surfaces it did not close: the **part manifest**'s tenant list and `TenantStats`, and the
+**catalog mirror**'s `PartEntry::Located.tenants`. Both are closed here, and the mechanism is fixed by
+what the read path actually needs.
+
+**Routing and pruning need tenant *equality*, not tenant *identity*.** The catalog asks "is this
+part's tenant the one I am querying for?" and "do these rows belong to the same tenant?" — both
+answered by comparing opaque handles. No read path recovers a name, so no stored field needs to
+contain one.
+
+**The token.** `HMAC-SHA256(store_tenant_key, tenant_name)`, truncated to 128 bits, where
+`store_tenant_key` is **store-scoped and derived from the existing key hierarchy** (§1). No new
+custody, no new ceremony, nothing extra to rotate.
+
+> **An unkeyed hash is forbidden.** Tenant names are **low-entropy** — short, human-chosen, drawn
+> from a small realistic space, and usually *already known* to whoever holds the disk. Their question
+> is not "who exists in the world" but "**which of them are on this box, and which share a bucket**".
+> A bare `SHA-256(tenant)` answers that by **dictionary lookup**: precompute every plausible name and
+> the map inverts completely. An unkeyed digest is also **identical in every deployment**, so it
+> correlates the same tenant across stores, backups and customers — a global join key wearing the
+> costume of a protection. The keyed construction defeats both, and because the key is store-scoped,
+> **the same tenant tokenizes differently in different stores** — asserted by a gate, not claimed.
+
+**What stays plaintext, unchanged.** The **bucket ordinal** (§6): hydration's wrong-shard refusal
+must work before anything is unwrapped, routing is a function of the bucket and never of the name, and
+an ordinal identifies placement without naming a tenant.
+
+**What the token is not.** It authorizes nothing. Tenant authorization stays exact-certificate policy
+at the service boundary, above the engine.
+
+**The residual leak, named.** Token *equality* is still visible: an attacker without the key can see
+that some tenant occupies N parts and shares a bucket with some other tenant. Sealing identity is not
+sealing the existence of distinct tenants, and nothing here claims it is.
+
 ## 7. Key material never appears anywhere it can be read later
 
 Plaintext DEKs live in a **bounded cache, zeroized on drop**, and nowhere else. Key material — DEKs
@@ -275,9 +310,9 @@ without unwrapping anything.
       *wrapping* still binds the wrapping key id, because there the key in question really is the
       wrapping key.
 - [x] **Backup-receipt** sensitive fields encrypted; bucket ordinal stays plaintext
-- [ ] **Manifest** sensitive fields encrypted (tenant list, `TenantStats`) — see the DATA-01 note
-      in §6; the receipt is closed, the manifest is not
-- [ ] **Catalog mirror** `PartEntry` tenant list encrypted or ordinal-ised — same note
+- [ ] **Manifest** sensitive fields sealed (tenant list, `TenantStats`) — **designed** as the §6a
+      keyed token ([D-096](DECISIONS.md)); not yet implemented
+- [ ] **Catalog mirror** `PartEntry` tenant list sealed — same design, same state
 - [x] Remote WAL payload encryption — **and the local admission log too**, which the coverage table
       did not name. The local WAL holds the same acked-but-unpublished rows on node-local disk, so
       §5's "plaintext never touches disk" would have been false with only the remote one sealed.

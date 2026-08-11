@@ -1494,3 +1494,69 @@ Everything gated is **software-keystore-backed** unless a live-KMS run is record
 which. A staging run proves the *code*, not the *custody*. The **key ceremony remains external**
 (Enterprise PKI), and no gate here claims otherwise. Retention and deletion lifecycle (P13) and
 independent-host evidence (P14) are untouched.
+
+---
+
+## D-096 — Tenant identity at rest is a keyed token, not a name and never a bare hash
+
+**S14 DATA-01 metadata increment, design first**, on the same discipline as [D-095](#d-095--per-tenant-envelope-encryption-tenant-scoped-deks-a-vetted-aead-per-block-and-a-key-id-in-every-header):
+the normative rules live in the [encryption contract](ENCRYPTION-CONTRACT.md) §6a, and the settled
+inputs are recorded here and are **not reopened by the implementation**.
+
+### What is still legible, and why that is the whole problem
+
+Row content is sealed and stays sealed — that half is done and this decision does not touch it. What
+D-095 left readable was **metadata**, and the encrypted D-094 drill's own scan proves the shape of the
+remainder: it asserts no *event body* appears in any object, and says nothing about tenant names,
+because tenant names are still there. Two surfaces:
+
+- the **part manifest**'s tenant list and its per-tenant `TenantStats`;
+- the **catalog mirror**'s `PartEntry::Located.tenants`.
+
+So raw bucket or disk access discloses **which tenants exist and which share a bucket** — customer
+identities and a rough co-tenancy map — while disclosing nothing about what any of them recorded.
+That is the DATA-01 remainder stated precisely, and it is the thing this decision closes.
+
+### The decisions
+
+- **Tenant identity at rest becomes a keyed token.** Routing and pruning need tenant **equality**,
+  never tenant **identity**: the catalog asks *"is this part's tenant the one I am querying for?"* and
+  *"do these rows belong to the same tenant?"*. Both are answered by comparing opaque tokens. Nothing
+  in the read path needs to recover the name, so nothing stored needs to contain it.
+- **The token is `HMAC-SHA256(store_tenant_key, tenant_name)`, truncated to 128 bits**, under a
+  **store-scoped key derived from the existing hierarchy** — the same key service D-095 already
+  requires, so this introduces no new custody, no new ceremony, and no second thing to rotate
+  independently.
+- **An unkeyed hash is forbidden, and the reason is not stylistic.** Tenant names are
+  **low-entropy**: they are short, human-chosen, drawn from a small realistic space (`acme`, `t1`,
+  a customer's own name), and frequently *known to the attacker already* — the person holding a
+  disk image usually knows who the customers are and is trying to learn **which of them are on this
+  box** and **which share a bucket**. A bare `SHA-256(tenant)` is therefore a **dictionary lookup**,
+  not a protection: precomputing the hash of every plausible name is trivial and the map inverts in
+  full. Worse, an unkeyed digest is **identical across every deployment**, so tokens correlate the
+  same tenant across stores, backups, and customers — turning the "protection" into a global join
+  key. The keyed construction defeats both: without the key the token is unforgeable and
+  uninvertible, and because the key is store-scoped **the same tenant tokenizes differently in
+  different stores**, which is asserted by a gate rather than left as a claim.
+- **The bucket ordinal stays plaintext.** That decision is made and recorded ([contract §6](ENCRYPTION-CONTRACT.md)):
+  hydration's wrong-shard refusal must work **before** anything is unwrapped, routing is a function of
+  the bucket and never of the tenant name, and an ordinal identifies placement without naming a
+  tenant. This increment does not reopen it.
+- **The token is not a capability.** It authorizes nothing and is not a secret to be checked against;
+  it is an opaque equality handle. Tenant authorization remains exact-certificate policy at the
+  service boundary, above the engine, unchanged.
+
+### What this costs, stated
+
+An operator reading raw bytes can no longer answer *"which tenants are in this part?"* — by design.
+Support and forensics that legitimately need the mapping need the key, which is the same posture as
+every other sealed field, and `prism inspect` through a key-service-configured process remains the
+supported door. **Token equality still leaks structure**: an attacker without the key can still see
+that *some* tenant occupies N parts and shares a bucket with *some other* tenant. Sealing identity is
+not sealing existence-of-distinct-tenants, and this decision does not claim it is.
+
+### What this decision does not claim
+
+It does not touch row-content sealing (done, D-095), the backup receipt's bucket ordinal
+(deliberately plaintext), retention/deletion (P13), or key custody — every gate here runs against the
+**software keystore**, proving the code path and not the custody, exactly as `EXT-KMS` records.
