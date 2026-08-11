@@ -754,6 +754,21 @@ impl Cluster {
         let mut object_requests = 0usize;
 
         // Fan out round 2 concurrently too — each owning shard exact-scores its own subset in parallel.
+        //
+        // The partials fold in **ascending shard id** — canonical order ([query §20](../../../docs/QUERY-CONTRACT.md)) —
+        // and the `BTreeMap` gives that for free rather than by convention.
+        //
+        // **Why nothing observable depends on it, recorded so the dependency is not forgotten.** A
+        // mutation that folds these in reverse is *live* — the pre-sort survivor sequence genuinely
+        // differs at 2 and 4 shards — and yet is caught by no test, because `finalize` sorts by score
+        // and then by the **unique** `event_id`. That comparator is **total**, so arrival order is
+        // erased before anything is returned, and the GROUP BY content seed is taken over *sorted*
+        // event_ids besides. Canonical folding is therefore a **consequence of C-4 totality**, not an
+        // independent guarantee.
+        //
+        // The wall it rests on is pinned by `the_c4_tie_break_is_total_over_merge_survivors`: if the
+        // comparator ever stopped being total, fold order would become observable immediately, and
+        // this line would go from redundant to load-bearing.
         let by_shard_vec: Vec<(usize, Vec<(String, usize)>)> = by_shard.into_iter().collect();
         let round2: Vec<Result<Vec<crate::search::ShardScored>>> = std::thread::scope(|scope| {
             let handles: Vec<_> = by_shard_vec

@@ -52,6 +52,11 @@ fn config() -> StoreConfig {
 const TS: i64 = 1_760_000_000_000;
 const HOT: &str = "the tool call timed out retrying";
 
+/// A thing that answers a query: a single engine, or a cluster at some shard count. Named because
+/// the boxed closure is otherwise a complex type, and the prune gate below runs the identical
+/// assertions against all four.
+type Answerer = (usize, Box<dyn Fn(&Query) -> SearchResult>);
+
 /// `n` events whose body is exactly the query text — so each scores ~1.0 and clears any reasonable
 /// threshold — spread across tenants, over a background of ordinary (low-scoring) Zipf events.
 fn corpus(n_hot: usize) -> Vec<prism_types::Event> {
@@ -214,4 +219,149 @@ fn a_threshold_query_is_bounded_by_the_threshold_and_the_mechanism_holds_at_inje
             "the threshold answer must be byte-identical to the single engine at {n} shards"
         );
     }
+}
+
+/// **The exact-τ prune in `finalize`, in the two regimes where it is observable** (§22, [D-074](../../../../docs/DECISIONS.md)).
+///
+/// A mutation sweep found that deleting `scored.retain(|s| s.score >= tau)` was caught by **nothing**
+/// across 158 tests — including the test above, whose own assertion reads *"every returned row must
+/// clear the exact threshold"*. The reason is not that the prune does nothing: a probe showed it
+/// removing **339 of 767** scored rows. It is that `hits` is `scored.iter().take(q.k)` over a vector
+/// already sorted by score descending, so **while more than `k` rows clear τ, every sub-τ row sorts
+/// below the top-`k` and is invisible** — 428 rows cleared τ against `k = 100`. The prune only shows
+/// through the answer in two regimes, and nothing exercised either:
+///
+/// - **(i) fewer than `k` rows clear τ** — the "fewer than `k` clearing it is the honest count" case
+///   the code comment names. Here the take cannot mask anything, because there is nothing past the
+///   qualifying set to take.
+/// - **(ii) a grouped threshold query** — `take` becomes `scored.len()` and, more to the point,
+///   `group` runs over `scored` *after* the prune, so the clustering sees exactly the qualifying set.
+///
+/// Both are asserted at 1, 2 and 4 shards, because the prune lives in the shared `finalize` that the
+/// coordinator also calls — a cluster must not resolve the bar differently from a single engine.
+///
+/// The armed traps matter more than usual here: this test is worthless unless it is genuinely *in*
+/// the under-`k` regime, so it asserts that it is, rather than assuming a fixture keeps it there.
+#[test]
+fn the_exact_threshold_prune_is_observable_in_both_regimes_at_every_shard_count() {
+    prism_engine::search::inject_threshold_margin(None, None);
+
+    let n_hot = 60usize;
+    let tau = 0.5f32;
+    // `k` deliberately far above the qualifying count, so the top-`k` truncation CANNOT hide a
+    // sub-τ row. This is regime (i) by construction, and the armed trap below proves it held.
+    let wide_k = 5_000usize;
+    let base = || {
+        let mut q = threshold_query(tau);
+        q.k = wide_k;
+        q.candidates = 400;
+        q.rerank = 400;
+        q
+    };
+
+    let single = Engine::init(&tmp("prune-single"), config()).unwrap();
+    single.ingest(corpus(n_hot), TS).unwrap();
+    // The prune-has-work precondition, measured where the counter is actually populated.
+    let overfetch_seen = single.search(&base()).unwrap().counters.threshold_overfetch;
+
+    let engines: Vec<Answerer> = {
+        let mut v: Vec<Answerer> = Vec::new();
+        let s = Engine::init(&tmp("prune-e0"), config()).unwrap();
+        s.ingest(corpus(n_hot), TS).unwrap();
+        v.push((0, Box::new(move |q: &Query| s.search(q).unwrap())));
+        for n in [1usize, 2, 4] {
+            let c = Cluster::init(&tmp(&format!("prune-c{n}")), n, config()).unwrap();
+            c.ingest(corpus(n_hot), TS).unwrap();
+            v.push((n, Box::new(move |q: &Query| c.search(q).unwrap())));
+        }
+        v
+    };
+
+    let mut failures: Vec<String> = Vec::new();
+    for (n, run) in &engines {
+        let where_ = if *n == 0 {
+            "single engine".to_string()
+        } else {
+            format!("{n} shards")
+        };
+
+        // --- regime (i): fewer than k rows clear τ -------------------------------------------------
+        let r = run(&base());
+        assert!(!r.hits.is_empty(), "[{where_}] regime (i) returned nothing");
+        // ARMED TRAP: we are genuinely under `k`. If this ever fails the regime stopped being
+        // exercised and every assertion below would be masked by the top-k take, exactly as before.
+        assert!(
+            r.hits.len() < wide_k,
+            "[{where_}] regime (i) is NOT armed: {} hits at k={wide_k} means the take could still \
+             be masking the prune",
+            r.hits.len()
+        );
+        // ARMED TRAP: there was something to prune. Established ONCE, on the single engine, over the
+        // identical corpus — because `threshold_overfetch` is set in the per-shard candidate phase
+        // (`search.rs`) and the coordinator builds its counters with `..Default::default()`, so a
+        // CLUSTER query always reports 0 for it. That is a real observability gap in its own right
+        // (§22 calls the overfetch "a monitored number") and is reported rather than papered over
+        // here; the arming below does not depend on it, and the catches are asserted on every engine.
+        assert!(
+            overfetch_seen > 0,
+            "the fixture is NOT armed: the single engine overfetched nothing, so the prune had no \
+             work to do on this corpus and a green result would prove nothing"
+        );
+        // THE CATCH: every returned row clears the exact bar.
+        let below: Vec<(String, f32)> = r
+            .hits
+            .iter()
+            .filter(|h| h.score < tau)
+            .map(|h| (h.event.event_id.clone(), h.score))
+            .collect();
+        if !below.is_empty() {
+            failures.push(format!(
+                "[{where_}] regime (i): {} returned row(s) do not clear τ={tau} — the \
+                 exact-threshold prune did not run: {:?}",
+                below.len(),
+                &below[..below.len().min(5)]
+            ));
+        }
+
+        // --- regime (ii): a grouped threshold query ------------------------------------------------
+        let mut gq = base();
+        gq.group_k = Some(4);
+        let g = run(&gq);
+        let clusters = g
+            .clusters
+            .as_ref()
+            .unwrap_or_else(|| panic!("[{where_}] regime (ii) produced no clusters"));
+        // ARMED TRAP: the grouped path really did cluster something.
+        let clustered: usize = clusters.iter().map(|c| c.count).sum();
+        assert!(
+            clustered > 0,
+            "[{where_}] regime (ii) is NOT armed: nothing was clustered"
+        );
+        // THE CATCH: the grouped answer obeys the same bar...
+        let g_below = g.hits.iter().filter(|h| h.score < tau).count();
+        if g_below != 0 {
+            failures.push(format!(
+                "[{where_}] regime (ii): {g_below} grouped row(s) do not clear τ={tau} — the prune \
+                 did not run before grouping"
+            ));
+        }
+        // ...and the clustering saw exactly the qualifying set, not the overfetched one. `group` runs
+        // over `scored` AFTER the prune, so this count is the prune's footprint on the grouped path.
+        if clustered != r.hits.len() {
+            failures.push(format!(
+                "[{where_}] regime (ii): grouping saw {clustered} rows but only {} clear τ — the \
+                 clustering ran over the overfetched set",
+                r.hits.len()
+            ));
+        }
+    }
+
+    // Collected, not aborted: every engine's verdict is visible in one run, so the prune's
+    // sensitivity at 1, 2 and 4 shards can never again be "unknown because the first one failed".
+    assert!(
+        failures.is_empty(),
+        "the exact-threshold prune is not holding — {} failure(s):\n  - {}",
+        failures.len(),
+        failures.join("\n  - ")
+    );
 }

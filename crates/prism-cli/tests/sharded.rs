@@ -416,6 +416,15 @@ fn a_pinned_snapshot_vector_hides_later_publications() {
 /// shards. The global merge must break those ties on `event_id`, so the cluster's order equals the
 /// single engine's and the tied run is `event_id`-ascending — at 2 and 4 shards, ties split across
 /// them.
+///
+/// **Scope, stated because the name over-promises and a mutation sweep proved it.** This covers tie
+/// **ordering in the output**. It does *not* cover which tied rows **survive the round-1 merge**:
+/// at `rerank = 120` over 40 tied rows the truncation never has to choose between them, and
+/// `finalize` re-sorts on `event_id` afterwards — so mutating the cross-shard comparator to break
+/// ties on *shard order* left this test **green**. Survival is covered by its sibling,
+/// [`c4_tie_break_decides_which_tied_rows_survive_round_one_not_just_their_order`], which narrows the
+/// width until the truncation must discriminate. Read the two together: this one is order, that one
+/// is survival, and only the pair covers what this one's name suggests on its own.
 #[test]
 fn c4_distance_ties_split_across_shards_resolve_on_event_id() {
     // Background so the generation trains on a realistic sample, plus the deliberately-tied events.
@@ -749,4 +758,122 @@ fn the_cross_shard_merge_is_a_layout_across_every_narrow_rerank_shape() {
         armed_variants.len(),
         failures.join("\n  - ")
     );
+}
+
+/// **The C-4 wire tie-break decides which tied rows SURVIVE round one — not merely their order.**
+///
+/// Sibling to `c4_distance_ties_split_across_shards_resolve_on_event_id`, which was found blind to a
+/// mutation of the very property its name claims. That test runs at `rerank = 120` over 40 tied
+/// events, so the round-1 truncation never has to choose between ties — every tied row survives
+/// whatever the comparator does, and `finalize` re-sorts on `event_id` afterwards, restoring the
+/// order it checks. It therefore covers tie **ordering** in the output and not tie **survival** at
+/// the merge boundary, which is where the cross-shard comparator actually decides anything.
+///
+/// This one narrows the width until the truncation must choose: 40 rows share a score and only
+/// `rerank = 12` may pass. With the C-4 comparator the survivors are the 12 lowest `event_id`s and a
+/// cluster agrees with a single engine; with a placement-dependent comparator the cluster keeps a
+/// different twelve and the answer changes while still *looking* well-ordered.
+#[test]
+fn c4_tie_break_decides_which_tied_rows_survive_round_one_not_just_their_order() {
+    let build = || {
+        let mut ev = prism_engine::corpus::generate(prism_engine::corpus::Kind::Zipf, 2000, 5);
+        ev.extend(matching_events(40, "surv")); // identical body → identical exact score
+        ev
+    };
+    let single = Engine::init(&tmp("surv-single"), config()).unwrap();
+    single.ingest(build(), TS).unwrap();
+
+    // Narrow: fewer survivors than tied rows, so the comparator must discriminate among equals.
+    let mut q = cross_tenant_query(None);
+    q.k = 8;
+    q.rerank = 12;
+    q.candidates = 400;
+    let g = single.search(&q).unwrap();
+
+    // ARMED TRAP: the tie must actually exceed the width, or nothing is being chosen between.
+    let tied_total = build()
+        .iter()
+        .filter(|e| e.event_id.starts_with("surv-"))
+        .count();
+    assert!(
+        tied_total > q.rerank,
+        "not armed: {tied_total} tied rows against rerank={} — the truncation never has to choose",
+        q.rerank
+    );
+
+    let mut failures = Vec::new();
+    for n in [1usize, 2, 4] {
+        let cluster = Cluster::init(&tmp(&format!("surv-{n}")), n, config()).unwrap();
+        cluster.ingest(build(), TS).unwrap();
+        let cr = cluster.search(&q).unwrap();
+        if hit_fp(&cr) != hit_fp(&g) {
+            failures.push(format!(
+                "{n}-shard: which tied rows survived round 1 depended on placement\n     cluster: {:?}\n      single: {:?}",
+                hit_fp(&cr),
+                hit_fp(&g)
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "the C-4 wire tie-break is not deciding survival by event_id — {} failure(s):\n  - {}",
+        failures.len(),
+        failures.join("\n  - ")
+    );
+}
+
+/// **The C-4 comparator is TOTAL over merge survivors — and that is what makes fold order invisible.**
+///
+/// Mutation (d) — folding the round-2 partials in reverse instead of ascending shard order — was
+/// caught by **nothing**, and a probe showed why: it is *live* (the pre-sort survivor order genuinely
+/// differs at 2 and 4 shards) but **unobservable**, because `finalize` sorts by score and then by the
+/// unique `event_id`, which is a **total** order. A total sort erases arrival order completely, so
+/// there is no answer-visible consequence for a test to catch.
+///
+/// That makes canonical-shard-order folding a consequence of C-4 totality rather than an independent
+/// guarantee — and it means the wall it rests on is exactly this: **if the comparator ever stopped
+/// being total, fold order would immediately become observable.** This test pins that wall, so the
+/// dependency is a checked fact rather than a comment.
+#[test]
+fn the_c4_tie_break_is_total_over_merge_survivors() {
+    let build = || {
+        let mut ev = prism_engine::corpus::generate(prism_engine::corpus::Kind::Zipf, 2000, 5);
+        ev.extend(matching_events(40, "total"));
+        ev
+    };
+    let mut q = cross_tenant_query(None);
+    q.k = 40;
+    q.rerank = 120;
+    q.candidates = 400;
+
+    for n in [1usize, 2, 4] {
+        let cluster = Cluster::init(&tmp(&format!("total-{n}")), n, config()).unwrap();
+        cluster.ingest(build(), TS).unwrap();
+        let hits = cluster.search(&q).unwrap().hits;
+
+        // ARMED TRAP: there must be real ties, or totality is proving nothing.
+        let mut score_counts: BTreeMap<u32, usize> = BTreeMap::new();
+        for h in &hits {
+            *score_counts.entry(h.score.to_bits()).or_default() += 1;
+        }
+        let tied_groups = score_counts.values().filter(|c| **c > 1).count();
+        assert!(
+            tied_groups > 0,
+            "{n}-shard: not armed — no two survivors share a score, so totality is untested"
+        );
+
+        // TOTALITY: no two survivors compare equal under (score, event_id). Equivalently, since the
+        // score may tie, every event_id must be distinct — a duplicate id would make the comparator
+        // return Equal for a genuine pair and hand the outcome to whatever order they arrived in.
+        let ids: BTreeSet<&str> = hits.iter().map(|h| h.event.event_id.as_str()).collect();
+        assert_eq!(
+            ids.len(),
+            hits.len(),
+            "{n}-shard: the C-4 comparator is NOT total over survivors — {} survivors but only {} \
+             distinct event_ids, so at least one pair compares Equal and its order is decided by \
+             arrival. Fold-order invisibility (mutation (d)) rests on this being impossible.",
+            hits.len(),
+            ids.len()
+        );
+    }
 }
