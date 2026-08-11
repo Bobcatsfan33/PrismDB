@@ -35,6 +35,7 @@ pub mod sharded;
 pub mod source;
 pub mod sql;
 pub mod storage;
+pub mod tenant_key;
 pub mod topk;
 pub mod tsv;
 pub mod tuning;
