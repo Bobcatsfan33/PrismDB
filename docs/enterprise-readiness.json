@@ -158,11 +158,13 @@
         "docs/INGESTION-CONTRACT.md",
         "docs/ENCRYPTION-CONTRACT.md",
         "crates/prism-engine/tests/encrypted_backup.rs",
+        "crates/prism-engine/tests/tenant_sealing.rs",
+        "crates/prism-part/src/tenant.rs",
         "crates/prism-cli/tests/encrypted_drill.rs"
       ],
       "gaps": [
         "Versioned redact-before-embedding, production retention/deletion, and residency remain open.",
-        "Raw-disk metadata confidentiality is PARTIALLY closed. Row content is sealed on every durable surface and the encrypted disaster drill asserts no event body appears in any object under parts/, wal/, catalog/ or generations/. Metadata is not: the part manifest's tenant list and TenantStats, and the catalog mirror's PartEntry tenant names, are still plaintext, so raw bucket or disk access still discloses which tenants exist and which share a bucket."
+        "Raw-disk metadata confidentiality is CLOSED for tenant identity (D-096). Row content is sealed on every durable surface, and tenant identity is now a keyed store-scoped token in the part manifest, TenantStats, and the catalog mirror's PartEntry -- so raw disk or bucket access no longer discloses TENANT NAMES or ROW CONTENT. The encrypted disaster drill asserts that no event body AND no tenant name appears in any object under parts/, wal/, catalog/ or generations/, before and after recovery. What raw access still discloses, by standing decision or as a named residual: the BUCKET ORDINAL stays plaintext so hydration's wrong-shard refusal works before anything is unwrapped; and token EQUALITY remains observable, so an observer can still infer that some tenant occupies N parts and shares a bucket with some other tenant. Sealing identity is not sealing the existence of distinct tenants, and no claim here says otherwise."
       ]
     },
     {

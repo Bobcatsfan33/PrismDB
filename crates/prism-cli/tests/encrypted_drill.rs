@@ -112,7 +112,7 @@ fn answer(engine: &Engine) -> Vec<String> {
         .search(&Query {
             text: "the tool call timed out retrying".into(),
             k: 25,
-            tenant: Some("t1".into()),
+            tenant: Some("tenant-northwind-t1-inc".into()),
             rerank: 50,
             ..Default::default()
         })
@@ -161,6 +161,19 @@ fn distinctive_bodies(events: &[prism_types::Event], n: usize) -> Vec<String> {
     bodies
 }
 
+/// Every distinct tenant name in a corpus — the DATA-01 needle.
+fn tenant_names(events: &[prism_types::Event]) -> Vec<String> {
+    let mut v: Vec<String> = events
+        .iter()
+        .map(|e| e.tenant_id.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    v.sort();
+    assert!(v.len() >= 2, "the drill must span several distinct tenants");
+    v
+}
+
 /// Assert no event body is legible in any object the bucket holds.
 fn assert_no_plaintext_bodies(backend: &Arc<dyn ObjectStore>, bodies: &[String], when: &str) {
     let mut scanned = 0usize;
@@ -194,7 +207,17 @@ fn the_disaster_drill_restores_an_encrypted_replacement_node_from_backup_alone()
     let root_b = tmp("node-b");
 
     // 1. Publish a customer-shaped dataset on node A, encrypted.
-    let published = prism_engine::corpus::generate(prism_engine::corpus::Kind::Zipf, 900, 5);
+    // Long, distinctive tenant names: a two-character needle turns up inside ciphertext by chance,
+    // so scanning for `t0` would prove nothing (the sealing gates learned this the hard way).
+    let named = |mut e: prism_types::Event| {
+        e.tenant_id = format!("tenant-northwind-{}-inc", e.tenant_id);
+        e
+    };
+    let published: Vec<prism_types::Event> =
+        prism_engine::corpus::generate(prism_engine::corpus::Kind::Zipf, 900, 5)
+            .into_iter()
+            .map(named)
+            .collect();
     let engine_a = engine_on(&root_a, &backend);
     engine_a.acquire_ownership().unwrap();
     engine_a
@@ -215,7 +238,11 @@ fn the_disaster_drill_restores_an_encrypted_replacement_node_from_backup_alone()
     assert_eq!(backup.parts.len(), expected_snapshot.part_ids().len());
 
     // 2. Acknowledge further events that are NOT yet published, into a SEALED remote admission log.
-    let acked_only = prism_engine::corpus::generate(prism_engine::corpus::Kind::Zipf, 120, 11);
+    let acked_only: Vec<prism_types::Event> =
+        prism_engine::corpus::generate(prism_engine::corpus::Kind::Zipf, 120, 11)
+            .into_iter()
+            .map(named)
+            .collect();
     let writer_a = Ingestor::open_replicated(open_on(&root_a, &backend), 0).unwrap();
     let remote_wal = RemoteWal::new(Arc::clone(&backend), 0)
         .with_crypto(Arc::new(WalCrypto::new(keys()).unwrap()));
@@ -237,6 +264,10 @@ fn the_disaster_drill_restores_an_encrypted_replacement_node_from_backup_alone()
     let bodies = distinctive_bodies(&published, 5);
     let acked_bodies = distinctive_bodies(&acked_only, 5);
     assert_no_plaintext_bodies(&backend, &bodies, "after backup");
+    // **DATA-01: no tenant NAME either.** Same mechanism that proved no event body appears, applied
+    // to the identity half. Armed by `tenant_names`, which requires several distinct tenants.
+    let names = tenant_names(&published);
+    assert_no_plaintext_bodies(&backend, &names, "after backup (tenant names)");
     assert_no_plaintext_bodies(
         &backend,
         &acked_bodies,
@@ -348,6 +379,7 @@ fn the_disaster_drill_restores_an_encrypted_replacement_node_from_backup_alone()
 
     // 8. And the bucket is still opaque, now including everything recovery published.
     assert_no_plaintext_bodies(&backend, &bodies, "after recovery");
+    assert_no_plaintext_bodies(&backend, &names, "after recovery (tenant names)");
     assert_no_plaintext_bodies(&backend, &acked_bodies, "after recovery");
 
     // 9. The receipt. It names the backend, because a gate passed against a software keystore has

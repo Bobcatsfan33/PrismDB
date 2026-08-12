@@ -13,12 +13,11 @@
 # value is that nothing since has touched it. If this script ever rewrites it,
 # the compatibility test becomes a tautology.
 #
-# v3 IS still regenerated below, and that is a known, logged limitation rather
-# than a settled decision: it means v3 is not evidence of anything a future
-# writer must reproduce, and a byte-for-byte rollback gate cannot be written
-# against it. When v3 stabilizes it joins v1 and v2 in the never-regenerated
-# class and that gate comes back -- issue #39, and the module header of
-# crates/prism-engine/tests/encryption_rollback.rs.
+# v3 is now FROZEN too, closing issue #39. It stopped being the current format
+# when the DATA-01 increment made v4 current (D-096), so it is history rather
+# than a moving target -- and the byte-for-byte rollback gate that could not be
+# written against a regenerable fixture is back:
+# `todays_writer_still_produces_the_frozen_v3_fixtures_part_bytes`.
 #
 # Run this only when the format version is bumped or the corpus deliberately
 # changes. If it produces a diff on an unchanged format, that is a bug, not a
@@ -35,18 +34,14 @@ cargo build --release -q
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
-# ---------------------------------------------------------------- compat, v3
+# ---------------------------------------------------------------- compat, v1/v2/v3
 #
-# v1 and v2 are NEVER regenerated. They are the bytes those versions shipped, and
+# NONE of these are regenerated. They are the bytes those versions shipped, and
 # their entire value is that nothing since has touched them. If this script ever
-# rewrites one, the compatibility test becomes a tautology.
-echo "==> testing/compat/v3"
-rm -rf testing/compat/v3
-"$PRISM" gen-corpus --kind uniform --rows 200 --seed 7 --out "$TMP/compat.tsv" >/dev/null
-"$PRISM" init --path testing/compat/v3 --dim 32 --nlist 8 --pq-m 4 --seed 7 >/dev/null
-"$PRISM" ingest --path testing/compat/v3 --file "$TMP/compat.tsv" >/dev/null
-cp "$TMP/compat.tsv" testing/compat/v3-source.tsv
-"$PRISM" fsck --path testing/compat/v3 >/dev/null && echo "    v3 fixture is clean"
+# rewrites one, the compatibility test becomes a tautology -- which is precisely
+# what happened to v3 while it was still current (issue #39).
+echo "==> testing/compat/v1, v2, v3 are frozen bytes -- not regenerated"
+"$PRISM" fsck --path testing/compat/v3 >/dev/null && echo "    v3 is frozen"
 echo "    (v1 and v2 are committed bytes and are never regenerated)"
 
 # ------------------------------------------------------------ compat, corrupt
