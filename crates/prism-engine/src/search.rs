@@ -459,6 +459,7 @@ impl Engine {
         snap: &prism_part::catalog::Snapshot,
         q: &Query,
     ) -> Result<CandidatePhase> {
+        let tok = self.tenant_tokenizer()?;
         if q.k == 0 {
             return Err(PrismError::Invalid("k must be positive".into()));
         }
@@ -536,7 +537,9 @@ impl Engine {
                 r.manifest.s4()?.stats_for_owned(q.tenant.as_deref()),
             ) {
                 (Some(_), Some(st)) => st.may_match(from, to),
-                _ => r.manifest.may_match(q.tenant.as_deref(), from, to),
+                _ => r
+                    .manifest
+                    .may_match(q.tenant.as_deref(), from, to, tok.as_deref()),
             };
             if keep {
                 eligible.push(r);
@@ -1519,6 +1522,7 @@ impl Engine {
     /// no candidate list — the ground truth the approximate path is measured
     /// against (Part II §7.3). It is the oracle, and it is deliberately slow.
     pub fn exact_search(&self, q: &Query) -> Result<Vec<Hit>> {
+        let tok = self.tenant_tokenizer()?;
         let snap = self.snapshot()?;
         let readers = self.open_parts(&snap)?;
         let dim = self.store.config.dim;
@@ -1528,7 +1532,7 @@ impl Engine {
         for r in &readers {
             if !r
                 .manifest
-                .may_match(q.tenant.as_deref(), q.time_from, q.time_to)
+                .may_match(q.tenant.as_deref(), q.time_from, q.time_to, tok.as_deref())
             {
                 continue;
             }

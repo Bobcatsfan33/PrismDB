@@ -145,7 +145,18 @@ impl Engine {
         // that only the compatibility path can read. Everything the newer format
         // buys — block-local damage, an explicit feature bitset, a declared
         // rerank encoding — is only real once the bytes are actually rewritten.
-        let has_legacy = readers.iter().any(|r| r.is_legacy());
+        // "Needs rewriting forward" is broader than "is an older format version".
+        //
+        // A store that had no key service and later gained one holds parts at the CURRENT version
+        // that still name their tenants — `is_legacy` is false for them, so nothing would ever force
+        // them forward and the names would sit on disk indefinitely, defeating the sealing an
+        // operator just turned on. A part that could carry tokens and does not is therefore
+        // migratable too ([D-096](../../docs/DECISIONS.md)).
+        let seals_tenants = self.tenant_tokenizer()?.is_some();
+        let needs_migration = |r: &prism_part::part::PartReader| {
+            r.is_legacy() || (seals_tenants && !r.has_tenant_tokens())
+        };
+        let has_legacy = readers.iter().any(needs_migration);
 
         if snap.parts.len() < 2 && !has_legacy {
             return Ok(MergeReport {
@@ -206,7 +217,7 @@ impl Engine {
             }
         }
 
-        let migrated = readers.iter().filter(|r| r.is_legacy()).count();
+        let migrated = readers.iter().filter(|r| needs_migration(r)).count();
         let dim = self.store.config.dim;
 
         let mut bytes_read = 0usize;
@@ -281,6 +292,7 @@ impl Engine {
             // are never touched, so both representations coexist -- which is exactly what the
             // dual-door equivalence test exercises.
             let spec = PartSpec {
+                tenant_tokenizer: self.tenant_tokenizer()?,
                 partition: Some(key.clone()),
                 promote: self.store.config.promote.clone(),
                 lineage: Default::default(),
@@ -462,6 +474,7 @@ impl Engine {
             let rows: Vec<RowIn> = merged.into_values().collect();
             rows_out += rows.len();
             let spec = PartSpec {
+                tenant_tokenizer: self.tenant_tokenizer()?,
                 partition: Some(key.clone()),
                 promote: self.store.config.promote.clone(),
                 lineage: Default::default(),
@@ -704,6 +717,7 @@ impl Engine {
         let mut seq = snap.next_seq;
         for (key, rows) in by_partition {
             let spec = PartSpec {
+                tenant_tokenizer: self.tenant_tokenizer()?,
                 partition: Some(key.clone()),
                 promote: self.store.config.promote.clone(),
                 lineage: Default::default(),

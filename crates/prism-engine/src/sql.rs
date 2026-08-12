@@ -289,6 +289,7 @@ impl Engine {
         plan: &Plan,
         snap: &prism_part::catalog::Snapshot,
     ) -> Result<(Vec<(Event, f32)>, Counters)> {
+        let tok = self.tenant_tokenizer()?;
         let (from, to) = match &plan.filter {
             Some(p) => prism_types::predicate::time_bounds(p),
             None => (None, None),
@@ -307,7 +308,9 @@ impl Engine {
             // Per-tenant zone map: a shared bucket's part-level range describes the BUCKET.
             let keep = match r.manifest.s4()?.stats_for(&plan.tenant) {
                 Some(st) => st.may_match(from, to),
-                None => r.manifest.may_match(Some(&plan.tenant), from, to),
+                None => r
+                    .manifest
+                    .may_match(Some(&plan.tenant), from, to, tok.as_deref()),
             };
             if !keep {
                 c.parts_pruned += 1;
@@ -363,6 +366,7 @@ impl Engine {
         plan: &Plan,
         snap: &prism_part::catalog::Snapshot,
     ) -> Result<(usize, Counters)> {
+        let tok = self.tenant_tokenizer()?;
         let (from, to) = match &plan.filter {
             Some(p) => prism_types::predicate::time_bounds(p),
             None => (None, None),
@@ -378,7 +382,9 @@ impl Engine {
         for r in &readers {
             let keep = match r.manifest.s4()?.stats_for(&plan.tenant) {
                 Some(st) => st.may_match(from, to),
-                None => r.manifest.may_match(Some(&plan.tenant), from, to),
+                None => r
+                    .manifest
+                    .may_match(Some(&plan.tenant), from, to, tok.as_deref()),
             };
             if !keep {
                 c.parts_pruned += 1;

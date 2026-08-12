@@ -383,6 +383,7 @@ impl Engine {
         from: Option<i64>,
         to: Option<i64>,
     ) -> Result<DriftReport> {
+        let tok = self.tenant_tokenizer()?;
         let snap = self.snapshot()?;
         let dim = self.store.config.dim;
 
@@ -391,7 +392,7 @@ impl Engine {
 
         for e in &snap.parts {
             let Some(r) = e.located() else { continue };
-            if !r.may_match(tenant, from, to) {
+            if !r.may_match(tenant, from, to, tok.as_deref()) {
                 continue;
             }
             let reader = prism_part::part::PartReader::open(&self.store.part_dir(&r.part_id))?;

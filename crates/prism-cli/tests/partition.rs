@@ -675,7 +675,7 @@ fn pruning_never_produces_a_false_negative_on_randomized_metadata() {
 
             if overlaps {
                 assert!(
-                    p.may_match(tenant, from, to),
+                    p.may_match(tenant, from, to, None),
                     "iteration {iter}: pruning EXCLUDED a part that could hold a matching row.\n  \
                      part {:?} tenants={:?} time=[{}, {}]\n  query tenant={tenant} from={from:?} \
                      to={to:?}",

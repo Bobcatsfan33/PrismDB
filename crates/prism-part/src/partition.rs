@@ -188,8 +188,16 @@ impl PartRef {
     /// may never say no to a part that holds a match. Pruning that can lose a row is not
     /// pruning, it is sampling — which is why `pruning_never_produces_a_false_negative` is a
     /// property test over randomized metadata rather than a handful of examples.
-    pub fn may_match(&self, tenant: &str, from: Option<i64>, to: Option<i64>) -> bool {
-        if !self.tenants.iter().any(|t| t == tenant) {
+    pub fn may_match(
+        &self,
+        tenant: &str,
+        from: Option<i64>,
+        to: Option<i64>,
+        tokenizer: Option<&crate::tenant::TenantTokenizer>,
+    ) -> bool {
+        // The handle is a name on a v3 part and a keyed token on a v4 one; both must prune
+        // correctly from one query ([D-096](../../../docs/DECISIONS.md)).
+        if !crate::tenant::handle_matches(&self.tenants, tenant, tokenizer) {
             return false;
         }
         if let Some(f) = from {
@@ -297,15 +305,15 @@ mod tests {
             time_min: 100,
             time_max: 200,
         };
-        assert!(p.may_match("a", None, None));
-        assert!(p.may_match("a", Some(150), Some(150)));
-        assert!(p.may_match("a", Some(200), None));
-        assert!(p.may_match("a", None, Some(100)));
+        assert!(p.may_match("a", None, None, None));
+        assert!(p.may_match("a", Some(150), Some(150), None));
+        assert!(p.may_match("a", Some(200), None, None));
+        assert!(p.may_match("a", None, Some(100), None));
         // Genuinely disjoint.
-        assert!(!p.may_match("a", Some(201), None));
-        assert!(!p.may_match("a", None, Some(99)));
+        assert!(!p.may_match("a", Some(201), None, None));
+        assert!(!p.may_match("a", None, Some(99), None));
         // Another tenant, ever.
-        assert!(!p.may_match("c", None, None));
+        assert!(!p.may_match("c", None, None, None));
     }
 
     #[test]

@@ -407,6 +407,7 @@ impl Engine {
             let bucket_ordinal =
                 prism_part::partition::bucket_ordinal(&self.store.config.partitions, &key.bucket);
             let spec = PartSpec {
+                tenant_tokenizer: self.tenant_tokenizer()?,
                 partition: Some(key.clone()),
                 promote: self.store.config.promote.clone(),
                 lineage: Default::default(),

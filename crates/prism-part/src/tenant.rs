@@ -211,3 +211,78 @@ mod tests {
         assert!(!format!("{token:?}").contains("acme"));
     }
 }
+
+/// **The mixed-version match rule** ([D-096](../../../docs/DECISIONS.md)).
+///
+/// A store can hold v3 parts (handles are **names**) and v4 parts (handles are **tokens**) at the
+/// same time — during a migration, and for as long as an operator chooses not to merge. Both must
+/// answer correctly from one query, so a handle matches if it equals **either** the tenant's name
+/// **or** its token under this store's key.
+///
+/// It is written once, here, rather than at each of the comparison sites, because a site that
+/// remembered only one half would not fail loudly: matching names alone silently returns **empty**
+/// for every v4 part, and matching tokens alone silently returns empty for every v3 part. An empty
+/// answer is indistinguishable from a legitimate "no rows", which is the failure mode this whole
+/// increment is trying not to introduce.
+///
+/// Accepting both is safe rather than merely convenient: a token is 128 bits of keyed MAC rendered
+/// as hex, so a *name* colliding with some other tenant's token would require an operator to have
+/// literally named a tenant after that hex string — and even then the token is keyed, so it is not
+/// something an attacker can arrange from outside.
+pub fn handle_matches(
+    handles: &[String],
+    tenant: &str,
+    tokenizer: Option<&TenantTokenizer>,
+) -> bool {
+    if handles.iter().any(|h| h == tenant) {
+        return true;
+    }
+    match tokenizer {
+        Some(t) => {
+            let token = t.token(tenant).to_hex();
+            handles.contains(&token)
+        }
+        None => false,
+    }
+}
+
+#[cfg(test)]
+mod match_tests {
+    use super::*;
+
+    fn tk(byte: u8) -> TenantTokenizer {
+        TenantTokenizer::new(Zeroizing::new([byte; 32]))
+    }
+
+    #[test]
+    fn a_v3_handle_matches_by_name_with_or_without_a_key() {
+        let names = vec!["acme".to_string(), "t1".to_string()];
+        assert!(handle_matches(&names, "acme", None));
+        assert!(handle_matches(&names, "acme", Some(&tk(1))));
+        assert!(!handle_matches(&names, "nobody", Some(&tk(1))));
+    }
+
+    #[test]
+    fn a_v4_handle_matches_by_token_only_with_the_key() {
+        let t = tk(1);
+        let tokens = vec![t.token("acme").to_hex()];
+        assert!(handle_matches(&tokens, "acme", Some(&t)));
+        // Without the key there is nothing to compare against -- and the honest outcome is "no
+        // match", which the caller turns into a named keyless refusal rather than a silent empty.
+        assert!(!handle_matches(&tokens, "acme", None));
+        // A different store's key must not match this store's tokens.
+        assert!(!handle_matches(&tokens, "acme", Some(&tk(2))));
+    }
+
+    #[test]
+    fn a_mixed_store_matches_both_generations_of_handle() {
+        // The migration state: some parts still name their tenants, some have been rewritten.
+        let t = tk(1);
+        let v3 = vec!["acme".to_string()];
+        let v4 = vec![t.token("acme").to_hex()];
+        assert!(handle_matches(&v3, "acme", Some(&t)));
+        assert!(handle_matches(&v4, "acme", Some(&t)));
+        assert!(!handle_matches(&v3, "other", Some(&t)));
+        assert!(!handle_matches(&v4, "other", Some(&t)));
+    }
+}

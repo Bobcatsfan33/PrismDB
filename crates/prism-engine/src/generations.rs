@@ -698,6 +698,7 @@ impl Engine {
                 generation: g.generation_id.clone(),
             };
             let spec = PartSpec {
+                tenant_tokenizer: self.tenant_tokenizer()?,
                 partition: Some(new_key.clone()),
                 promote: self.store.config.promote.clone(),
                 lineage: prism_part::ext::S5Ext {
@@ -823,6 +824,7 @@ impl Engine {
             }
 
             let spec = PartSpec {
+                tenant_tokenizer: self.tenant_tokenizer()?,
                 partition: Some(r.partition.clone()),
                 promote: self.store.config.promote.clone(),
                 lineage: prism_part::ext::S5Ext {

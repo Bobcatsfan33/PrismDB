@@ -34,6 +34,10 @@ use std::collections::{BTreeMap, BTreeSet};
 /// The per-part backup receipt, written **last** so its presence means "complete".
 pub const BACKUP_MANIFEST_FILE: &str = "BACKUP.json";
 
+/// Where the store's wrapped tenant-key envelope lives in the object store (D-096). One object per
+/// store, beside the catalog mirror rather than under a part's prefix, because it is store-scoped.
+pub const TENANT_KEY_KEY: &str = "store/tenant-key.json";
+
 /// The remote prefix under which generation artifacts are backed up.
 const GENERATION_PREFIX: &str = "generations/";
 
@@ -435,6 +439,19 @@ impl Engine {
             report.generations.push(gen_id);
         }
 
+        // **The store's tenant-key envelope travels with the data it opens** (D-096).
+        //
+        // Found by the drill rather than by reasoning: without this a replacement node mints a
+        // *fresh* tenant key, tokenizes every query differently from the parts it just restored, and
+        // answers **empty** — a silently wrong answer that looks exactly like "no rows". The key is
+        // stored only in wrapped form, so backing it up leaks nothing the bucket did not already
+        // hold; what it buys is that a restored store tokenizes the way the store that wrote those
+        // parts did.
+        if let Some(bytes) = self.tenant_key_envelope_bytes()? {
+            self.cold.backend().put(TENANT_KEY_KEY, &bytes)?;
+            report.bytes += bytes.len() as u64;
+        }
+
         // The snapshot itself. Idempotent, and safe because the mirror never leads (D-069).
         self.mirror_snapshot(&snap)?;
         Ok(report)
@@ -592,6 +609,15 @@ impl Engine {
             snapshot_id: plan.snapshot_id.clone(),
             ..Default::default()
         };
+
+        // The tenant key first: a part installed before its store can tokenize is a part no query
+        // can match (D-096). Absent is fine — a plaintext store never wrote one.
+        if let Ok(bytes) = backend.get(TENANT_KEY_KEY) {
+            prism_part::io::write_atomic(
+                &self.store.root.join(crate::tenant_key::TENANT_KEY_FILE),
+                &bytes,
+            )?;
+        }
 
         prism_part::io::ensure_dir(&self.store.parts_dir())?;
         for receipt in &plan.parts {

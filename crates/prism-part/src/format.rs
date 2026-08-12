@@ -41,10 +41,10 @@ pub const MAGIC: &[u8; 8] = b"PRSMPART";
 ///
 /// S3's typed columns and S4's partitioning metadata are therefore *flagged
 /// extensions on v3*, not v4 and v5.
-pub const FORMAT_VERSION: u32 = 3;
+pub const FORMAT_VERSION: u32 = 4;
 
 /// Binary formats this build can still read. v1 is JSON and handled separately.
-pub const SUPPORTED_BINARY_VERSIONS: &[u32] = &[2, 3];
+pub const SUPPORTED_BINARY_VERSIONS: &[u32] = &[2, 3, 4];
 
 /// The JSON-manifest format S0 wrote.
 pub const LEGACY_FORMAT_VERSION: u32 = 1;
@@ -157,12 +157,29 @@ pub const FEATURE_COLUMN_COMPRESSION: u64 = 1 << 5;
 /// S14: the part's blocks are sealed, and the manifest carries a wrapped-DEK envelope.
 pub const FEATURE_ENCRYPTION: u64 = 1 << 6;
 
+// --- implemented in S14, DATA-01 increment -----------------------------------
+//
+// Tenant identity at rest ([D-096](../../../docs/DECISIONS.md),
+// [encryption contract §6a](../../../docs/ENCRYPTION-CONTRACT.md)).
+
+/// S14: the manifest's tenant handles are **keyed tokens**, not names.
+///
+/// **Why this is a version bump AND a bit**, when the format law prefers flagged extensions on the
+/// existing version: an extension adds a field an old reader may skip. This *changes the meaning of
+/// a field that already exists* — `tenants` holds tokens instead of names — and an old reader would
+/// not skip it, it would compare a query's tenant name against a token, match nothing, and return
+/// **an empty answer that looks like a legitimate "no rows"**. Silently wrong is precisely what the
+/// version and feature machinery exist to prevent, so both refuse it: v4 is outside an old build's
+/// `SUPPORTED_BINARY_VERSIONS`, and this bit is outside its `SUPPORTED_FEATURES`.
+pub const FEATURE_TENANT_TOKENS: u64 = 1 << 7;
+
 /// Every feature this build understands. Anything outside this mask is refused.
 pub const SUPPORTED_FEATURES: u64 = FEATURE_BLOCK_FRAMING
     | FEATURE_ATTRIBUTES
     | FEATURE_TRACE_CONTEXT
     | FEATURE_PARTITION_META
     | FEATURE_PROMOTED_COLUMNS
+    | FEATURE_TENANT_TOKENS
     | FEATURE_ENCRYPTION;
 
 // --- TLV extensions -----------------------------------------------------------

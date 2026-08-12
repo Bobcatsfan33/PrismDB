@@ -185,6 +185,15 @@ an ordinal identifies placement without naming a tenant.
 **What the token is not.** It authorizes nothing. Tenant authorization stays exact-certificate policy
 at the service boundary, above the engine.
 
+**How a token renders to an operator.** `prism inspect` shows the **token**, labelled as one, with
+a one-line note that it is a keyed handle and not a name. It does **not** silently print an opaque
+hex string where a reader expects a tenant — unlabelled gibberish is how an operator concludes the
+store is corrupt. And it cannot "resolve" tokens in the general case: HMAC is one-way, so the only
+honest resolution is **forward** — a caller who already has candidate names may tokenize them and
+match. A store configured with its key may therefore render `token(name)` pairs for names it was
+given; with no key service, or for a name nobody supplied, the token stands alone. Inverting a token
+is not a feature that was omitted; it is arithmetic that does not exist.
+
 **The residual leak, named.** Token *equality* is still visible: an attacker without the key can see
 that some tenant occupies N parts and shares a bucket with some other tenant. Sealing identity is not
 sealing the existence of distinct tenants, and nothing here claims it is.

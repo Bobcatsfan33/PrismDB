@@ -242,11 +242,12 @@ impl Snapshot {
         tenant: Option<&str>,
         from: Option<i64>,
         to: Option<i64>,
+        tokenizer: Option<&crate::tenant::TenantTokenizer>,
     ) -> Vec<String> {
         self.parts
             .iter()
             .filter(|e| match (e.located(), tenant) {
-                (Some(r), Some(t)) => r.may_match(t, from, to),
+                (Some(r), Some(t)) => r.may_match(t, from, to, tokenizer),
                 // No tenant policy, or no catalog metadata: we cannot rule it out.
                 _ => true,
             })

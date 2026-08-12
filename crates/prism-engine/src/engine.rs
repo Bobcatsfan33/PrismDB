@@ -51,6 +51,10 @@ pub struct Engine {
     keys: Option<Arc<dyn crate::keys::KeyProvider>>,
     /// Opened DEKs, bounded and clearable.
     dek_cache: crate::keys::DekCache,
+    /// The store's tenant tokenizer, resolved once and cached ([D-096](../../docs/DECISIONS.md)).
+    /// `None` inside the outer `Option` means "resolved, and this store has none" — a plaintext
+    /// store — so a miss is not re-resolved on every part write.
+    tenant_tok: std::sync::Mutex<Option<Option<Arc<prism_part::tenant::TenantTokenizer>>>>,
 }
 
 /// How many tenant/bucket DEKs stay resident at once.
@@ -90,6 +94,7 @@ impl Engine {
             writer_id: Self::writer_id(),
             keys: None,
             dek_cache: crate::keys::DekCache::new(DEK_CACHE_ENTRIES),
+            tenant_tok: std::sync::Mutex::new(None),
         })
     }
 
@@ -104,6 +109,7 @@ impl Engine {
             writer_id: Self::writer_id(),
             keys: None,
             dek_cache: crate::keys::DekCache::new(DEK_CACHE_ENTRIES),
+            tenant_tok: std::sync::Mutex::new(None),
         })
     }
 
@@ -256,6 +262,36 @@ impl Engine {
                 bucket_ordinal,
             },
         }))
+    }
+
+    /// The store's tenant tokenizer, minted-or-loaded once and cached
+    /// ([D-096](../../docs/DECISIONS.md), [contract §6a](../../docs/ENCRYPTION-CONTRACT.md)).
+    ///
+    /// `None` for a plaintext store: with nothing sealed there is nothing to tokenize, and this is
+    /// not the thing that turns sealing on.
+    pub fn tenant_tokenizer(&self) -> Result<Option<Arc<prism_part::tenant::TenantTokenizer>>> {
+        let mut slot = self.tenant_tok.lock().map_err(|_| {
+            prism_types::error::PrismError::Invariant(
+                "the tenant tokenizer lock was poisoned by a panic".into(),
+            )
+        })?;
+        if let Some(resolved) = slot.as_ref() {
+            return Ok(resolved.clone());
+        }
+        let resolved =
+            crate::tenant_key::load_or_mint(&self.store.root, self.keys.as_ref())?.map(Arc::new);
+        *slot = Some(resolved.clone());
+        Ok(resolved)
+    }
+
+    /// The store's wrapped tenant-key envelope as bytes, for the backup set. `None` when the store
+    /// has none — a plaintext store, which has nothing to tokenize.
+    pub fn tenant_key_envelope_bytes(&self) -> Result<Option<Vec<u8>>> {
+        let path = self.store.root.join(crate::tenant_key::TENANT_KEY_FILE);
+        if !path.exists() {
+            return Ok(None);
+        }
+        Ok(Some(std::fs::read(&path)?))
     }
 
     /// Drop every resident DEK, so a revocation takes effect against this running process.
@@ -418,7 +454,8 @@ impl Engine {
         from: Option<i64>,
         to: Option<i64>,
     ) -> Result<(Vec<PartReader>, usize)> {
-        let ids = snap.candidate_parts(tenant, from, to);
+        let tok = self.tenant_tokenizer()?;
+        let ids = snap.candidate_parts(tenant, from, to, tok.as_deref());
         let pruned = snap.parts.len() - ids.len();
         let readers = ids
             .iter()

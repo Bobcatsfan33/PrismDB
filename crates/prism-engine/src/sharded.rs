@@ -298,6 +298,22 @@ impl ClusterCursor {
 impl Cluster {
     /// Create a cluster of `num_shards` shards under `root` (each shard a store `shard-<i>`), all
     /// sharing one partition scheme so a tenant hashes to the same bucket on every shard.
+    /// Attach a key service to **every shard**, so a sealed cluster seals uniformly.
+    ///
+    /// Uniform by construction rather than by convention: a cluster with some shards sealed and some
+    /// not would tokenize a tenant on one shard and name it on another, and the mixed-version match
+    /// rule would paper over the difference instead of surfacing it. Each shard still mints its own
+    /// store-scoped tenant key — shards are separate stores — which is why tokens are compared only
+    /// within a shard and never across the wire.
+    pub fn with_keys(mut self, keys: Arc<dyn crate::keys::KeyProvider>) -> Self {
+        self.shards = self
+            .shards
+            .into_iter()
+            .map(|s| s.with_keys(Arc::clone(&keys)))
+            .collect();
+        self
+    }
+
     pub fn init(root: &Path, num_shards: usize, config: StoreConfig) -> Result<Cluster> {
         if num_shards == 0 {
             return Err(PrismError::Invalid(

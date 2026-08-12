@@ -738,7 +738,11 @@ fn todays_build_opens_every_released_format() {
     // three sets of committed bytes, and today's build opens and answers from all of
     // them. v1 and v2 are NEVER regenerated -- their whole value is that nothing
     // since has touched them.
-    for (version, legacy) in [(1u32, true), (2, true), (3, false)] {
+    // `legacy` here means "a released format this build READS but no longer WRITES". v3 joined v1
+    // and v2 in that class when the DATA-01 increment made v4 current ([D-096](../../../docs/DECISIONS.md)):
+    // it still opens, still checksums, still answers — and `merge` now migrates it forward, which is
+    // exactly what `is_legacy` drives.
+    for (version, legacy) in [(1u32, true), (2, true), (3, true)] {
         let fixture = repo_root().join(format!("testing/compat/v{version}"));
         let engine = Engine::open(&fixture)
             .unwrap_or_else(|e| panic!("the v{version} fixture must open: {e}"));

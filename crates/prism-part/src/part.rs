@@ -188,9 +188,16 @@ impl PartManifest {
     /// Conservative by construction: it may say yes and contribute nothing, but
     /// it must never say no to a part that holds a match. Pruning that can lose
     /// a row is not pruning, it is sampling.
-    pub fn may_match(&self, tenant: Option<&str>, from: Option<i64>, to: Option<i64>) -> bool {
+    pub fn may_match(
+        &self,
+        tenant: Option<&str>,
+        from: Option<i64>,
+        to: Option<i64>,
+        tokenizer: Option<&crate::tenant::TenantTokenizer>,
+    ) -> bool {
         if let Some(t) = tenant {
-            if !self.tenants.iter().any(|x| x == t) {
+            // Name on v3, keyed token on v4 — one rule, written once (D-096).
+            if !crate::tenant::handle_matches(&self.tenants, t, tokenizer) {
                 return false;
             }
         }
@@ -808,6 +815,14 @@ pub struct PartSpec {
     /// Seal this part's blocks under a DEK, and record the wrapped DEK in the manifest (S14).
     /// `None` writes a plaintext part, byte-identical to what every earlier build produced.
     pub encryption: Option<PartEncryption>,
+    /// The store's tenant tokenizer, when this store seals tenant identity
+    /// ([D-096](../../../docs/DECISIONS.md), [contract §6a](../../../docs/ENCRYPTION-CONTRACT.md)).
+    ///
+    /// Present ⇒ every tenant handle this part records — the manifest's `tenants` and each
+    /// `TenantStats.tenant` — is a **keyed token**, and the part sets
+    /// [`crate::format::FEATURE_TENANT_TOKENS`]. Absent ⇒ names, exactly as before, so a plaintext
+    /// store's parts are byte-identical to the ones it wrote at v3.
+    pub tenant_tokenizer: Option<std::sync::Arc<crate::tenant::TenantTokenizer>>,
 }
 
 /// One row on its way into a part.
@@ -1018,9 +1033,18 @@ impl PartWriter {
         // --- zone maps / membership ---
         let time_min = *times.iter().min().unwrap();
         let time_max = *times.iter().max().unwrap();
+        // Tenant handles: names on a plaintext store, keyed tokens on a sealed one (§6a). Sorted
+        // AFTER tokenization so the stored order is a function of the stored handles, not of the
+        // names behind them — an order that sorted by name would leak the name ordering.
+        let handle = |name: &str| -> String {
+            match &spec.tenant_tokenizer {
+                Some(t) => t.token(name).to_hex(),
+                None => name.to_string(),
+            }
+        };
         let tenants: Vec<String> = tenant_ids
             .iter()
-            .cloned()
+            .map(|t| handle(t))
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
@@ -1084,7 +1108,13 @@ impl PartWriter {
 
         let s4 = crate::ext::S4Ext {
             partition: spec.partition.clone(),
-            tenant_stats: per_tenant.into_values().collect(),
+            tenant_stats: per_tenant
+                .into_values()
+                .map(|mut st| {
+                    st.tenant = handle(&st.tenant);
+                    st
+                })
+                .collect(),
             promoted: promoted.clone(),
         };
 
@@ -1233,6 +1263,11 @@ impl PartWriter {
                 }
                 | if spec.encryption.is_some() {
                     crate::format::FEATURE_ENCRYPTION
+                } else {
+                    0
+                }
+                | if spec.tenant_tokenizer.is_some() {
+                    crate::format::FEATURE_TENANT_TOKENS
                 } else {
                     0
                 },
@@ -1476,6 +1511,12 @@ impl PartReader {
     /// true I/O.
     pub fn io_bytes(&self) -> usize {
         self.io_bytes.get()
+    }
+
+    /// Does this part's manifest record tenant **tokens** rather than names
+    /// ([D-096](../../../docs/DECISIONS.md))?
+    pub fn has_tenant_tokens(&self) -> bool {
+        self.manifest.feature_flags & crate::format::FEATURE_TENANT_TOKENS != 0
     }
 
     pub fn is_legacy(&self) -> bool {
