@@ -40,7 +40,7 @@ signal-hook = "=0.3.18"
 # comparison, and failure modes no NIST vector detects. Pinned because 0.11 raises the MSRV above
 # the declared 1.75; `zeroize` stays at 1.8.1 for the same reason (1.9 requires edition2024, which
 # Cargo 1.75 cannot parse).
-chacha20poly1305 = { version = "=0.10.1", default-features = false, features = ["alloc", "getrandom"] }
+chacha20poly1305 = { version = "=0.11.0", default-features = false, features = ["alloc", "getrandom"] }
 # No `zeroize_derive`: that feature pulls zeroize_derive 1.5.0, whose manifest requires
 # edition2024 and which Cargo 1.75 cannot even parse. `Zeroizing<T>` and the trait cover the key
 # cache without the proc macro.
