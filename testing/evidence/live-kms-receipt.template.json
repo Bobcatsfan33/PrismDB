@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "status": "pending",
+  "backend": "aws-kms",
+  "completedAt": "REPLACE_WITH_UTC_TIMESTAMP",
+  "releaseDigest": "sha256:REPLACE",
+  "workflowRunUrl": "https://REPLACE",
+  "region": "REPLACE",
+  "keyArns": [],
+  "cloudTrailEventIds": [],
+  "topology": {
+    "hosts": 0,
+    "objectStore": "REPLACE",
+    "kmsEndpoint": "REPLACE"
+  },
+  "checks": {
+    "dekRoundTrip": false,
+    "encryptedIngestAndRead": false,
+    "multiPartRead": false,
+    "expandActivateRewrap": false,
+    "partBytesUnchanged": false,
+    "retirementRefusal": false,
+    "restoreThroughPreviousKey": false,
+    "unreachableFailsClosedAndRetries": false,
+    "deniedFailsClosedAndRetries": false,
+    "throttledFailsClosedAndRetries": false,
+    "revokedFailsClosedAndRetries": false,
+    "replacementNodeDrill": false,
+    "zeroAcknowledgedEventsLost": false,
+    "multiRegionPostureRecorded": false,
+    "separationOfDutiesApproved": false
+  },
+  "evidenceBundleSha256": "REPLACE",
+  "approvedBy": []
+}
+

@@ -78,9 +78,8 @@ digest release path. See
 [`docs/PUBLIC-READ-SERVICE.md`](docs/PUBLIC-READ-SERVICE.md). The same boundary
 supports certificate-scoped, tenant-injected ingest over a replicated-only
 shard write RPC and remote-durable replacement-node recovery. PrismDB is still
-not production-approved because production key custody (envelope encryption is
-implemented and gated, but every
-gate ran against a software keystore), RPO/RTO,
+not production-approved because production key custody (the AWS KMS adapter is
+implemented, but the full custody gate has not run in a real account), RPO/RTO,
 independent load/security, and organizational gates remain open.
 
 The supported compatibility, rolling-upgrade, rollback, and deprecation rules

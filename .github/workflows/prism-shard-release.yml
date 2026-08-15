@@ -132,6 +132,9 @@ jobs:
           grep -q 'clusterIP: None' /tmp/prism-shard-rendered.yaml
           grep -q 'persistentVolumeClaimRetentionPolicy' /tmp/prism-shard-rendered.yaml
           grep -q 'topologySpreadConstraints' /tmp/prism-shard-rendered.yaml
+          grep -q 'name: PRISM_KMS_KEY_ID' /tmp/prism-shard-rendered.yaml
+          grep -q 'name: PRISM_KMS_CREDENTIALS_FILE' /tmp/prism-shard-rendered.yaml
+          grep -q 'cidr: "10.65.0.0/24"' /tmp/prism-shard-rendered.yaml
           # One writer per shard: replicas is len(topology.shards), and CI values declare two.
           grep -q 'replicas: 2' /tmp/prism-shard-rendered.yaml
           docker run --rm \
@@ -176,6 +179,10 @@ jobs:
           refuse "a grace period below the drain budget" template prism deploy/helm/prism-shard \
             -f deploy/helm/prism-shard/ci-values.yaml \
             --set terminationGracePeriodSeconds=30 --set timeoutMs=60000
+          refuse "KMS enabled without an endpoint CIDR" template prism deploy/helm/prism-shard \
+            -f deploy/helm/prism-shard/ci-values.yaml --set networkPolicy.kmsCidr=
+          refuse "a mutable KMS alias" template prism deploy/helm/prism-shard \
+            -f deploy/helm/prism-shard/ci-values.yaml --set kms.keyArn=alias/prism
 
       - name: prove release admission refuses signed-but-unapproved releases
         run: python3 scripts/check_release_admission.py --self-test

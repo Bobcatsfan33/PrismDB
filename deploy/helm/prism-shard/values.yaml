@@ -32,11 +32,24 @@ secrets:
   # pass through Helm, a values file, or a release receipt. Nothing in this chart accepts a
   # credential as a value, so there is no way to set one that Helm could then render.
   objectStore: prism-object-store
+  # Separate from object storage so KMS use can have only Encrypt/Decrypt on one key.
+  kmsCredentials: prism-kms-credentials
 
 objectStore:
   endpoint: ""
   bucket: ""
   region: us-east-1
+
+kms:
+  enabled: false
+  # Full immutable key ARN; aliases and bare key ids are refused by the process.
+  keyArn: ""
+  # Previous immutable ARNs kept for unwrap during rotation and the backup window.
+  decryptKeyArns: []
+  region: us-east-1
+  # Profile inside the mounted AWS shared-credentials file. The file is re-read
+  # for every call so an external secret provider can rotate short-lived STS credentials.
+  profile: default
 
 topology:
   version: 1
@@ -67,6 +80,9 @@ networkPolicy:
   # The external object store: a CIDR plus port, because it is off-cluster.
   objectStoreCidr: ""
   objectStorePort: 443
+  # Required when kms.enabled. Prefer a private KMS VPC endpoint CIDR.
+  kmsCidr: ""
+  kmsPort: 443
 
 podDisruptionBudget:
   maxUnavailable: 1

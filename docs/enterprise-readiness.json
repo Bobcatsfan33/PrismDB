@@ -135,15 +135,17 @@
         "docs/PUBLIC-READ-SERVICE.md",
         "docs/STORAGE-CONTRACT.md",
         "docs/ENCRYPTION-CONTRACT.md",
+        "docs/AWS-KMS.md",
         "SECURITY.md",
         "crates/prism-part/src/crypto.rs",
         "crates/prism-engine/src/keys.rs",
+        "crates/prism-engine/src/aws_kms.rs",
         "crates/prism-engine/tests/encrypted_store.rs",
         "crates/prism-engine/tests/rewrap.rs",
         "crates/prism-cli/src/keystore.rs"
       ],
       "gaps": [
-        "Per-tenant envelope encryption is implemented and gated, but EVERY gate was exercised against the software keystore. That proves the code path and does not prove key custody: no run against a production KMS/HSM exists, so the production key lifecycle -- ceremony, custody, multi-region replication -- remains unproven. Tracked as external gate EXT-KMS; no receipt in this repository may be read as custody evidence until it closes.",
+        "Per-tenant envelope encryption and the production AWS KMS adapter are implemented and gated. The adapter uses TLS, SigV4, immutable key ARNs, fixed encryption context, bounded responses, refreshable credentials, previous-key rotation support, and hardened Helm wiring, but no live run has occurred. Code and simulated failures do not prove custody: ceremony, IAM separation, CloudTrail, and multi-region posture remain unproven under EXT-KMS.",
         "Rotation is implemented as expand/activate/rewrap/retire and gated end to end, but only against software-keystore key versions; no rotation has been performed against a real KMS key version."
       ]
     },
@@ -328,7 +330,15 @@
       "blocking": true,
       "ownerRole": "Security Engineering and SRE",
       "acceptanceCriteria": "The encryption gate suite is re-run with a production KMS/HSM KeyProvider in place of the software keystore, and the receipts name that backend. It must cover, against real key versions: wrap and unwrap on the ingest and read paths; a full expand/activate/rewrap/retire rotation with retire refused while live envelopes still need the key; restore through a retired-but-authorized previous key; and the D-094 disaster drill end to end with encryption enabled. The named failure modes -- unreachable, denied, throttled, revoked -- must be produced by the real key service rather than injected by the software keystore's fault surface, and each must still fail closed with no partial state and retry cleanly. A region-wide KMS outage is a recovery blocker by design, so the deployment's multi-region key replication posture is recorded as an operator-side decision rather than a software guarantee. Until this gate closes, no receipt in this repository may be read as evidence of key custody: the software-keystore runs prove the code path only, and the key ceremony itself remains external.",
-      "evidence": []
+      "evidence": [
+        "docs/AWS-KMS.md",
+        "crates/prism-engine/src/aws_kms.rs",
+        "crates/prism-cli/src/keystore.rs",
+        "deploy/helm/prism-shard/templates/statefulset.yaml",
+        "deploy/helm/prism-shard/templates/networkpolicy.yaml",
+        "scripts/verify_live_kms_receipt.py",
+        "testing/evidence/live-kms-receipt.template.json"
+      ]
     }
   ]
 }

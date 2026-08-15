@@ -1,6 +1,7 @@
 //! The engine: everything between an event arriving and an answer leaving.
 
 pub mod admission;
+pub mod aws_kms;
 pub mod bench;
 pub mod clock;
 pub mod cluster;

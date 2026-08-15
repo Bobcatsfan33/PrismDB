@@ -15,7 +15,12 @@
 //! keystore other principals can read is refused rather than used. And no path through this module
 //! ever renders key material — not in an error, not in a log, not in the JSON a command emits.
 
+use prism_engine::aws_kms::{
+    AwsCredentialsProvider, AwsKmsConfig, AwsKmsProvider, SharedCredentialsFile,
+    StaticAwsCredentials,
+};
 use prism_engine::keys::{KeyProvider, SoftwareKeystore};
+use prism_engine::storage::sigv4::Credentials;
 use prism_types::error::{PrismError, Result};
 use std::sync::Arc;
 use zeroize::Zeroizing;
@@ -25,6 +30,11 @@ use zeroize::Zeroizing;
 /// Named for what it is. An operator who sets `PRISM_STAGING_KEYSTORE_FILE` in production has been
 /// told by the variable itself that they are not using the production key custody path.
 pub const KEYSTORE_ENV: &str = "PRISM_STAGING_KEYSTORE_FILE";
+pub const KMS_KEY_ENV: &str = "PRISM_KMS_KEY_ID";
+pub const KMS_REGION_ENV: &str = "PRISM_KMS_REGION";
+pub const KMS_CREDENTIALS_FILE_ENV: &str = "PRISM_KMS_CREDENTIALS_FILE";
+pub const KMS_PROFILE_ENV: &str = "PRISM_KMS_PROFILE";
+pub const KMS_DECRYPT_KEYS_ENV: &str = "PRISM_KMS_DECRYPT_KEY_IDS";
 
 /// The on-disk form: which key is active, and the wrapping keys this process holds.
 ///
@@ -89,7 +99,19 @@ fn assert_not_world_readable(_path: &std::path::Path) -> Result<()> {
 /// data directory. A store is encrypted because it was configured to be
 /// ([§10](../../../docs/ENCRYPTION-CONTRACT.md)).
 pub fn from_env() -> Result<Option<Arc<dyn KeyProvider>>> {
-    let Some(path) = std::env::var_os(KEYSTORE_ENV) else {
+    let staging = std::env::var_os(KEYSTORE_ENV).filter(|value| !value.is_empty());
+    let kms_key = std::env::var(KMS_KEY_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    if staging.is_some() && kms_key.is_some() {
+        return Err(PrismError::Invalid(format!(
+            "{KEYSTORE_ENV} and {KMS_KEY_ENV} select different key backends; configure exactly one"
+        )));
+    }
+    if let Some(key_arn) = kms_key {
+        return Ok(Some(kms_from_env(key_arn)?));
+    }
+    let Some(path) = staging else {
         return Ok(None);
     };
     let path = std::path::PathBuf::from(path);
@@ -136,6 +158,51 @@ pub fn from_env() -> Result<Option<Arc<dyn KeyProvider>>> {
         store.expand(key_id.clone(), *bytes)?;
     }
     Ok(Some(Arc::new(store)))
+}
+
+fn kms_from_env(key_arn: String) -> Result<Arc<dyn KeyProvider>> {
+    let region = std::env::var(KMS_REGION_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            PrismError::Invalid(format!(
+                "{KMS_KEY_ENV} requires an explicit non-empty {KMS_REGION_ENV}"
+            ))
+        })?;
+    let credentials: Arc<dyn AwsCredentialsProvider> = if let Some(path) =
+        std::env::var_os(KMS_CREDENTIALS_FILE_ENV).filter(|value| !value.is_empty())
+    {
+        let profile = std::env::var(KMS_PROFILE_ENV).unwrap_or_else(|_| "default".into());
+        Arc::new(SharedCredentialsFile::new(path.into(), profile)?)
+    } else {
+        let required = |name: &str| {
+            std::env::var(name)
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    PrismError::Invalid(format!(
+                        "AWS KMS requires {name}, or a refreshable {KMS_CREDENTIALS_FILE_ENV}"
+                    ))
+                })
+        };
+        Arc::new(StaticAwsCredentials(Credentials {
+            access_key: required("AWS_ACCESS_KEY_ID")?,
+            secret_key: required("AWS_SECRET_ACCESS_KEY")?,
+            session_token: std::env::var("AWS_SESSION_TOKEN")
+                .ok()
+                .filter(|value| !value.trim().is_empty()),
+        }))
+    };
+    let decrypt_keys = std::env::var(KMS_DECRYPT_KEYS_ENV)
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let config = AwsKmsConfig::production(region, key_arn, credentials)?
+        .with_decrypt_key_arns(decrypt_keys)?;
+    Ok(Arc::new(AwsKmsProvider::new(config)?))
 }
 
 #[cfg(test)]
