@@ -976,7 +976,7 @@ impl ObjectStore for S3ObjectStore {
     }
 }
 
-fn now_amz_date() -> String {
+pub fn now_amz_date() -> String {
     // A deterministic-enough UTC stamp without a time dependency: seconds since epoch → date/time.
     // Good enough to sign against a server whose clock is within tolerance; a real skew surfaces as
     // the named RequestTimeTooSkewed from S3 (handled in `send`).

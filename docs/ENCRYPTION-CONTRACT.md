@@ -308,6 +308,10 @@ without unwrapping anything.
 
 - [x] `chacha20poly1305` pinned (`=`) and MSRV-1.75 clean; `zeroize` stays pinned at 1.8.1
 - [x] `KeyProvider` trait: `wrap`, `unwrap`, `key_id`, with identical error taxonomy across backends
+- [x] Production AWS KMS adapter: TLS 1.2+, SigV4, immutable key ARNs, fixed encryption context,
+      bounded responses, refreshable file credentials, previous-key allowlist, Helm wiring, and
+      operator `probe/status/rewrap/retire-check` commands. This closes the implementation gap,
+      not the external custody evidence gate.
 - [x] Software keystore backend with an **injectable fault surface** (unreachable, revoked, denied,
       throttled) so staging exercises the same branches KMS would take
 - [x] Bounded DEK cache, zeroized on drop, never logged
@@ -338,5 +342,7 @@ without unwrapping anything.
 - [ ] Unsafe-posture inventory updated for whatever the implementation proves refusable
 - [x] DATA-01 gap text records exactly what was exercised, and against which backend (§6)
 - [ ] CRYPTO-01 gap text
-- [ ] **Live-KMS run** — every gate above was exercised against the **software keystore**. It proves
+- [ ] **Live-KMS run** — every gate above was exercised against the **software keystore**. The
+      executable acceptance procedure and fail-closed receipt validator are in `docs/AWS-KMS.md`.
+      Until that procedure is run in a real account, the implementation proves
       the code path; it does not prove the custody, and no receipt in this repository says otherwise.

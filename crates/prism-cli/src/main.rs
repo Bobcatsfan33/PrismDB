@@ -67,6 +67,15 @@ USAGE:
   prism inspect   --path <dir>
   prism verify    --path <dir>
   prism fsck      --path <dir|part-dir>   offline format validator; needs no catalog
+  prism key probe
+                  round-trip one ephemeral DEK through the configured key backend;
+                  emits backend, key id, and ciphertext size, never key material
+  prism key status --path <dir>
+                  report the active wrapping key and live envelope counts
+  prism key rewrap --path <dir>
+                  idempotently rewrap live envelopes under the active key
+  prism key retire-check --path <dir> --key-id <immutable-id>
+                  refuse while any live part or WAL envelope still needs the key
   prism merge     --path <dir>
   prism reembed   --path <dir> --version <v>
   prism rollback  --path <dir> --to <snapshot-id>
@@ -155,6 +164,7 @@ fn run(argv: Vec<String>) -> Result<()> {
         "inspect" => cmd_inspect(&a),
         "verify" => cmd_verify(&a),
         "fsck" => cmd_fsck(&a),
+        "key" => cmd_key(&a),
         "merge" => cmd_merge(&a),
         "reembed" => cmd_reembed(&a),
         "rollback" => cmd_rollback(&a),
@@ -176,6 +186,59 @@ fn run(argv: Vec<String>) -> Result<()> {
 
 fn path_of(a: &Args) -> Result<PathBuf> {
     Ok(PathBuf::from(a.req("path")?))
+}
+
+fn cmd_key(a: &Args) -> Result<()> {
+    match a.sub.as_deref() {
+        Some("probe") => {
+            a.allow(&[])?;
+            let keys = keystore::from_env()?.ok_or_else(|| {
+                PrismError::Policy(
+                    "key probe requires PRISM_KMS_KEY_ID or PRISM_STAGING_KEYSTORE_FILE".into(),
+                )
+            })?;
+            let dek = prism_part::crypto::generate_dek()?;
+            let (key_id, wrapped) = keys.wrap(&dek)?;
+            let opened = keys.unwrap(&key_id, &wrapped)?;
+            if *opened != *dek {
+                return Err(PrismError::Invariant(
+                    "key provider round-trip changed the DEK".into(),
+                ));
+            }
+            emit(&serde_json::json!({
+                "status": "ok",
+                "backend": keys.backend(),
+                "active_key_id": key_id,
+                "wrapped_bytes": wrapped.len()
+            }))
+        }
+        Some("status") => {
+            a.allow(&["path"])?;
+            let engine = open(a)?;
+            let keys = keystore::from_env()?.ok_or_else(|| {
+                PrismError::Policy("key status requires a configured key backend".into())
+            })?;
+            emit(&serde_json::json!({
+                "backend": keys.backend(),
+                "active_key_id": keys.active_key_id()?,
+                "envelopes_by_key": engine.wrapping_keys_in_use()?
+            }))
+        }
+        Some("rewrap") => {
+            a.allow(&["path"])?;
+            emit(&open(a)?.rewrap_to_active_key()?)
+        }
+        Some("retire-check") => {
+            a.allow(&["path", "key-id"])?;
+            let engine = open(a)?;
+            let key_id = a.req("key-id")?;
+            engine.assert_key_retirable(key_id)?;
+            emit(&serde_json::json!({"status": "retirable", "key_id": key_id}))
+        }
+        _ => Err(PrismError::Invalid(
+            "usage: prism key <probe|status|rewrap|retire-check>".into(),
+        )),
+    }
 }
 
 /// The cold-tier object store from the environment, or `None` for the local default. When

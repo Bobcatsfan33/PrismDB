@@ -14,7 +14,7 @@ static WRITER_NONCE: AtomicU64 = AtomicU64::new(0);
 ///
 /// Names the backend, because a rotation exercised against a software keystore has proven the code
 /// and not the custody, and a receipt that does not say which is one nobody can act on.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct RewrapReport {
     pub backend: String,
     pub active_key_id: String,

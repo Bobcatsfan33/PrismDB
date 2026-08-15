@@ -1,4 +1,10 @@
 {{- include "prism-shard.assertDistinctTrust" . -}}
+{{- if and .Values.kms.enabled (or (not .Values.kms.keyArn) (not .Values.networkPolicy.kmsCidr)) -}}
+{{- fail "kms.enabled requires a full kms.keyArn and networkPolicy.kmsCidr for the private KMS endpoint" -}}
+{{- end -}}
+{{- if and .Values.kms.enabled (not (regexMatch (printf "^arn:(aws|aws-us-gov|aws-cn):kms:%s:[0-9]{12}:key/[A-Za-z0-9-]+$" .Values.kms.region) .Values.kms.keyArn)) -}}
+{{- fail "kms.keyArn must be an immutable key ARN in kms.region; aliases and bare key ids are unsupported" -}}
+{{- end -}}
 {{- if lt (mul .Values.terminationGracePeriodSeconds 1000) (int .Values.timeoutMs) -}}
 {{- fail (printf "terminationGracePeriodSeconds (%ds) is below the %dms request timeout the drain is budgeted against; SIGKILL would land mid-drain" (int .Values.terminationGracePeriodSeconds) (int .Values.timeoutMs)) -}}
 {{- end -}}
@@ -74,6 +80,18 @@ spec:
               value: {{ .Values.objectStore.bucket | quote }}
             - name: PRISM_S3_REGION
               value: {{ .Values.objectStore.region | quote }}
+            {{- if .Values.kms.enabled }}
+            - name: PRISM_KMS_KEY_ID
+              value: {{ .Values.kms.keyArn | quote }}
+            - name: PRISM_KMS_REGION
+              value: {{ .Values.kms.region | quote }}
+            - name: PRISM_KMS_CREDENTIALS_FILE
+              value: /var/run/prism-kms/credentials
+            - name: PRISM_KMS_PROFILE
+              value: {{ .Values.kms.profile | quote }}
+            - name: PRISM_KMS_DECRYPT_KEY_IDS
+              value: {{ join "," .Values.kms.decryptKeyArns | quote }}
+            {{- end }}
           envFrom:
             # The object-store access key, secret key, and optional session token. Only the Secret
             # name is rendered here; the credential bytes are resolved by the kubelet from the
@@ -155,6 +173,11 @@ spec:
               mountPath: /var/run/prism-coordinator-ca/ca.crt
               subPath: ca.crt
               readOnly: true
+            {{- if .Values.kms.enabled }}
+            - name: kms-credentials
+              mountPath: /var/run/prism-kms
+              readOnly: true
+            {{- end }}
       volumes:
         - name: tmp
           emptyDir:
@@ -172,6 +195,15 @@ spec:
           secret:
             secretName: {{ .Values.secrets.coordinatorCa }}
             defaultMode: 0440
+        {{- if .Values.kms.enabled }}
+        - name: kms-credentials
+          secret:
+            secretName: {{ .Values.secrets.kmsCredentials }}
+            defaultMode: 0440
+            items:
+              - key: credentials
+                path: credentials
+        {{- end }}
   volumeClaimTemplates:
     - metadata:
         name: data

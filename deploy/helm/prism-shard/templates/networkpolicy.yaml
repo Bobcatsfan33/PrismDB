@@ -53,6 +53,15 @@ spec:
       ports:
         - protocol: TCP
           port: {{ .Values.networkPolicy.objectStorePort }}
+    {{- if .Values.kms.enabled }}
+    # The private KMS endpoint only. DNS remains separately enumerated above.
+    - to:
+        - ipBlock:
+            cidr: {{ .Values.networkPolicy.kmsCidr | quote }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.kmsPort }}
+    {{- end }}
     # The model plane the shard embeds through.
     - to:
         - namespaceSelector:
