@@ -78,10 +78,15 @@ digest release path. See
 [`docs/PUBLIC-READ-SERVICE.md`](docs/PUBLIC-READ-SERVICE.md). The same boundary
 supports certificate-scoped, tenant-injected ingest over a replicated-only
 shard write RPC and remote-durable replacement-node recovery. PrismDB is still
-not production-approved because the supported shard-node distribution,
-production key custody (envelope encryption is implemented and gated, but every
+not production-approved because production key custody (envelope encryption is
+implemented and gated, but every
 gate ran against a software keystore), RPO/RTO,
 independent load/security, and organizational gates remain open.
+
+The supported compatibility, rolling-upgrade, rollback, and deprecation rules
+are defined in
+[`docs/VERSIONING-AND-UPGRADES.md`](docs/VERSIONING-AND-UPGRADES.md) and bound
+to executable version constants and frozen fixtures in CI.
 
 **Executable reference core under active development.** Sprints **S0 through S8** of eighteen are complete (**S7 shipped GPU-ready but GPU-off** — see Status): a dependency-light, single-node vertical slice that really ingests, really prunes, really scans compressed codes, really re-ranks exactly, and really answers — on a hardened, versioned, self-describing storage format, behind an admission boundary with exactly-once replay semantics, with tenant isolation enforced as a physical property of which bytes a query is allowed to read, an online model-migration lifecycle that keeps answering queries the whole way through, and a SIMD scan whose answer is byte-identical to the scalar reference on every CPU. **S7 (the GPU engine) is built but disabled** — the device-agnostic machinery (routing, fault-fallback, per-tenant device admission, the fp16 accuracy contract) is complete and tested against a CPU reference of the GPU route, and the GPU path itself stays off until a CI runner exists to prove it on real silicon. See [docs/PRISM.md](docs/PRISM.md) for the architecture and the full sprint roadmap, [docs/INGESTION-CONTRACT.md](docs/INGESTION-CONTRACT.md) for what an acknowledgement actually promises, [docs/QUERY-CONTRACT.md](docs/QUERY-CONTRACT.md) for what a cursor means, [docs/DETERMINISM-CONTRACT.md](docs/DETERMINISM-CONTRACT.md) for why the answer is the same on every CPU, plan, and route, and [docs/PROGRESS.md](docs/PROGRESS.md) for exactly what is proven so far and by which test.
 

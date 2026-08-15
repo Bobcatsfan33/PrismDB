@@ -2,11 +2,14 @@
 
 ## Current status
 
-PrismDB is an executable reference core under active development, not a supported production
-service. The current release does not provide a public production network server and authentication
-boundary, cross-node write transport, or per-tenant envelope encryption. The read-only
-coordinator↔shard path does require mutual TLS. See `README.md` and `docs/PROGRESS.md` before placing
-any sensitive data in a store.
+PrismDB has a supported authenticated `prismd` HTTPS boundary, a mutually authenticated
+coordinator↔shard read/write protocol, and per-tenant envelope encryption. Its signed service and
+shard distributions, hardened Helm manifests, and version/upgrade contract are implemented.
+PrismDB as a whole is nevertheless **not production-approved**: the authoritative open controls
+and external deployment gates are in `docs/enterprise-readiness.json`. In particular, software
+keystore tests do not establish production KMS custody, and independent penetration, topology,
+operational, and organizational evidence remains required. See `README.md` and
+`docs/procurement-readiness.md` before placing sensitive data in a store.
 
 ## Reporting a vulnerability
 
@@ -19,6 +22,8 @@ for remediation within seven calendar days and high-severity issues within thirt
 
 ## Supported versions
 
-Until a 1.0 release, only the latest revision of `main` is eligible for security fixes. That policy
-is suitable for evaluation builds only; a supported-version and migration policy is a prerequisite
-for production readiness.
+Until the first promoted release, only the exact current product version is eligible for security
+fixes. Promoted releases will publish their support window and affected versions in release notes.
+The compatibility, upgrade, rollback, and deprecation contract is
+`docs/VERSIONING-AND-UPGRADES.md`; CI binds its machine-readable inventory to the executable API,
+RPC, store, and part-format constants.
