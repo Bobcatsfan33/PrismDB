@@ -3,11 +3,11 @@
   "product": "PrismDB",
   "repository": "Bobcatsfan33/PrismDB",
   "assessment": {
-    "asOf": "2026-07-30",
-    "reviewBy": "2026-10-29",
+    "asOf": "2026-08-15",
+    "reviewBy": "2026-11-13",
     "softwareReleaseCandidate": false,
     "deploymentDecision": "not-approved",
-    "decisionReason": "PrismDB now has an authenticated tenant-scoped read/write API and remote-durable admission recovery, but the supported shard-node distribution, encryption, backup/hydration and RPO/RTO, independent operational evidence, and organizational deployment gates remain open."
+    "decisionReason": "PrismDB now has an authenticated tenant-scoped read/write API, remote-durable admission recovery, supported signed distributions, and an enforced version/upgrade contract, but production KMS custody, customer-topology RPO/RTO and scale, independent security, operational, and organizational deployment gates remain open."
   },
   "frameworks": [
     {
@@ -245,15 +245,18 @@
     {
       "id": "ENG-SERVICE",
       "title": "Production service and supported distribution",
-      "status": "open",
+      "status": "complete",
       "blocking": true,
       "ownerRole": "Engineering",
-      "acceptanceCriteria": "The shipped authenticated public read/write API is joined by migration/version policy, a complete signed shard-node database distribution, and production deployment manifests that pass release gates. The signed shard-node distribution and its deployment manifests are complete; migration/version policy and the operational gates below remain.",
+      "acceptanceCriteria": "The shipped authenticated public read/write API is joined by an enforced migration/version policy, a complete signed shard-node database distribution, and production deployment manifests that pass release gates.",
       "evidence": [
         "docs/SHARD-TRANSPORT.md",
         "docs/PUBLIC-READ-SERVICE.md",
         "docs/RELEASE-ASSURANCE.md",
+        "docs/VERSIONING-AND-UPGRADES.md",
         "docs/openapi-public-read-v1.yaml",
+        "testing/compat/contract.json",
+        "scripts/verify_compatibility_contract.py",
         "crates/prism-engine/src/shard_rpc.rs",
         "crates/prism-engine/src/wal.rs",
         "crates/prism-cli/src/main.rs",

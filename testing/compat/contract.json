@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "productVersion": "0.0.1",
+  "publicApiVersion": "v1",
+  "shardRpcProtocolVersion": 4,
+  "store": {
+    "writeVersion": 2,
+    "readVersions": [1, 2]
+  },
+  "part": {
+    "writeVersion": 4,
+    "readVersions": [1, 2, 3, 4]
+  },
+  "fixtures": [
+    {
+      "version": 1,
+      "path": "testing/compat/v1",
+      "fileCount": 19,
+      "treeSha256": "9e5219eae85d824eafab511f9c6fc06451b36e41e2477f2ab02a515f5ae4f91d"
+    },
+    {
+      "version": 2,
+      "path": "testing/compat/v2",
+      "fileCount": 19,
+      "treeSha256": "45c90b554a9f9cc8bc427643eef33fb87bce4890c6bf108fef8fc1e4c017266e"
+    },
+    {
+      "version": 3,
+      "path": "testing/compat/v3",
+      "fileCount": 28,
+      "treeSha256": "270b6c0bb4edcf7b339258164d0040ad10b400dd207664cd8dc026049a329c69"
+    }
+  ],
+  "evidence": [
+    "docs/VERSIONING-AND-UPGRADES.md",
+    "crates/prism-engine/tests/integration.rs",
+    ".github/workflows/ci.yml"
+  ]
+}
+
