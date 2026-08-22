@@ -35,6 +35,15 @@ authorized tenant: identical content is acknowledged as a reported duplicate,
 while reusing the key with different content is refused rather than silently
 rewriting history.
 
+OpenTelemetry collectors may instead send OTLP/HTTP JSON traces to
+`POST /v1/traces`. Configure `OTEL_EXPORTER_OTLP_PROTOCOL=http/json` and pass
+`x-prism-tenant=<tenant>` in `OTEL_EXPORTER_OTLP_HEADERS`. Resource-level
+`tenant.id` or `service.namespace` attributes may refine the fallback, but every
+mapped event tenant must be in the client certificate's explicit grant. Span IDs
+become idempotency keys, so collector retries are deduplicated. Empty envelopes and
+payloads containing no GenAI spans are successful no-ops as required by OTLP.
+Protobuf and gRPC encodings are not accepted by this endpoint.
+
 Generate the policy fingerprint from the leaf certificate:
 
 ```bash
@@ -89,6 +98,7 @@ request-ID labels:
 - `prism_api_requests_total`
 - `prism_api_searches_total`
 - `prism_api_ingests_total`
+- `prism_api_otlp_ingests_total`
 - `prism_api_ingested_events_total`
 - `prism_api_duplicate_events_total`
 - `prism_api_dead_lettered_events_total`

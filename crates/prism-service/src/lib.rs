@@ -433,6 +433,7 @@ pub struct ServiceMetrics {
     requests: AtomicU64,
     searches: AtomicU64,
     ingests: AtomicU64,
+    otlp_ingests: AtomicU64,
     ingested_events: AtomicU64,
     duplicate_events: AtomicU64,
     dead_lettered_events: AtomicU64,
@@ -457,6 +458,8 @@ impl ServiceMetrics {
              prism_api_searches_total {}\n\
              # TYPE prism_api_ingests_total counter\n\
              prism_api_ingests_total {}\n\
+             # TYPE prism_api_otlp_ingests_total counter\n\
+             prism_api_otlp_ingests_total {}\n\
              # TYPE prism_api_ingested_events_total counter\n\
              prism_api_ingested_events_total {}\n\
              # TYPE prism_api_duplicate_events_total counter\n\
@@ -480,6 +483,7 @@ impl ServiceMetrics {
             self.requests.load(Ordering::Relaxed),
             self.searches.load(Ordering::Relaxed),
             self.ingests.load(Ordering::Relaxed),
+            self.otlp_ingests.load(Ordering::Relaxed),
             self.ingested_events.load(Ordering::Relaxed),
             self.duplicate_events.load(Ordering::Relaxed),
             self.dead_lettered_events.load(Ordering::Relaxed),
@@ -943,6 +947,7 @@ impl ReadService {
             }
             ("POST", "/v1/search") => self.search(identity, request, request_id),
             ("POST", "/v1/events") => self.ingest(identity, request, request_id),
+            ("POST", "/v1/traces") => self.ingest_otlp(identity, request, request_id),
             ("GET" | "POST", _) => {
                 error_response(404, "not_found", "route does not exist", request_id)
             }
@@ -1143,6 +1148,142 @@ impl ReadService {
                     503,
                     "ingest_unavailable",
                     "ingest could not be completed",
+                    request_id,
+                )
+            }
+        }
+    }
+
+    /// OTLP/HTTP JSON trace ingestion. Collectors set `x-prism-tenant` through
+    /// `OTEL_EXPORTER_OTLP_HEADERS`; a resource-level `tenant.id` may refine it,
+    /// but every resulting tenant is checked against the mTLS identity policy.
+    fn ingest_otlp(
+        &self,
+        identity: &Arc<Identity>,
+        request: &HttpRequest,
+        request_id: &str,
+    ) -> HttpResponse {
+        if !identity.policy.permits("ingest") {
+            return error_response(403, "scope_denied", "ingest scope is required", request_id);
+        }
+        let Some(tenant_fallback) = request.headers.get("x-prism-tenant") else {
+            return error_response(
+                400,
+                "missing_tenant",
+                "OTLP/HTTP JSON requires the x-prism-tenant header",
+                request_id,
+            );
+        };
+        if !valid_name(tenant_fallback, 128) {
+            return error_response(
+                400,
+                "invalid_tenant",
+                "x-prism-tenant must be 1..128 safe ASCII characters",
+                request_id,
+            );
+        }
+        let body = match std::str::from_utf8(&request.body) {
+            Ok(body) => body,
+            Err(_) => {
+                return error_response(400, "invalid_json", "OTLP body is not UTF-8", request_id)
+            }
+        };
+        let observed_time = prism_engine::engine::now_ms();
+        let events = match prism_engine::otlp::parse(body, tenant_fallback, observed_time) {
+            Ok(events) => events,
+            Err(error) => {
+                return error_response(400, "invalid_otlp", &error.to_string(), request_id)
+            }
+        };
+        if events.len() > MAX_INGEST_EVENTS {
+            return error_response(
+                400,
+                "too_many_spans",
+                "OTLP payload exceeds the per-request event limit",
+                request_id,
+            );
+        }
+        if events.iter().any(|event| {
+            !valid_name(&event.tenant_id, 128) || !identity.policy.permits_tenant(&event.tenant_id)
+        }) {
+            self.metrics.unauthorized.fetch_add(1, Ordering::Relaxed);
+            return error_response(
+                403,
+                "tenant_denied",
+                "one or more OTLP resource tenants are not authorized for this identity",
+                request_id,
+            );
+        }
+        // OTLP permits an empty telemetry envelope. It is a successful no-op,
+        // and non-GenAI spans are intentionally filtered by the mapper.
+        if events.is_empty() {
+            return HttpResponse::json(200, &serde_json::json!({}));
+        }
+        let Some(_identity_guard) = try_enter(&identity.in_flight, identity.policy.max_in_flight)
+        else {
+            self.metrics.rate_limited.fetch_add(1, Ordering::Relaxed);
+            return error_response(
+                429,
+                "concurrency_limit",
+                "identity concurrency limit reached",
+                request_id,
+            );
+        };
+        let Some(_global_guard) = try_enter(&self.metrics.in_flight, MAX_PUBLIC_CONNECTIONS) else {
+            self.metrics.rate_limited.fetch_add(1, Ordering::Relaxed);
+            return error_response(
+                429,
+                "concurrency_limit",
+                "service concurrency limit reached",
+                request_id,
+            );
+        };
+        self.metrics.ingests.fetch_add(1, Ordering::Relaxed);
+        self.metrics.otlp_ingests.fetch_add(1, Ordering::Relaxed);
+        let started = Instant::now();
+        let outcome = self.backend.ingest(events, observed_time);
+        self.metrics.ingest_latency_micros.fetch_add(
+            started.elapsed().as_micros().min(u64::MAX as u128) as u64,
+            Ordering::Relaxed,
+        );
+        match outcome {
+            Ok(report) => {
+                self.metrics
+                    .ingested_events
+                    .fetch_add(report.published as u64, Ordering::Relaxed);
+                self.metrics
+                    .duplicate_events
+                    .fetch_add(report.duplicates_suppressed as u64, Ordering::Relaxed);
+                self.metrics
+                    .dead_lettered_events
+                    .fetch_add(report.dead_lettered as u64, Ordering::Relaxed);
+                let response = if report.dead_lettered == 0 {
+                    serde_json::json!({})
+                } else {
+                    serde_json::json!({
+                        "partialSuccess": {
+                            "rejectedSpans": report.dead_lettered.to_string(),
+                            "errorMessage": "one or more GenAI spans were dead-lettered"
+                        }
+                    })
+                };
+                HttpResponse::json(200, &response)
+            }
+            Err(error) => {
+                self.metrics.failures.fetch_add(1, Ordering::Relaxed);
+                eprintln!(
+                    "{}",
+                    serde_json::json!({
+                        "event": "otlp_ingest_failed",
+                        "request_id": request_id,
+                        "identity_id": identity.policy.identity_id,
+                        "error": error.to_string(),
+                    })
+                );
+                error_response(
+                    503,
+                    "ingest_unavailable",
+                    "OTLP ingest could not be completed",
                     request_id,
                 )
             }
@@ -1501,6 +1642,80 @@ mod tests {
             br#"{"tenant":"tenant-a","events":[{"tenant_id":"tenant-b","event_id":"e1","event_time":123,"event_name":"x","cost":0,"error":false,"body":"x"}]}"#
         )
         .is_err());
+    }
+
+    #[test]
+    fn otlp_http_maps_genai_spans_and_enforces_resource_tenants() {
+        let backend = Arc::new(FakeBackend {
+            tenants: Mutex::new(Vec::new()),
+            ingested: Mutex::new(Vec::new()),
+            ready: true,
+            writable: true,
+        });
+        let service = ReadService {
+            backend: backend.clone(),
+            policy: Arc::new(policy()),
+            tls: Arc::new(
+                ServerConfig::builder()
+                    .with_no_client_auth()
+                    .with_cert_resolver(
+                        Arc::new(rustls::server::ResolvesServerCertUsingSni::new()),
+                    ),
+            ),
+            timeout: Duration::from_secs(1),
+            metrics: Arc::new(ServiceMetrics::default()),
+        };
+        let identity = service.policy.identities.values().next().cloned().unwrap();
+        let payload = br#"{
+          "resourceSpans": [{
+            "resource": {"attributes": [{"key":"tenant.id","value":{"stringValue":"tenant-a"}}]},
+            "scopeSpans": [{"spans": [{
+              "traceId":"5b8aa5a2d2c872e8321cf37308d69df2",
+              "spanId":"051581bf3cb55c13",
+              "name":"chat openai",
+              "startTimeUnixNano":"1760000000000000000",
+              "attributes":[
+                {"key":"gen_ai.prompt","value":{"stringValue":"why did the tool time out"}},
+                {"key":"gen_ai.completion","value":{"stringValue":"it was rate limited"}}
+              ]
+            }]}]
+          }]
+        }"#;
+        let request = HttpRequest {
+            method: "POST".into(),
+            path: "/v1/traces".into(),
+            headers: BTreeMap::from([
+                ("content-type".into(), "application/json".into()),
+                ("x-prism-tenant".into(), "tenant-a".into()),
+            ]),
+            body: payload.to_vec(),
+        };
+        let response = service.route(&identity, &request, "request-1");
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, b"{}");
+        let ingested = backend.ingested.lock().unwrap();
+        assert_eq!(ingested.len(), 1);
+        assert_eq!(ingested[0][0].tenant_id, "tenant-a");
+        assert_eq!(
+            ingested[0][0].idempotency_key.as_deref(),
+            Some("051581bf3cb55c13")
+        );
+        drop(ingested);
+
+        let denied = String::from_utf8(payload.to_vec())
+            .unwrap()
+            .replace("tenant-a", "tenant-b");
+        let denied_request = HttpRequest {
+            body: denied.into_bytes(),
+            ..request
+        };
+        assert_eq!(
+            service
+                .route(&identity, &denied_request, "request-2")
+                .status,
+            403
+        );
+        assert_eq!(backend.ingested.lock().unwrap().len(), 1);
     }
 
     #[test]

@@ -121,6 +121,47 @@ paths:
           $ref: "#/components/responses/RateLimited"
         "503":
           $ref: "#/components/responses/Unavailable"
+  /v1/traces:
+    post:
+      operationId: ingestOtlpTraces
+      description: OTLP/HTTP JSON trace ingestion. Protobuf and gRPC are not supported.
+      parameters:
+        - in: header
+          name: X-Prism-Tenant
+          required: true
+          schema:
+            type: string
+            pattern: "^[A-Za-z0-9._-]{1,128}$"
+        - in: header
+          name: X-Request-Id
+          required: false
+          schema:
+            type: string
+            pattern: "^[A-Za-z0-9._-]{1,128}$"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: OTLP ExportTraceServiceRequest encoded with protobuf JSON mapping.
+              additionalProperties: true
+      responses:
+        "200":
+          description: OTLP ExportTraceServiceResponse; empty on full success.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          $ref: "#/components/responses/Unavailable"
 components:
   securitySchemes:
     mutualTLS:

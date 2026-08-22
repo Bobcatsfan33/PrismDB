@@ -135,12 +135,14 @@ to executable version constants and frozen fixtures in CI.
 - The deterministic local hash embedder remains the zero-configuration development default. S13's production plane now includes a separately supervised, dependency-free identity gateway to a colocated GPU inference runtime: mounted weights/tokenizer/preprocessing bytes are independently hashed before readiness, only loopback backends and peer-authorized Unix clients are accepted, and every response is cardinality/dimension/finiteness/norm checked under the exact persisted identity. Exact tenant/model/version/purpose grants, pre-ACK local GPU budgets, stable denial reasons, and a durable no-text usage ledger are enforced below every engine door. The gateway release is built from a digest-pinned base, vulnerability-gated, SBOM-attested, keylessly signed, and published with build provenance. Versioned redact-before-embedding, fleet-wide quota/chargeback, cache, calibrated drift/OOD gates, and the long-running API workload remain open; see [`docs/MODEL-PLANE.md`](docs/MODEL-PLANE.md), [`docs/MODEL-GOVERNANCE.md`](docs/MODEL-GOVERNANCE.md), and [`docs/RELEASE-ASSURANCE.md`](docs/RELEASE-ASSURANCE.md).
 - Semantic grouping clusters the re-rank survivors. Grouping an arbitrarily large *filtered set* — the flagship aggregate — is S9.
 - The probe count is fixed per query. Scaling it when a query sits on a cluster boundary is [issue #1](https://github.com/Bobcatsfan33/PrismDB/issues/1), targeted at S6.
-- **No OTLP listener and no Kafka client.** The authenticated `prismd` HTTPS
-  service accepts the reduced tenant-scoped event schema and routes it only to
-  replicated-WAL shard writers. The OTel
-  GenAI *mapping* is tested and pinned to a semantic-convention version. The
+- **OTLP/HTTP JSON traces now ingest at `/v1/traces`; no OTLP protobuf/gRPC or Kafka client yet.**
+  The authenticated `prismd` HTTPS service accepts both the reduced tenant-scoped event schema
+  and standard OTLP/HTTP JSON. Collectors pass `x-prism-tenant` via
+  `OTEL_EXPORTER_OTLP_HEADERS`; resource `tenant.id` overrides are independently checked against
+  the mTLS identity before any write. The OTel GenAI mapping is tested and pinned to a
+  semantic-convention version. The
   `Source` abstraction has Kafka's offset semantics and the file-backed source
-  exercises them through real process deaths, but supported OTLP and Kafka
+  exercises them through real process deaths, but protobuf/gRPC and Kafka
   integrations remain separate connector work.
 - **Every tuned constant here was derived on a hash-embedder corpus, and is marked `corpus_conditional` in the ledger because of it.** The hash embedder makes tests reproducible with no weights and no network — and its motifs are unusually well-separated, which is exactly the wrong property in a corpus you tune an index on. Building a real-embedding golden corpus and re-deriving every sweep against it is [issue #3](https://github.com/Bobcatsfan33/PrismDB/issues/3). Honest is not the same as fixed.
 - A shared bucket's *manifest bytes* still name its co-tenants to anyone with raw disk access. Per-tenant envelope encryption is S14; a dedicated bucket is the answer until then. Stated in the [query contract](docs/QUERY-CONTRACT.md), not discovered by a customer.
