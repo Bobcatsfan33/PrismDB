@@ -21,6 +21,26 @@ software keystore, which proves the code path and not the custody — blocking g
 backup/hydration and RPO/RTO, load-derived SLOs, independent-host scaling/fault evidence,
 independent penetration testing, support, and organizational assurance remain required.
 
+## `EXT-KMS` closure route
+
+The custody gate closes on a partner trigger, mirroring `EXT-SCALE`'s discipline. The route was
+recorded via MutinyDB decision record
+[MD-7](https://github.com/Bobcatsfan33/MutinyDB/blob/main/docs/decisions/MD-7.md); with this
+section and the `EXT-KMS` entry in [`enterprise-readiness.json`](enterprise-readiness.json), its
+normative home is this repository and MD-7 becomes the citation. Owner: Security Engineering and
+SRE. Trigger: **the first enterprise adopter** runs the encryption gate suite against **their**
+key service in **their** account, and the receipts name that backend — custody proven in the
+deployment shape that matters, strictly stronger evidence than a vendor-account run. Fallback: if
+a serious evaluation cannot or will not run the suite, the direct AWS close (three keys, scoped
+IAM, ~30 minutes of operator time) happens **before any production-approval claim** is made — the
+claim waits for the receipt, never the reverse.
+
+Quoted verbatim from MD-7 ("this record" inside the quote is MD-7):
+
+> **Simulated or emulated closure remains forbidden**, per the gate's own acceptance criteria:
+> the named failure modes must be produced by the real key service, not injected by the
+> software keystore's fault surface. Nothing in this record weakens that sentence.
+
 The software-owned service/distribution gate is complete. The supported
 [`version and upgrade contract`](VERSIONING-AND-UPGRADES.md) inventories the
 public API, shard RPC, store, and part formats; freezes released compatibility
