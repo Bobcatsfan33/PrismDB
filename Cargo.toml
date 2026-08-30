@@ -34,7 +34,7 @@ native-tls = "=0.2.13"
 # verify client certificates on a server, which is mandatory at this boundary.
 rustls = { version = "=0.23.35", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pki-types = { version = "=1.15.1", features = ["std"] }
-signal-hook = "=0.3.18"
+signal-hook = "=0.4.4"
 # The one hand-rolling exception the dependency charter makes, argued in D-095: a hash has one
 # publishable test vector and no state, while an AEAD has nonce management, constant-time tag
 # comparison, and failure modes no NIST vector detects. Pinned because 0.11 raises the MSRV above
