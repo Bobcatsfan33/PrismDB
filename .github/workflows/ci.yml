@@ -18,7 +18,7 @@ jobs:
     name: enterprise evidence and decision integrity
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: "3.13"
@@ -50,7 +50,7 @@ jobs:
     name: fmt + clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -62,7 +62,7 @@ jobs:
     name: Rust 1.75 MSRV
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.75.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --locked --workspace --all-targets
@@ -75,7 +75,7 @@ jobs:
       matrix:
         profile: [debug, release]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # Debug catches the debug_assert!s; release is what the numbers are
@@ -92,7 +92,7 @@ jobs:
     name: fault-injection matrix
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # Kills a real prism process at every declared durability boundary and
@@ -107,7 +107,7 @@ jobs:
     name: format fuzzing
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # Byte flips, every truncation length, total garbage, checksum-repairing
@@ -119,7 +119,7 @@ jobs:
     name: kill/reopen campaign (short)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # A randomized sample on every commit; the full 10,000-run S1 gate runs
@@ -130,7 +130,7 @@ jobs:
     name: the S2 gate — replay, offsets, quotas, starvation
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # Every test in here asserts a clause of docs/INGESTION-CONTRACT.md, which was
@@ -143,7 +143,7 @@ jobs:
     name: no tuned constant without evidence (charter C-1)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # Checks the ledger and the code against each other IN BOTH DIRECTIONS: a
@@ -156,7 +156,7 @@ jobs:
     name: the S3 gate — same door, tenant policy, bounded parsing, pagination
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # Every query runs through BOTH doors, asserting identical rows AND identical
@@ -170,7 +170,7 @@ jobs:
     name: the S4 gate — isolation as an I/O property, and the promotion dual door
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # Two gates. The first fills every other tenant's partitions with unreadable
@@ -186,7 +186,7 @@ jobs:
     name: the S6 gate — the answer does not depend on the ISA
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # Every kernel this runner's CPU supports (scalar + AVX2 on GitHub x86) must answer every
@@ -201,7 +201,7 @@ jobs:
     name: the S6 gate on ARM (NEON)
     runs-on: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # The other half of the ISA matrix: scalar vs NEON must be byte-identical. The x86 runner
@@ -214,7 +214,7 @@ jobs:
     name: the hot loop allocates nothing (determinism contract §4)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # A counting allocator proves the block scan and the bounded top-k perform ZERO heap
@@ -229,7 +229,7 @@ jobs:
     name: every unsafe block is documented (determinism contract §6)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # Grep-level: the count of `unsafe` tokens in crates/*/src must equal the number
       # docs/UNSAFE-INVENTORY.md accounts for. Adding an unsafe block without documenting its
       # safety argument turns this red.
@@ -239,7 +239,7 @@ jobs:
     name: the experimental AVX-512 kernel still compiles
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # AVX-512 ships OFF (no CI runner can execute it yet -- determinism contract §3), but it is
@@ -251,7 +251,7 @@ jobs:
     name: the S8 gate — plan-invariance, worst-cell regret, calibration
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # Every physical strategy (interleaved, scalar-first, semantic-first) answers every golden
@@ -269,7 +269,7 @@ jobs:
     name: the S7 gate — the route is invisible to the answer (GPU-ready, GPU-off)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # S7 ships GPU-ready, GPU-off: no CUDA hardware, no GPU runner, so the GPU gate is NOT
@@ -287,7 +287,7 @@ jobs:
     name: the S9 gate — semantic_cluster is a function of the data (C-7)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # semantic_cluster: identical clusters/exemplars/aggregates across layouts and forced
@@ -305,7 +305,7 @@ jobs:
     name: the fp16 rerank accuracy contract holds (D-049)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release
@@ -329,7 +329,7 @@ jobs:
     name: the S5 gate — migration, wrong codebook, bridges, DEGRADED alarms
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # Queries answer at EVERY step of a two-generation migration; rollback is catalog-only; a
@@ -344,7 +344,7 @@ jobs:
     name: the S10 gate — reader leases + GC grace by construction (invariant 6)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # GC grace is derived from the lease TTL (one constant), so a reader within its lease is
@@ -356,7 +356,7 @@ jobs:
     name: the S14 gate — the disaster drill, and every restore failure named
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # The drill itself (D-094): publish, acknowledge a pre-publication tail, destroy the
@@ -371,7 +371,7 @@ jobs:
     name: encryption gates — nothing legible at rest, rotation without rewrites, rollback intact
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # These tests also run inside `tests (debug)` and `tests (release)`. The duplication is the
@@ -428,7 +428,7 @@ jobs:
     name: the S10 gate — size-tiered merges, bounded steady state, answers unchanged
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # A merge is compaction: the top-k over the same rows is identical after any number of merge
@@ -446,7 +446,7 @@ jobs:
     name: the S11 gate — object store, cache trusts nothing, fetch budget
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # The ObjectStore trait + local backend + fault wrapper: CAS create (two writers, one wins),
@@ -460,7 +460,7 @@ jobs:
     name: the S11 MinIO gate — hand-rolled S3 client vs a real S3 server
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # Run the official MinIO as a background container (a `services:` block cannot override the
@@ -534,7 +534,7 @@ jobs:
     name: charter C-4 — the answer is a function of the data, not the layout
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # THE PERMANENT GATE. One frozen logical corpus (C-2), materialized four ways -- different
@@ -549,7 +549,7 @@ jobs:
     name: the golden corpus has not moved (charter C-2)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # Compares COMMITTED BYTES against the manifest's checksums. A drift check that
       # regenerates what it is checking tests nothing -- which is exactly what happened in S2.
       - name: verify every frozen golden artifact
@@ -577,7 +577,7 @@ jobs:
     name: recall contract vs the exact oracle
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release
@@ -602,7 +602,7 @@ jobs:
     name: format compatibility fixtures
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: version and upgrade contract matches executable surfaces
@@ -645,7 +645,7 @@ jobs:
     name: the README quickstart actually works
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # Extracts the shell block out of README.md and runs it. Not a copy of the
@@ -657,7 +657,7 @@ jobs:
     name: baselines are reproducible
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release
