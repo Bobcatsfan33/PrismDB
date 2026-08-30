@@ -44,7 +44,7 @@ chacha20poly1305 = { version = "=0.10.1", default-features = false, features = [
 # No `zeroize_derive`: that feature pulls zeroize_derive 1.5.0, whose manifest requires
 # edition2024 and which Cargo 1.75 cannot even parse. `Zeroizing<T>` and the trait cover the key
 # cache without the proc macro.
-zeroize = { version = "=1.8.1", default-features = false, features = ["alloc"] }
+zeroize = { version = "=1.9.0", default-features = false, features = ["alloc"] }
 # Cargo.lock intentionally holds zeroize 1.8.1, tempfile 3.10.1, openssl
 # 0.10.75, and openssl-sys 0.9.111: newer semver-compatible releases in these
 # lines require Cargo/rustc newer than the declared MSRV. The locked Linux MSRV
