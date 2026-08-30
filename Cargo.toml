@@ -32,7 +32,7 @@ native-tls = "=0.2.13"
 # first 0.21 implementation was rejected before merge because cargo-audit found
 # advisories in its ring/webpki line. Unlike native-tls, rustls can require and
 # verify client certificates on a server, which is mandatory at this boundary.
-rustls = { version = "=0.23.35", default-features = false, features = ["ring", "std", "tls12"] }
+rustls = { version = "=0.23.43", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pki-types = { version = "=1.15.1", features = ["std"] }
 signal-hook = "=0.4.4"
 # The one hand-rolling exception the dependency charter makes, argued in D-095: a hash has one
