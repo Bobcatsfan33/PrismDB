@@ -13,7 +13,7 @@ members = [
 [workspace.package]
 version = "0.0.1"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.80"
 license = "Apache-2.0"
 repository = "https://github.com/Bobcatsfan33/PrismDB"
 
@@ -22,13 +22,15 @@ repository = "https://github.com/Bobcatsfan33/PrismDB"
 # JSON. TLS is the security exception authorized by D-065/D-088: native-tls
 # protects production object storage, while rustls protects the mutual-auth
 # shard boundary that native-tls cannot express server-side. Neither may be
-# replaced with a hand-rolled TLS stack.
+# replaced with a hand-rolled TLS stack. Every `=` pin below is measured against
+# the declared MSRV, which is 1.80 as decided in D-097.
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# 0.2.14+ requires Rust 1.80; Prism's declared MSRV is 1.75.
-native-tls = "=0.2.13"
-# 0.23.35 declares Rust 1.71 compatibility, below PrismDB's Rust 1.75 MSRV. The
+# Requires Rust 1.80, which is exactly the floor D-097 set for it. 0.2.17 is
+# yanked upstream, so 0.2.18 is the newest usable release in the line.
+native-tls = "=0.2.18"
+# 0.23.35 declares Rust 1.71 compatibility, below PrismDB's Rust 1.80 MSRV. The
 # first 0.21 implementation was rejected before merge because cargo-audit found
 # advisories in its ring/webpki line. Unlike native-tls, rustls can require and
 # verify client certificates on a server, which is mandatory at this boundary.
@@ -37,18 +39,20 @@ rustls-pki-types = { version = "=1.15.1", features = ["std"] }
 signal-hook = "=0.4.4"
 # The one hand-rolling exception the dependency charter makes, argued in D-095: a hash has one
 # publishable test vector and no state, while an AEAD has nonce management, constant-time tag
-# comparison, and failure modes no NIST vector detects. Pinned because 0.11 raises the MSRV above
-# the declared 1.75; `zeroize` stays at 1.8.1 for the same reason (1.9 requires edition2024, which
-# Cargo 1.75 cannot parse).
+# comparison, and failure modes no NIST vector detects. Pinned because 0.11 declares Rust 1.85 and
+# edition2024, above the declared 1.80, and buys nothing this engine uses; `zeroize` stays in the 1.8
+# line for the same reason (1.9 declares 1.85/edition2024). D-097 records why that floor was not
+# raised further, and 0.10.1 ciphertext was verified byte-identical to 0.11.0 there.
 chacha20poly1305 = { version = "=0.10.1", default-features = false, features = ["alloc", "getrandom"] }
 # No `zeroize_derive`: that feature pulls zeroize_derive 1.5.0, whose manifest requires
-# edition2024 and which Cargo 1.75 cannot even parse. `Zeroizing<T>` and the trait cover the key
-# cache without the proc macro.
-zeroize = { version = "=1.8.1", default-features = false, features = ["alloc"] }
-# Cargo.lock intentionally holds zeroize 1.8.1, tempfile 3.10.1, openssl
-# 0.10.75, and openssl-sys 0.9.111: newer semver-compatible releases in these
-# lines require Cargo/rustc newer than the declared MSRV. The locked Linux MSRV
-# CI job prevents those target-specific transitive bounds from drifting.
+# edition2024 and which Cargo 1.80 cannot even parse. `Zeroizing<T>` and the trait cover the key
+# cache without the proc macro. 1.8.2 declares Rust 1.60 and is the newest release in the line that
+# fits the floor; it changes only a docs attribute.
+zeroize = { version = "=1.8.2", default-features = false, features = ["alloc"] }
+# Cargo.lock intentionally holds tempfile 3.10.1, openssl 0.10.75, and
+# openssl-sys 0.9.111: newer semver-compatible releases in these lines require
+# Cargo/rustc newer than the declared MSRV. The locked Linux MSRV CI job
+# prevents those target-specific transitive bounds from drifting.
 prism-types = { path = "crates/prism-types" }
 prism-quantizer = { path = "crates/prism-quantizer" }
 prism-part = { path = "crates/prism-part" }
