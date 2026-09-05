@@ -91,7 +91,7 @@ readable Python tag while retaining an unrelated digest.
 
 The same assurance contract applies independently to `prismd`. The
 `.github/workflows/prismd-release.yml` workflow builds
-`deploy/prismd/Dockerfile` from a digest-pinned Rust 1.75 builder into a
+`deploy/prismd/Dockerfile` from a digest-pinned Rust 1.80 builder into a
 digest-pinned distroless Debian 12 `nonroot` runtime, verifies UID/GID 65532,
 and runs `prismd version` with a read-only filesystem, no network, no
 capabilities, and `no-new-privileges`.
@@ -120,7 +120,7 @@ database distribution, which has its own workflow and its own receipt below.
 
 `.github/workflows/prism-shard-release.yml` applies the same contract to the
 database node itself. It builds `deploy/prism-shard/Dockerfile` — the exact
-`prism shard-serve` binary path — from the same digest-pinned Rust 1.75 builder
+`prism shard-serve` binary path — from the same digest-pinned Rust 1.80 builder
 into the same digest-pinned distroless Debian 12 `nonroot` runtime, and proves:
 
 - the image records both approved base digests and is configured as
