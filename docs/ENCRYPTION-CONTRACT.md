@@ -306,7 +306,8 @@ without unwrapping anything.
 
 ## Implementation checklist
 
-- [x] `chacha20poly1305` pinned (`=`) and MSRV-1.75 clean; `zeroize` stays pinned at 1.8.1
+- [x] `chacha20poly1305` pinned (`=`) and MSRV clean at the declared floor (1.75 when D-095
+      landed, 1.80 since [D-097](DECISIONS.md)); `zeroize` stays pinned in the 1.8 line (1.8.2)
 - [x] `KeyProvider` trait: `wrap`, `unwrap`, `key_id`, with identical error taxonomy across backends
 - [x] Production AWS KMS adapter: TLS 1.2+, SigV4, immutable key ARNs, fixed encryption context,
       bounded responses, refreshable file credentials, previous-key allowlist, Helm wiring, and

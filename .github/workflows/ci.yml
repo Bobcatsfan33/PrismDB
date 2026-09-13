@@ -59,11 +59,13 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
   msrv:
+    # TODO: rename to "Rust 1.80 MSRV" together with the required-checks list in
+    # branch protection — the required status check matches this job by exact name.
     name: Rust 1.75 MSRV
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.75.0
+      - uses: dtolnay/rust-toolchain@1.80.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --locked --workspace --all-targets
 
