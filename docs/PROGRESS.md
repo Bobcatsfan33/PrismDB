@@ -178,7 +178,7 @@ customer-scale RPO/RTO and load, external pentest, and operating evidence remain
 
 The database itself now ships the way the coordinator and model service already
 do ([D-093](DECISIONS.md)). [`deploy/prism-shard/Dockerfile`](../deploy/prism-shard/Dockerfile)
-builds the exact `prism shard-serve` binary from a digest-pinned Rust 1.75
+builds the exact `prism shard-serve` binary from a digest-pinned Rust 1.80
 builder into a digest-pinned distroless runtime at UID/GID 65532, and
 [`deploy/helm/prism-shard`](../deploy/helm/prism-shard) deploys it as a
 `StatefulSet` over a headless Service: stable ordinals, stable per-shard DNS,

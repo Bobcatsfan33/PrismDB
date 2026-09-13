@@ -738,7 +738,7 @@ And a delete never touches a frozen artifact: tombstones live on the live catalo
 
 The charter is serde-only, and everything else — CRC-32, SHA-256, the PRNG, the SQL parser, the `statvfs`/`statfs` shim ([S10](MERGE-CONTRACT.md)) — is hand-rolled in-tree and verified against published vectors. The S3 client follows that rule: a **minimal, hand-rolled S3 client** over the subset the engine needs (`GET` with `Range`, `PUT`, conditional `PUT`, `HEAD`, `DELETE`, list, multipart), speaking **HTTP/1.1 over a raw `TcpStream`**, signing with **AWS SigV4** composed from the existing in-tree `sha256` (HMAC-SHA256 is a thirty-line composition over the SHA-256 already verified against FIPS vectors), and parsing the handful of XML fields the responses carry with a small in-tree scanner. Rejected: `aws-sdk-s3` / `object_store` / `reqwest` — each drags in tokio, a TLS stack, hyper, and a hundred transitive crates, and the charter's whole thesis is that the read path of the truth should have an auditable, minimal trusted base. A from-scratch S3 client is more of *our* code, but it is code we can read end to end, and for the path that decides what the database says, that is the trade the charter already made five times.
 
-**The one exception, named honestly: TLS.** A TLS stack is not something to hand-roll — getting it subtly wrong is a security hole, not a bug — so **real S3-over-WAN (HTTPS) is the one place a TLS dependency is required**. That exception is now implemented with `native-tls`: production uses the platform certificate store, verifies the endpoint hostname, requires TLS 1.2 or newer, inherits the transport's bounded socket deadlines, and never falls back to plaintext after a handshake or certificate failure. Version `0.2.13` is pinned because it is the newest release compatible with the repository's declared Rust 1.75 MSRV; upgrading to 0.2.14+ requires an explicit MSRV decision. CI's MinIO remains plain HTTP on loopback so SigV4 and S3 semantics are exercised independently; the insecure constructor rejects non-loopback endpoints. SigV4 also carries and signs `AWS_SESSION_TOKEN` when present, so temporary STS/workload-identity credentials do not silently degrade into an invalid long-lived-key request.
+**The one exception, named honestly: TLS.** A TLS stack is not something to hand-roll — getting it subtly wrong is a security hole, not a bug — so **real S3-over-WAN (HTTPS) is the one place a TLS dependency is required**. That exception is now implemented with `native-tls`: production uses the platform certificate store, verifies the endpoint hostname, requires TLS 1.2 or newer, inherits the transport's bounded socket deadlines, and never falls back to plaintext after a handshake or certificate failure. Version `0.2.13` was pinned as the newest release compatible with the repository's then-declared Rust 1.75 MSRV; that MSRV clause is superseded by [D-097](#d-097--the-msrv-floor-is-decided-on-evidence-and-moves-to-180-not-to-185), which moves the floor to 1.80 and takes `native-tls =0.2.18`. CI's MinIO remains plain HTTP on loopback so SigV4 and S3 semantics are exercised independently; the insecure constructor rejects non-loopback endpoints. SigV4 also carries and signs `AWS_SESSION_TOKEN` when present, so temporary STS/workload-identity credentials do not silently degrade into an invalid long-lived-key request.
 
 **Fail-closed deployment boundary.** Configuring `PRISM_S3_ENDPOINT` through the CLI now selects the
 production transport contract and creates a certificate-validating TLS connector. Plaintext can be
@@ -1067,7 +1067,8 @@ absent.
   certificate from a dedicated coordinator CA. A coordinator requires the
   shard CA and verifies the configured shard DNS name. There is no insecure or
   server-auth-only constructor. `rustls 0.23.35` declares a Rust 1.71 MSRV,
-  below PrismDB's declared Rust 1.75 floor, and unlike the existing
+  below PrismDB's declared Rust floor (1.75 when this decision landed; **1.80**
+  since [D-097](#d-097--the-msrv-floor-is-decided-on-evidence-and-moves-to-180-not-to-185)), and unlike the existing
   `native-tls` server surface can require client certificates. The first 0.21
   implementation was rejected before merge when `cargo audit` found advisories
   in its ring/webpki dependency line. TLS remains the security exception to the
@@ -1409,7 +1410,9 @@ are **not reopened by the implementation**.
   a reused GCM nonce destroys confidentiality *and* authenticity, and no NIST vector detects it.
   D-002's own reasoning ("hand-rolling a JSON parser would be strictly worse") applies with far more
   force to authenticated encryption. Verified before adoption: it builds and round-trips under **MSRV
-  1.75** with `zeroize` pinned at 1.8.1 — the pin the workspace already maintains.
+  1.75** with `zeroize` pinned at 1.8.1 — the pin the workspace already maintained. *(The floor is
+  now **1.80** and `zeroize` is `=1.8.2` under [D-097](#d-097--the-msrv-floor-is-decided-on-evidence-and-moves-to-180-not-to-185); `chacha20poly1305` stays `=0.10.1`,
+  its ciphertext verified byte-identical to 0.11.0's.)*
 - **Encryption is per framed block, never per file**, with the AEAD's associated data binding the
   part id, column, block index, and key id. Whole-file encryption would break three existing
   contracts at once — ranged fetches and the byte fetch budget, per-block CRC named-byte errors, and
@@ -1560,3 +1563,41 @@ not sealing existence-of-distinct-tenants, and this decision does not claim it i
 It does not touch row-content sealing (done, D-095), the backup receipt's bucket ordinal
 (deliberately plaintext), retention/deletion (P13), or key custody — every gate here runs against the
 **software keystore**, proving the code path and not the custody, exactly as `EXT-KMS` records.
+
+## D-097 — The MSRV floor is decided on evidence and moves to 1.80, not to 1.85
+
+**2026-09-05. The MSRV clauses of [D-065](#d-065--the-s3-client-is-hand-rolled-and-tls-is-the-one-honest-exception), [D-088](#d-088--the-shard-boundary-is-read-only-mutual-tls-and-bounded-before-it-is-distributed) and [D-095](#d-095--per-tenant-envelope-encryption-tenant-scoped-deks-a-vetted-aead-per-block-and-a-key-id-in-every-header) are superseded by this record; nothing else in those three decisions changes.** Three Dependabot PRs — [#16](https://github.com/Bobcatsfan33/PrismDB/pull/16) (`native-tls` 0.2.13 → 0.2.18), [#40](https://github.com/Bobcatsfan33/PrismDB/pull/40) (`zeroize` 1.8.1 → 1.9.0), [#41](https://github.com/Bobcatsfan33/PrismDB/pull/41) (`chacha20poly1305` 0.10.1 → 0.11.0) — were all blocked on the same number, and the number had never been argued for.
+
+### The finding that decides this: 1.75 was never a constraint, it was a default
+
+`rust-version = "1.75"` entered the workspace in the S0 scaffold commit (`97e1c1c`, 2026-07-13) with no decision record behind it. D-065, D-088 and D-095 each **cite** the 1.75 floor as a given and derive a pin from it — `native-tls =0.2.13`, the `rustls 0.23.35` MSRV note, `chacha20poly1305 =0.10.1` with `zeroize =1.8.1` — but not one of them argues *for* 1.75. There is no customer platform, distro toolchain, or air-gapped base image anywhere in the repository that requires it: the air-gap profile ([PRISM.md §S15](PRISM.md)) is about **egress and offline model weights**, not toolchain version, and the release images are digest-pinned `rust:*-bookworm` builders whose tag is our choice. A floor nobody argued for is not a constraint to be defended; it is a default to be re-derived, the same way every tuned constant in this engine is ([C-1](#c-1--no-tuned-constant-without-committed-evidence-and-a-test-that-binds-them)).
+
+So the question is not "may we move it?" but "**how far does the evidence justify moving it?**" — and the answer is the plateau rule this project already applies to its own constants ([D-083](DECISIONS.md)): the smallest floor that buys something real, not the largest one available.
+
+### The evidence, re-verified against the published manifests
+
+| crate | proposed | `rust-version` in the published manifest | RUSTSEC | what it buys PrismDB |
+|---|---|---|---|---|
+| `native-tls` | 0.2.18 | **1.80** (0.2.14 was the step; 0.2.17 is **yanked**) | none, at any version | platform cert-store lookup is cached and no longer bails on a probe error (0.2.14); `Protocol::Tlsv13` becomes selectable and `openssl-probe`/Security.framework bindings are refreshed (0.2.16); min/max protocol fallback fix for old OpenSSL (0.2.18) |
+| `zeroize` | 1.9.0 | **1.85** + edition2024 | none | `zeroize_stack`, `optimization_barrier`, `repr(transparent)`, `?Sized` — **none of which this engine calls**. `Zeroizing<[u8; 32]>` and the `Zeroize` trait are the whole surface used |
+| `chacha20poly1305` | 0.11.0 | **1.85** + edition2024 | none | nothing this engine uses; it is the `aead 0.6` / `crypto-common 0.2` / `chacha20 0.10` trait rework, and costs an API migration (`AeadCore::generate_nonce` → `Generate::generate`, `Array::from_slice` deprecated) |
+
+`cargo audit` against the current `Cargo.lock` is **clean** (83 crates, 1239 advisories loaded), and RUSTSEC carries **no advisory for any of the three crates at any version**. Nothing here is security-forced. That is the whole reason this can be decided on merit rather than under pressure.
+
+### The decision
+
+**The floor moves 1.75 → 1.80. `native-tls` moves to `=0.2.18`. `zeroize` moves to `=1.8.2` — not 1.9.0. `chacha20poly1305` stays at `=0.10.1`.**
+
+- **1.80, because `native-tls` earns it.** This is the one dependency the charter made a *security* exception for, on the read path of the truth (D-065), and it is the one of the three with a concrete robustness fix on the exact mechanism D-065 leans on — the platform certificate store. Freezing a TLS stack at a release that predates three years of upstream fixes, because of a number from a scaffold commit, is the wrong side of that trade.
+- **Not 1.85, because nothing earns it.** Both 1.85-requiring bumps buy **zero** identified value to this codebase and neither closes an advisory. And `chacha20poly1305` 0.11.0 would move the AEAD that seals every durable byte onto a freshly-released rework of the RustCrypto core traits — against the grain of D-095, which chose a *vetted* AEAD precisely because AEAD failure modes are the ones test vectors do not catch. Deferring churn on that crate is the conservative reading of D-095, not a departure from it.
+- **`zeroize` goes to 1.8.2, which needs no floor at all.** 1.8.2 declares `rust-version = "1.60"` and its entire diff from 1.8.1 is a docs attribute (`doc_auto_cfg` → `doc_cfg`). It is the newest `zeroize` that fits *any* floor we would plausibly declare, so the workspace is current in that line without paying 1.85 for it. This is the honest partial answer to #40.
+
+**Verified, not assumed, before this record was written:** `chacha20poly1305` 0.10.1 and 0.11.0 were built side by side and given the same key, the same 24-byte nonce, the same AAD and the same plaintext. The ciphertexts are **byte-identical**, each version opens the other's output, the nonce is 24 bytes and the tag 16 bytes in both, and 0.11.0 still rejects a wrong AAD. **The on-disk format and the nonce discipline of [D-095](#d-095--per-tenant-envelope-encryption-tenant-scoped-deks-a-vetted-aead-per-block-and-a-key-id-in-every-header) are unchanged across 0.10 → 0.11.** Staying at 0.10.1 therefore costs no forward compatibility: the day 0.11 is worth taking, every existing sealed block opens under it unchanged. That is what makes deferral safe rather than merely convenient.
+
+### What moves with the floor
+
+`Cargo.toml`'s `rust-version` and every pin comment that named 1.75; the digest-pinned release builders in `deploy/prismd/Dockerfile` and `deploy/prism-shard/Dockerfile` (`rust:1.75.0-bookworm@sha256:87f3b2f9…` → `rust:1.80.0-bookworm@sha256:fcbb950e…`, resolved from the registry, same digest-pinning discipline as [D-070](#d-070--the-minio-ci-gate-is-pinned-by-image-digest-not-latest)); the `RUST_IMAGE` env in both release workflows; and the CI `msrv` job's toolchain (`dtolnay/rust-toolchain@1.75.0` → `@1.80.0`, job name `Rust 1.75 MSRV` → `Rust 1.80 MSRV`). The locked-MSRV job is what keeps this honest: `cargo check --locked --workspace --all-targets` passes on 1.80.0 and **fails on 1.75.0**, so the declared floor is a measured property, not a comment.
+
+### Revisit if
+
+An advisory lands on `chacha20poly1305` 0.10.x or the `zeroize` 1.8 line; or a dependency PrismDB actually needs stops publishing an ≤1.80 release; or a `zeroize`/AEAD capability this engine would genuinely use (`zeroize_stack` on the key cache is the plausible one) becomes worth 1.85. Then the floor moves again, on the same rule: as far as the evidence goes and no further.
