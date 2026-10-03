@@ -477,20 +477,31 @@ jobs:
       # (`assert_cas_capability`) is what catches such a regression — it is the reason we refuse a
       # non-conformant backend loudly rather than fall back to last-writer-wins.
       #
-      # Pulled from quay.io (MinIO's own registry) since 2026-09: Docker Hub's minio/minio
-      # repository was removed upstream, so even digest pulls fail there. Same digests, same bytes.
+      # Registry history: Docker Hub's minio/minio was removed upstream (2026-09), then
+      # quay.io/minio/* went private (401 anonymously, 2026-10) — MinIO has withdrawn
+      # public image distribution entirely. Chainguard's Wolfi builds of upstream MinIO
+      # and mc are the remaining maintained public images. Free tier is :latest-only, so
+      # both are pinned by digest (resolved 2026-10-03); if a pull ever 404s, re-resolve
+      # from cgr.dev/chainguard/{minio,minio-client}:latest. D-070's pin-by-digest
+      # discipline is unchanged; the upstream MinIO version inside tracks Chainguard's
+      # build of current upstream, and `assert_cas_capability` is still what catches a
+      # CAS regression loudly. Both images run as uid 65532 and ship no shell, hence the
+      # pre-made writable data dir and MC_HOST_* env instead of `sh -c "mc alias …"`.
       - name: start MinIO + create bucket
         run: |
+          mkdir -p "$RUNNER_TEMP/minio-data" && chmod 0777 "$RUNNER_TEMP/minio-data"
           docker run -d --name minio -p 9000:9000 \
             -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
-            quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e server /data
+            -v "$RUNNER_TEMP/minio-data:/data" \
+            cgr.dev/chainguard/minio@sha256:4cf4831a2bbcf13ddca09c1cbcc9faff716dd3c4247e0babc32864b8ee8e0034 server /data
           for i in $(seq 1 40); do
             curl -sf http://127.0.0.1:9000/minio/health/live && break
             sleep 2
           done
-          docker run --rm --network host --entrypoint sh \
-            quay.io/minio/mc@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727 -c \
-            "mc alias set local http://127.0.0.1:9000 minioadmin minioadmin && mc mb --ignore-existing local/prism"
+          docker run --rm --network host \
+            -e MC_HOST_local=http://minioadmin:minioadmin@127.0.0.1:9000 \
+            cgr.dev/chainguard/minio-client@sha256:b20bdc339b3f2596c8f731793f861d2445fd13a9a3cfb517ff020969f4e4bf71 \
+            mb --ignore-existing local/prism
       # The hand-rolled S3 client (SigV4-signed HTTP/1.1) against a REAL S3 server — no mock in the
       # path (storage contract §1): round-trip, ranged get, CAS create race (D-066/D-067), capability
       # check. This is the gate that flips S11 from 🟡 to ✅ when green.
