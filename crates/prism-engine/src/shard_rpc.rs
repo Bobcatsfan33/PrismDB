@@ -1082,17 +1082,22 @@ impl HedgedShard {
             // Reserve-or-refuse in one atomic step: a hedge's slot either exists under the cap
             // at the moment of admission or the hedge is never issued. Past the cap the query
             // waits on its original rather than amplifying load during a degradation.
-            let admitted = self
-                .budget
-                .inflight
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
-                    if current >= cap {
-                        None
-                    } else {
-                        Some(current + 1)
-                    }
-                })
-                .is_ok();
+            // A compare-exchange loop rather than `fetch_update`: the latter is deprecated on
+            // current stable in favour of a method the 1.80 MSRV does not have yet.
+            let admitted = loop {
+                let current = self.budget.inflight.load(Ordering::SeqCst);
+                if current >= cap {
+                    break false;
+                }
+                if self
+                    .budget
+                    .inflight
+                    .compare_exchange(current, current + 1, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+                {
+                    break true;
+                }
+            };
             if !admitted {
                 break;
             }
