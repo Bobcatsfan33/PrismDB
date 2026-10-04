@@ -1035,11 +1035,15 @@ impl HedgedShard {
         F: Fn(&TlsShardClient) -> Result<T> + Send + Sync + Clone + 'static,
     {
         let (tx, rx) = std::sync::mpsc::channel::<Result<T>>();
-        let spawn = |budget: Arc<HedgeBudget>,
-                     client: TlsShardClient,
-                     issue: F,
-                     tx: std::sync::mpsc::Sender<Result<T>>| {
-            budget.inflight.fetch_add(1, Ordering::SeqCst);
+        // A racer's in-flight slot is reserved by the CALLER, atomically, before the thread
+        // exists: the blast-radius cap is a bound on what is admitted, so admission must be a
+        // single atomic act. Two stragglers hedging concurrently and both reading the same
+        // pre-admission count was a real race the campaign gate caught in CI — check-then-act
+        // let the total crest the cap.
+        let spawn_reserved = |budget: Arc<HedgeBudget>,
+                              client: TlsShardClient,
+                              issue: F,
+                              tx: std::sync::mpsc::Sender<Result<T>>| {
             std::thread::spawn(move || {
                 let result = issue(&client);
                 budget.inflight.fetch_sub(1, Ordering::SeqCst);
@@ -1048,7 +1052,9 @@ impl HedgedShard {
                 let _ = tx.send(result);
             });
         };
-        spawn(
+        // The original is always admitted — it IS the query's work.
+        self.budget.inflight.fetch_add(1, Ordering::SeqCst);
+        spawn_reserved(
             Arc::clone(&self.budget),
             self.client.clone(),
             issue.clone(),
@@ -1073,10 +1079,24 @@ impl HedgedShard {
         let cap = crate::sharded::effective_max_inflight();
         let mut issued = 0usize;
         for _ in 0..crate::hedge::HEDGE_FANOUT {
-            if self.budget.inflight.load(Ordering::SeqCst) >= cap {
+            // Reserve-or-refuse in one atomic step: a hedge's slot either exists under the cap
+            // at the moment of admission or the hedge is never issued. Past the cap the query
+            // waits on its original rather than amplifying load during a degradation.
+            let admitted = self
+                .budget
+                .inflight
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+                    if current >= cap {
+                        None
+                    } else {
+                        Some(current + 1)
+                    }
+                })
+                .is_ok();
+            if !admitted {
                 break;
             }
-            spawn(
+            spawn_reserved(
                 Arc::clone(&self.budget),
                 self.client.clone(),
                 issue.clone(),
