@@ -53,8 +53,21 @@ grouping is refused, and materialization-time loss removes the shard's scores
 and recomputes global top-k.
 
 This section supersedes the S12 table row's earlier transport-wall wording.
-S12 remains 🟡 because deterministic localhost partition correctness is not an
-independent-host 1→4 scaling result or a latency/jitter/async-hedge campaign.
+The latency/jitter/async-hedge campaign is now run and measured ([D-098](DECISIONS.md)):
+the remote coordinator hedges on the D-079 timing for real — a fragment slower than
+`HEDGE_DELAY_MS` races a duplicate on a fresh mTLS connection, a duplicate inside the
+dedup window is absorbed and compared bit-for-bit, the blast-radius cap suppresses
+rather than amplifies — and the campaign gate (`hedge_transport.rs`, CI job
+"the S12 hedge campaign — an injected tail is cut and no byte changes") holds, over
+real loopback-TLS servers under deterministic rare-huge jitter, that hedging cuts the
+injected p50 from 981 ms to 336 ms while every answer stays byte-identical
+([`s12-hedge-campaign.json`](../testing/evidence/s12-hedge-campaign.json)).
+S12 remains 🟡 for exactly one reason now: an **independent-host 1→4 scaling
+result** is a property of hardware this repository does not have ([D-080](DECISIONS.md));
+the in-process ≤1.6× lower bound neither confirms nor falsifies the ≥3.5× target, and
+the claim is not made. Every code-side S12 property — contract, routing, generation,
+merge, leases, fencing, durability chaos, partial failure, hedging timing — is
+implemented and gated.
 The remote-durable admission log is now implemented as S14 increment 2
 ([D-091](DECISIONS.md)): immutable object-store records carry the ownership
 epoch, are read back before the acknowledgement boundary, and are recovered

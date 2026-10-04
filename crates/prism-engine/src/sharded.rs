@@ -188,7 +188,7 @@ fn shard_is_hedged(si: usize) -> bool {
     INJECTED_HEDGE.lock().expect("hedge lock").contains(&si)
 }
 
-fn effective_max_inflight() -> usize {
+pub(crate) fn effective_max_inflight() -> usize {
     let o = INJECTED_MAX_INFLIGHT.load(std::sync::atomic::Ordering::SeqCst);
     if o == 0 {
         crate::hedge::MAX_INFLIGHT_FRAGMENTS

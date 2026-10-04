@@ -1,0 +1,32 @@
+{
+  "answers": "every run byte-identical to the in-process cluster answer (asserted per run)",
+  "calm": {
+    "max_ms": 90.195208,
+    "p50_ms": 75.109792,
+    "p90_ms": 87.041708
+  },
+  "constants": {
+    "hedge_dedup_window_ms": 200,
+    "hedge_delay_ms": 50,
+    "hedge_fanout": 1,
+    "max_inflight_fragments": 32
+  },
+  "hedges_issued_over_hedged_runs": 39,
+  "jitter": {
+    "rule": "every 5th fragment request",
+    "stall_ms": 900
+  },
+  "jittered_hedged": {
+    "max_ms": 348.528167,
+    "p50_ms": 336.096166,
+    "p90_ms": 345.836917
+  },
+  "jittered_unhedged": {
+    "max_ms": 996.357167,
+    "p50_ms": 981.5420839999999,
+    "p90_ms": 992.491625
+  },
+  "runs_per_config": 40,
+  "substrate": "loopback TCP, one host, in-process ShardRpcServer x2, real rustls mTLS — the timing mechanism's receipt, not a wide-area number",
+  "what": "S12 latency/jitter/async-hedge campaign over the mutual-TLS shard transport (D-098)"
+}

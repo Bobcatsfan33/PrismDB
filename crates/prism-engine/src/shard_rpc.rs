@@ -598,15 +598,19 @@ impl ShardRpcServer {
                     self.engine.search_at(&snapshot, &query)?,
                 )))
             }
-            RpcOperation::Candidates { snapshot, query } => Ok(RpcPayload::Candidates(
-                self.engine
-                    .search_candidates(&self.trusted_snapshot(&snapshot)?, &query)?,
-            )),
+            RpcOperation::Candidates { snapshot, query } => {
+                rpc_fault::maybe_fragment_delay();
+                Ok(RpcPayload::Candidates(self.engine.search_candidates(
+                    &self.trusted_snapshot(&snapshot)?,
+                    &query,
+                )?))
+            }
             RpcOperation::Rerank {
                 snapshot,
                 query,
                 selected,
             } => {
+                rpc_fault::maybe_fragment_delay();
                 let snapshot = self.trusted_snapshot(&snapshot)?;
                 validate_selection_in_snapshot(&snapshot, &selected)?;
                 Ok(RpcPayload::Rerank(
@@ -701,8 +705,61 @@ fn validate_selection_in_snapshot(snapshot: &Snapshot, selected: &[(String, usiz
     Ok(())
 }
 
+/// **Test-only fault and observability seams for the shard RPC boundary.**
+///
+/// The same family as `PRISM_FAULT` and the `inject_*` seams in [`crate::sharded`]: process-global,
+/// inert unless a test arms them, never consulted by any configuration surface. The fragment delay
+/// is what a latency/jitter campaign injects on the *server* side so the client's hedging has a
+/// real straggler to race; the absorbed counter is how a gate observes that a late duplicate was
+/// actually compared bit-for-bit inside the dedup window rather than silently discarded.
+#[doc(hidden)]
+pub mod rpc_fault {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Mutex;
+
+    /// `(every, millis)`: delay every `every`-th **fragment** request (candidates/rerank) by
+    /// `millis`. Deterministic by arrival sequence, so a test's winner/loser schedule is a
+    /// property of the rule, not the scheduler.
+    static FRAGMENT_DELAY: Mutex<Option<(u64, u64)>> = Mutex::new(None);
+    static FRAGMENT_SEQ: AtomicU64 = AtomicU64::new(0);
+    static DUPLICATES_ABSORBED: AtomicU64 = AtomicU64::new(0);
+
+    /// Arm (or clear, with `None`) the server-side fragment delay rule.
+    pub fn inject_fragment_delay(rule: Option<(u64, u64)>) {
+        FRAGMENT_SEQ.store(0, Ordering::SeqCst);
+        *FRAGMENT_DELAY.lock().expect("fragment delay lock") = rule;
+    }
+
+    pub(crate) fn maybe_fragment_delay() {
+        let rule = *FRAGMENT_DELAY.lock().expect("fragment delay lock");
+        if let Some((every, millis)) = rule {
+            let seq = FRAGMENT_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
+            if every > 0 && seq % every == 0 {
+                std::thread::sleep(std::time::Duration::from_millis(millis));
+            }
+        }
+    }
+
+    /// How many hedged duplicates completed inside the dedup window and were compared
+    /// bit-for-bit against their winner (and matched). Test observability only.
+    pub fn hedge_duplicates_absorbed() -> u64 {
+        DUPLICATES_ABSORBED.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn note_duplicate_absorbed() {
+        DUPLICATES_ABSORBED.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Reset counters between campaign phases.
+    pub fn reset_counters() {
+        FRAGMENT_SEQ.store(0, Ordering::SeqCst);
+        DUPLICATES_ABSORBED.store(0, Ordering::SeqCst);
+    }
+}
+
 /// A mutual-TLS shard client. Hostname verification is mandatory and there is no insecure
 /// constructor.
+#[derive(Clone)]
 pub struct TlsShardClient {
     shard_id: usize,
     address: String,
@@ -933,6 +990,177 @@ impl ReadShard for TlsShardClient {
         selected: &[(String, usize)],
     ) -> Result<Vec<(Event, u32)>> {
         TlsShardClient::materialize(self, snapshot.clone(), selected.to_vec())
+    }
+}
+
+/// Per-query hedging bookkeeping shared by every [`HedgedShard`] of one coordinator query:
+/// the blast radius (originals + hedges in flight) and the hedges issued ([D-079](../../../docs/DECISIONS.md)).
+struct HedgeBudget {
+    inflight: AtomicUsize,
+    hedges: AtomicUsize,
+}
+
+/// A per-query hedging wrapper over a [`TlsShardClient`] — **this is where the D-079 timing
+/// constants stop being inert** ([query §21](../../../docs/QUERY-CONTRACT.md)).
+///
+/// The synchronous in-process coordinator has no latency to race, so its hedging is exercised
+/// through a seam. A remote fragment has real latency, so here a fragment (candidates or rerank)
+/// is issued on its own connection and raced for real:
+///
+/// - the original gets [`crate::hedge::HEDGE_DELAY_MS`] to answer; a fragment faster than that is
+///   never hedged, so hedging adds no load in the common case;
+/// - past the delay — and only while the blast radius stays under the in-flight cap — exactly
+///   [`crate::hedge::HEDGE_FANOUT`] hedge(s) are issued on a **fresh connection**, racing the
+///   original; the first result wins;
+/// - the loser's slot stays open for [`crate::hedge::HEDGE_DEDUP_WINDOW_MS`]: a duplicate landing
+///   inside the window is compared to the winner **bit-for-bit** (both ran against the same pinned
+///   snapshot, so divergence is a named invariant violation, never a tie to adjudicate); a
+///   duplicate later than the window is discarded as late, which is the window's documented
+///   meaning. The abandoned connection dies on its own bounded socket deadline (D-088) — nothing
+///   waits for it.
+///
+/// Hedging changes latency and never the answer; the campaign gate holds that as a measured
+/// property over the real TLS transport.
+struct HedgedShard {
+    client: TlsShardClient,
+    budget: Arc<HedgeBudget>,
+}
+
+impl HedgedShard {
+    /// Race a fragment per D-079. `issue` must be a pure re-issuable request against a pinned
+    /// snapshot — that pinning is what makes the hedge free of correctness risk.
+    fn race<T, F>(&self, issue: F) -> Result<T>
+    where
+        T: Serialize + Send + 'static,
+        F: Fn(&TlsShardClient) -> Result<T> + Send + Sync + Clone + 'static,
+    {
+        let (tx, rx) = std::sync::mpsc::channel::<Result<T>>();
+        let spawn = |budget: Arc<HedgeBudget>,
+                     client: TlsShardClient,
+                     issue: F,
+                     tx: std::sync::mpsc::Sender<Result<T>>| {
+            budget.inflight.fetch_add(1, Ordering::SeqCst);
+            std::thread::spawn(move || {
+                let result = issue(&client);
+                budget.inflight.fetch_sub(1, Ordering::SeqCst);
+                // The receiver may be long gone (a late duplicate past the dedup window); a dead
+                // channel is exactly the "discarded as late" outcome and not an error.
+                let _ = tx.send(result);
+            });
+        };
+        spawn(
+            Arc::clone(&self.budget),
+            self.client.clone(),
+            issue.clone(),
+            tx.clone(),
+        );
+
+        // The fast path: the original answers inside the hedge delay and no hedge is ever issued.
+        let hedge_delay = std::time::Duration::from_millis(crate::hedge::HEDGE_DELAY_MS as u64);
+        match rx.recv_timeout(hedge_delay) {
+            Ok(result) => return result,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(PrismError::Invariant(
+                    "a fragment thread exited without reporting its result".into(),
+                ));
+            }
+        }
+
+        // The straggler path. Admission: HEDGE_FANOUT more issues, but only while the whole
+        // query's blast radius stays under the cap — past it, wait on the original rather than
+        // amplifying load during a degradation.
+        let cap = crate::sharded::effective_max_inflight();
+        let mut issued = 0usize;
+        for _ in 0..crate::hedge::HEDGE_FANOUT {
+            if self.budget.inflight.load(Ordering::SeqCst) >= cap {
+                break;
+            }
+            spawn(
+                Arc::clone(&self.budget),
+                self.client.clone(),
+                issue.clone(),
+                tx.clone(),
+            );
+            self.budget.hedges.fetch_add(1, Ordering::SeqCst);
+            issued += 1;
+        }
+        drop(tx);
+
+        // Both racers carry the client's own bounded socket deadline, so this wait is bounded by
+        // the transport contract, with a margin for connect + TLS setup.
+        let total = self.client.timeout * 2 + hedge_delay;
+        let first = match rx.recv_timeout(total) {
+            Ok(result) => result,
+            Err(_) => {
+                return Err(PrismError::Io(format!(
+                    "shard {} fragment produced no result within the transport deadline",
+                    self.client.shard_id
+                )))
+            }
+        };
+        if issued == 0 {
+            return first;
+        }
+        match first {
+            Ok(winner) => {
+                // Hold the loser's slot open for the dedup window; absorb and bit-compare a
+                // duplicate that makes it, discard one that is later than the window.
+                let window =
+                    std::time::Duration::from_millis(crate::hedge::HEDGE_DEDUP_WINDOW_MS as u64);
+                if let Ok(Ok(duplicate)) = rx.recv_timeout(window) {
+                    let a = serde_json::to_vec(&winner)?;
+                    let b = serde_json::to_vec(&duplicate)?;
+                    if a != b {
+                        return Err(PrismError::Invariant(format!(
+                            "a hedged fragment for shard {} diverged from its original against \
+                             the pinned snapshot vector — a fragment must be deterministic for a \
+                             hedge to be free of correctness risk ([D-079](docs/DECISIONS.md))",
+                            self.client.shard_id
+                        )));
+                    }
+                    rpc_fault::note_duplicate_absorbed();
+                }
+                Ok(winner)
+            }
+            Err(first_error) => match rx.recv_timeout(total) {
+                // The first finisher failed; the race is decided by the survivor.
+                Ok(Ok(survivor)) => Ok(survivor),
+                _ => Err(first_error),
+            },
+        }
+    }
+}
+
+impl ReadShard for HedgedShard {
+    fn validate_snapshot(&self, snapshot: &Snapshot) -> Result<()> {
+        self.client.validate_snapshot(snapshot.clone())
+    }
+
+    fn candidates(&self, snapshot: &Snapshot, query: &Query) -> Result<ShardCandidates> {
+        let snapshot = snapshot.clone();
+        let query = query.clone();
+        self.race(move |client| client.candidates(snapshot.clone(), query.clone()))
+    }
+
+    fn rerank(
+        &self,
+        snapshot: &Snapshot,
+        query: &Query,
+        selected: &[(String, usize)],
+    ) -> Result<Vec<ShardScored>> {
+        let snapshot = snapshot.clone();
+        let query = query.clone();
+        let selected = selected.to_vec();
+        self.race(move |client| client.rerank(snapshot.clone(), query.clone(), selected.clone()))
+    }
+
+    fn materialize(
+        &self,
+        snapshot: &Snapshot,
+        selected: &[(String, usize)],
+    ) -> Result<Vec<(Event, u32)>> {
+        self.client.materialize(snapshot.clone(), selected.to_vec())
     }
 }
 
@@ -1221,7 +1449,26 @@ impl RemoteReadCluster {
             }
         }
 
-        Cluster::coordinate_cross_shard(&self.shards, self.dim, self.seed, &vector, query, missing)
+        // Wrap every endpoint in a per-query hedging client (D-079): one shared budget is the
+        // query's blast radius, so a hedge on one shard is visible to the admission check on
+        // every other. The in-process coordinator keeps its seam-driven hedging; this is the
+        // transport's timing-driven real thing.
+        let budget = Arc::new(HedgeBudget {
+            inflight: AtomicUsize::new(0),
+            hedges: AtomicUsize::new(0),
+        });
+        let hedged: Vec<HedgedShard> = self
+            .shards
+            .iter()
+            .map(|client| HedgedShard {
+                client: client.clone(),
+                budget: Arc::clone(&budget),
+            })
+            .collect();
+        let mut result =
+            Cluster::coordinate_cross_shard(&hedged, self.dim, self.seed, &vector, query, missing)?;
+        result.counters.hedges_issued += budget.hedges.load(Ordering::SeqCst);
+        Ok(result)
     }
 
     /// Route a single-tenant batch to its authenticated writable shard.

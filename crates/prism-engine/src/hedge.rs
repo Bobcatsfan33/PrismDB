@@ -6,16 +6,18 @@
 //! the same fragment computed twice is **byte-identical**, and deduplicating the winner from the loser
 //! is trivial — pick either. Hedging therefore changes latency and never the answer.
 //!
-//! Two of these constants are **load-bearing now** (the fan-out cap and the in-flight cap bound the
-//! synchronous coordinator's re-execution and its blast radius); two describe the **timing** a real
-//! asynchronous transport will use (`HEDGE_DELAY_MS`, `HEDGE_DEDUP_WINDOW_MS`) and are inert in the
-//! synchronous coordinator, which has no latency to race — the honest-wall pattern (the idempotence,
-//! dedup, and blast-radius *semantics* ship and are gated; the timing lands with the transport).
+//! All four constants are **load-bearing**: the fan-out cap and the in-flight cap bound every
+//! coordinator's re-execution and blast radius, and the two timing constants (`HEDGE_DELAY_MS`,
+//! `HEDGE_DEDUP_WINDOW_MS`) drive the **remote** coordinator's real races ([D-098](../../../docs/DECISIONS.md),
+//! the per-query hedged client in `shard_rpc`), where a fragment has genuine transport latency.
+//! They remain inert only in the synchronous in-process coordinator, which has no latency to race
+//! and exercises the same semantics through its seam.
 
 /// How long a fragment may run before it is hedged to a second issue. **Policy** — the tail-latency
 /// threshold: long enough that hedging is rare (a fragment that beats it is never hedged, so hedging
-/// adds no load in the common case), short enough to cut a real straggler. Inert in the synchronous
-/// coordinator (there is no latency to wait on); the asynchronous transport will honour it.
+/// adds no load in the common case), short enough to cut a real straggler. The remote coordinator
+/// honours it for real (a fragment slower than this races a hedge on a fresh connection); the
+/// synchronous in-process coordinator has no latency to wait on and leaves it inert.
 pub const HEDGE_DELAY_MS: i64 = 50;
 
 /// The most hedges a single fragment may spawn. **Policy** — one hedge cuts the tail without turning
@@ -24,9 +26,9 @@ pub const HEDGE_DELAY_MS: i64 = 50;
 pub const HEDGE_FANOUT: usize = 1;
 
 /// How long the coordinator holds a fragment's slot open to absorb a duplicate (hedged) response
-/// before discarding it. **Policy** — inert here (the pinned vector makes duplicates byte-identical, so
-/// dedup is by identity and needs no window); the asynchronous transport uses it to bound how long a
-/// late duplicate is still recognised as a duplicate rather than treated as a new fragment.
+/// before discarding it. **Policy** — the remote coordinator honours it for real: a duplicate landing
+/// inside the window is compared to the winner bit-for-bit and absorbed; one landing later is
+/// discarded as late. The in-process coordinator's identity dedup needs no window and leaves it inert.
 pub const HEDGE_DEDUP_WINDOW_MS: i64 = 200;
 
 /// The **blast-radius cap**: the most fragments — originals plus hedges — the coordinator will have in
