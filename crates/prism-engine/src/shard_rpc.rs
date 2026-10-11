@@ -1288,6 +1288,12 @@ pub struct RemoteReadCluster {
     dim: usize,
     seed: u64,
     writable: Vec<bool>,
+    /// Whether reads race timing-driven hedges (D-079/D-098). Production connects hedged;
+    /// [`Self::connect_unhedged`] exists because hedging makes the CONNECTION COUNT of a query
+    /// nondeterministic — an environment that meters exact connections (the fixed-budget test
+    /// servers) or forbids duplicate reads can opt out without changing any answer, which is
+    /// exactly the property the hedge campaign gate proves.
+    hedging: bool,
 }
 
 impl RemoteReadCluster {
@@ -1295,6 +1301,27 @@ impl RemoteReadCluster {
         topology: RemoteReadTopology,
         tls: Arc<ClientConfig>,
         timeout: Duration,
+    ) -> Result<Self> {
+        Self::connect_with_hedging(topology, tls, timeout, true)
+    }
+
+    /// [`Self::connect`] without timing-driven hedges: every read issues exactly one request per
+    /// shard fragment, so the per-query connection count is a function of the query alone.
+    /// Answers are byte-identical to the hedged coordinator (hedge_transport.rs proves it);
+    /// only the tail-latency behaviour differs.
+    pub fn connect_unhedged(
+        topology: RemoteReadTopology,
+        tls: Arc<ClientConfig>,
+        timeout: Duration,
+    ) -> Result<Self> {
+        Self::connect_with_hedging(topology, tls, timeout, false)
+    }
+
+    fn connect_with_hedging(
+        topology: RemoteReadTopology,
+        tls: Arc<ClientConfig>,
+        timeout: Duration,
+        hedging: bool,
     ) -> Result<Self> {
         topology.validate()?;
         let mut endpoints = topology.shards;
@@ -1356,6 +1383,7 @@ impl RemoteReadCluster {
             dim: config.dim,
             seed: config.seed,
             writable: health.iter().map(|item| item.writable).collect(),
+            hedging,
         })
     }
 
@@ -1472,6 +1500,19 @@ impl RemoteReadCluster {
                     )));
                 }
             }
+        }
+
+        // An unhedged coordinator runs the SAME coordinate_cross_shard over the bare clients:
+        // one request per fragment, deterministic connection count, identical answer.
+        if !self.hedging {
+            return Cluster::coordinate_cross_shard(
+                &self.shards,
+                self.dim,
+                self.seed,
+                &vector,
+                query,
+                missing,
+            );
         }
 
         // Wrap every endpoint in a per-query hedging client (D-079): one shared budget is the
@@ -2343,7 +2384,8 @@ mod tests {
     fn remote_coordinator_is_byte_identical_to_the_in_process_cluster() {
         let (root, expected, topology, client_tls, servers) = two_shard_fixture([8, 8]);
         let remote =
-            RemoteReadCluster::connect(topology, client_tls, Duration::from_millis(500)).unwrap();
+            RemoteReadCluster::connect_unhedged(topology, client_tls, Duration::from_millis(500))
+                .unwrap();
         assert_eq!(remote.num_shards(), 2);
         remote.readiness(false).unwrap();
         let error = remote.readiness(true).unwrap_err().to_string();
@@ -2374,7 +2416,8 @@ mod tests {
         // the default failure attempt, one best-effort query, and one refused partial GROUP BY.
         let (root, _, topology, client_tls, servers) = two_shard_fixture([11, 1]);
         let remote =
-            RemoteReadCluster::connect(topology, client_tls, Duration::from_millis(500)).unwrap();
+            RemoteReadCluster::connect_unhedged(topology, client_tls, Duration::from_millis(500))
+                .unwrap();
         let base = Query {
             text: "payment service".into(),
             k: 4,
@@ -2420,7 +2463,8 @@ mod tests {
         // and once again after the coordinator removes shard 1's scores and recomputes the top-k.
         let (root, _, topology, client_tls, servers) = two_shard_fixture([7, 5]);
         let remote =
-            RemoteReadCluster::connect(topology, client_tls, Duration::from_millis(500)).unwrap();
+            RemoteReadCluster::connect_unhedged(topology, client_tls, Duration::from_millis(500))
+                .unwrap();
         let partial = remote
             .search(&Query {
                 text: "payment service".into(),
