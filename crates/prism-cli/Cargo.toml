@@ -24,6 +24,7 @@ zeroize = { workspace = true }
 
 [dev-dependencies]
 prism-types = { workspace = true }
+rustls = { workspace = true }
 prism-part = { workspace = true }
 prism-sql = { workspace = true }
 prism-engine = { workspace = true }

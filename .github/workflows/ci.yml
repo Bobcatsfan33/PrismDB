@@ -69,6 +69,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --locked --workspace --all-targets
 
+  hedge-campaign:
+    # The named-gate discipline (the encryption-gates lesson in PROGRESS.md): the workspace
+    # test jobs run this binary too, but the S12 hedge campaign verdict must be findable in
+    # the checks list by name, not buried in a 50-minute suite.
+    name: the S12 hedge campaign — an injected tail is cut and no byte changes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p prism-cli --test hedge_transport -- --nocapture
+
   test:
     name: tests (${{ matrix.profile }})
     runs-on: ubuntu-latest

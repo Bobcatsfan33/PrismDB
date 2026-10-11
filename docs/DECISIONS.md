@@ -1601,3 +1601,29 @@ So the question is not "may we move it?" but "**how far does the evidence justif
 ### Revisit if
 
 An advisory lands on `chacha20poly1305` 0.10.x or the `zeroize` 1.8 line; or a dependency PrismDB actually needs stops publishing an ≤1.80 release; or a `zeroize`/AEAD capability this engine would genuinely use (`zeroize_stack` on the key cache is the plausible one) becomes worth 1.85. Then the floor moves again, on the same rule: as far as the evidence goes and no further.
+
+## D-098 — The hedge timing is honoured for real over the transport, and the campaign is measured
+
+**2026-10-04. Completes the §21 hedging story [D-079](DECISIONS.md) deliberately left half-told.** D-079 shipped the hedge *semantics* — idempotence against the pinned vector, bit-for-bit dedup, the blast-radius cap — and declared the two *timing* constants (`HEDGE_DELAY_MS`, `HEDGE_DEDUP_WINDOW_MS`) "the asynchronous transport's, named and inert here", because the synchronous in-process coordinator has no latency to race. The transport exists now ([D-088](DECISIONS.md)/[D-089](DECISIONS.md)), so the deferral is spent.
+
+### The decision
+
+**The remote coordinator hedges on time, not on a seam.** `RemoteReadCluster` wraps every endpoint, per query, in a hedging client sharing one blast-radius budget:
+
+- a fragment (candidates or rerank) faster than `HEDGE_DELAY_MS` is **never** hedged — the un-jittered campaign phase holds `hedges_issued == 0`, so hedging adds no load in the common case;
+- past the delay, and only while the whole query's in-flight count stays under the cap, exactly `HEDGE_FANOUT` duplicate(s) race the original **on a fresh connection** — a new TCP+TLS session, because the stall being hedged may *be* the connection;
+- the first result wins; the loser's slot stays open for `HEDGE_DEDUP_WINDOW_MS`, and a duplicate landing inside it is **compared bit-for-bit** (divergence against a pinned snapshot is a named invariant violation, never a tie to adjudicate) — a later one is discarded as late, and its abandoned connection dies on its own D-088 socket deadline. The bounded window is the price of keeping divergence a *query-failing* check rather than a log line; it is paid only on hedged (rare) fragments.
+
+The in-process coordinator is unchanged: no latency to race, same semantics through its seam, timing constants inert there — that half of the honest wall was never the debt.
+
+### The campaign, and its receipt
+
+`hedge_transport.rs` (its own binary; the fault seams are process-global) drives real `ShardRpcServer`s over loopback mutual TLS with a deterministic server-side jitter: **every 5th fragment request stalls 900 ms** — rare and huge, the p99 shape hedging exists for, with the stall spacing chosen so a stalled original's hedge can never itself draw a stall. Four phases, every answer in every phase asserted byte-identical to the in-process cluster: calm (no hedges issued), jittered-unhedged (slow and still exact), jittered-hedged (**p50 981 ms → 336 ms**, a 2.9× cut, hedges actually issued), and the window/cap phase (a duplicate inside the window is observably absorbed and compared; the cap suppresses hedging rather than amplifying a slow cluster). The measured receipt is [`s12-hedge-campaign.json`](../testing/evidence/s12-hedge-campaign.json) (release, 40 runs per configuration), and its substrate is named honestly: loopback TCP on one host — the **timing mechanism's** receipt, not a wide-area number. Fail-red mutations, both verified: suppress the hedge issue → the campaign's hedge phase goes red; drop the absorption accounting → the window phase goes red.
+
+### What this does and does not close
+
+It closes the "latency/jitter/async-hedge campaign" half of the S12 🟡. It does **not** touch the other half: an independent-host 1→4 scaling run is a property of hardware this repository does not have, remains the honest wall [D-080](DECISIONS.md) recorded (the in-process ≤1.6× lower bound neither confirms nor falsifies ≥3.5×), and is not claimed.
+
+### Revisit if
+
+A real deployment measures hedge-fire rates high enough that `HEDGE_DELAY_MS=50` is mis-tuned for its latency floor (the constant is policy, C-1-registered, and should then be re-derived against that deployment's p99, not guessed); or `HEDGE_FANOUT > 1` ever looks tempting — bring a measurement showing one hedge insufficient, because every additional issue multiplies load exactly when the cluster is degraded.
