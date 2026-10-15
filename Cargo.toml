@@ -48,7 +48,7 @@ chacha20poly1305 = { version = "=0.10.1", default-features = false, features = [
 # edition2024 and which Cargo 1.80 cannot even parse. `Zeroizing<T>` and the trait cover the key
 # cache without the proc macro. 1.8.2 declares Rust 1.60 and is the newest release in the line that
 # fits the floor; it changes only a docs attribute.
-zeroize = { version = "=1.8.2", default-features = false, features = ["alloc"] }
+zeroize = { version = "=1.9.1", default-features = false, features = ["alloc"] }
 # Cargo.lock intentionally holds tempfile 3.10.1, openssl 0.10.75, and
 # openssl-sys 0.9.111: newer semver-compatible releases in these lines require
 # Cargo/rustc newer than the declared MSRV. The locked Linux MSRV CI job
